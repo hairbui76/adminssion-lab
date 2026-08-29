@@ -1,0 +1,10 @@
+# Build output
+/target
+
+# Local agent config and scratch — must not enter this OSS repo
+.claude/
+.superpowers/
+
+# Editor/OS cruft
+.DS_Store
+*.swp

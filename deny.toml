@@ -1,0 +1,34 @@
+# cargo-deny configuration for Admission Lab.
+#
+# Schema reference: https://embarkstudios.github.io/cargo-deny/index.html
+# Validated against cargo-deny 0.20.2 via `cargo deny check`.
+
+[licenses]
+# Permissive licenses compatible with this project's own Apache-2.0
+# license. A dependency whose license is not in this list fails the check;
+# add exceptions here only with a comment explaining why they are safe.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+# Multiple versions of the same crate in the graph are noisy but not
+# inherently unsafe on their own; keep this a warning rather than a hard
+# failure so it doesn't block CI on transitive-dependency churn.
+multiple-versions = "warn"
+
+[sources]
+# Reject any dependency pulled from a git repository or crate registry that
+# is not explicitly allow-listed below. Only the crates.io index is allowed
+# and no git sources are allow-listed, so any git dependency is rejected by
+# default until a specific exception is added here with a comment.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
