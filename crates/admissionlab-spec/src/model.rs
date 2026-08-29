@@ -25,6 +25,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use schemars::JsonSchema;
 use serde::Deserialize;
 
 /// The only `apiVersion` value [`crate::load_lab`] accepts.
@@ -39,7 +40,7 @@ pub const KIND: &str = "Lab";
 /// value — because rejecting the wrong value is a semantic check, not a
 /// syntactic one; [`crate::load_lab`] validates them against
 /// [`API_VERSION`] and [`KIND`] immediately after deserializing.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LabSpec {
     /// Must equal [`API_VERSION`]; checked by [`crate::load_lab`].
@@ -66,7 +67,7 @@ pub struct LabSpec {
 
 /// One side (baseline or candidate) of a comparison: a Kubernetes version
 /// plus the extra components installed on top of it.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct EnvironmentSpec {
     /// The Kubernetes version to provision, for example `"1.30.4"`. Must
@@ -84,7 +85,7 @@ pub struct EnvironmentSpec {
 /// This is the **user-facing YAML form**. Task 2.1 defines a separate
 /// resolved component model; this type only carries what a user writes
 /// by hand.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComponentSpec {
     /// The component's name, used to correlate it with its counterpart in
@@ -138,7 +139,7 @@ pub struct ComponentSpec {
 ///
 /// and a strict one: an unrecognized `type` or a misspelled field inside
 /// the variant is still a loud, named error.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
 pub enum InstallMethodSpec {
     /// Install via a Helm chart.
@@ -148,7 +149,7 @@ pub enum InstallMethodSpec {
 }
 
 /// Install method: a Helm chart.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HelmInstallSpec {
     /// The chart reference passed to `helm install` (a repo-relative
@@ -171,7 +172,7 @@ pub struct HelmInstallSpec {
 }
 
 /// Install method: a fixed set of raw Kubernetes manifests.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestsInstallSpec {
     /// Manifest file or directory paths. **Not yet resolved** — see
@@ -181,7 +182,7 @@ pub struct ManifestsInstallSpec {
 }
 
 /// Which fixtures to replay through both environments.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct FixtureSelectionSpec {
     /// Glob patterns selecting fixture files, resolved by
@@ -197,7 +198,7 @@ pub struct FixtureSelectionSpec {
 /// Every field defaults independently, so a user who wants the tool's
 /// defaults everywhere may omit `policy` from their configuration
 /// entirely (see [`LabSpec::policy`]).
-#[derive(Debug, Clone, PartialEq, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct PolicySpec {
     /// Regression categories that fail the run when observed. A
@@ -220,7 +221,7 @@ pub struct PolicySpec {
 /// `path` names a location *within* the compared object (for example a
 /// JSON-pointer-like field path), not a filesystem path, so it is never
 /// resolved against the configuration file's directory.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PolicyOverrideSpec {
     /// The regression category this override applies to (matches a
@@ -255,13 +256,14 @@ pub struct PolicyOverrideSpec {
 /// default `{secs, nanos}` object representation for [`Duration`] — that
 /// default is correct for machine-to-machine formats but not for a
 /// configuration file a person hand-writes.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct LatencyPolicy {
     /// The absolute latency increase, in milliseconds, tolerated before a
     /// candidate observation counts as a regression. Defaults to zero
     /// (no tolerance) when `policy.latency` is omitted.
-    #[serde(deserialize_with = "duration_millis::deserialize")]
+    #[serde(with = "duration_millis")]
+    #[schemars(with = "u64")]
     pub absolute_increase: Duration,
     /// The multiplier on baseline latency tolerated before a candidate
     /// observation counts as a regression. Defaults to `1.0` (no
@@ -278,12 +280,27 @@ impl Default for LatencyPolicy {
     }
 }
 
-/// Deserializes [`Duration`] from a plain integer number of milliseconds,
-/// for [`LatencyPolicy::absolute_increase`].
+/// Serializes/deserializes [`Duration`] as a plain integer number of
+/// milliseconds, for [`LatencyPolicy::absolute_increase`].
+///
+/// Paired with `#[schemars(with = "u64")]` on the field so the generated
+/// JSON Schema describes this same integer representation rather than
+/// `Duration`'s own `{secs, nanos}` schema.
 mod duration_millis {
     use std::time::Duration;
 
-    use serde::{Deserialize, Deserializer};
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(
+        value: &Duration,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        // `as_millis()` returns `u128`; saturate rather than `as`-cast so
+        // a (practically impossible, multi-million-year) overflow clamps
+        // to `u64::MAX` instead of silently wrapping.
+        let millis = u64::try_from(value.as_millis()).unwrap_or(u64::MAX);
+        millis.serialize(serializer)
+    }
 
     pub(super) fn deserialize<'de, D: Deserializer<'de>>(
         deserializer: D,

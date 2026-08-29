@@ -1,12 +1,15 @@
 #![forbid(unsafe_code)]
 //! The `v1alpha1` `admissionlab.yaml` configuration contract: the model
-//! users hand-write, a strict loader, and path/semantic resolution.
+//! users hand-write, a strict loader, path/semantic resolution, and JSON
+//! Schema generation for editor completion and validation.
 //!
 //! - [`model`] defines the raw, as-written shape ([`LabSpec`] and
 //!   everything it references).
 //! - [`load_lab`] reads and strictly parses a configuration file.
 //! - [`resolve_lab`] validates a loaded configuration and resolves every
 //!   relative path inside it against that file's own directory.
+//! - [`v1alpha1_json_schema`] generates the JSON Schema checked in at
+//!   `schemas/admissionlab-v1alpha1.json`.
 //!
 //! This crate defines the configuration *contract* only. It does not
 //! implement recipe resolution, installers, fixture discovery, policy
@@ -19,6 +22,7 @@ pub mod error;
 pub mod load;
 pub mod model;
 pub mod resolve;
+pub mod schema;
 mod validate;
 
 pub use error::SpecError;
@@ -32,3 +36,4 @@ pub use resolve::{
     LoadedLab, ResolvedComponent, ResolvedEnvironment, ResolvedFixtureSelection, ResolvedLab,
     resolve_lab,
 };
+pub use schema::v1alpha1_json_schema;

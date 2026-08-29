@@ -1,0 +1,288 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LabSpec",
+  "description": "The root of an `admissionlab.yaml` configuration file.\n\n`api_version` and `kind` are plain strings here — parsing accepts any\nvalue — because rejecting the wrong value is a semantic check, not a\nsyntactic one; [`crate::load_lab`] validates them against\n[`API_VERSION`] and [`KIND`] immediately after deserializing.",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "description": "Must equal [`API_VERSION`]; checked by [`crate::load_lab`].",
+      "type": "string"
+    },
+    "baseline": {
+      "description": "The unmodified stack being compared against.",
+      "$ref": "#/$defs/EnvironmentSpec"
+    },
+    "candidate": {
+      "description": "The stack under test for regressions.",
+      "$ref": "#/$defs/EnvironmentSpec"
+    },
+    "expectationsFile": {
+      "description": "Path to an expectations file, resolved by [`crate::resolve_lab`]\nagainst this configuration file's own directory — see that\nfunction's documentation for why the working directory is never\nused for this.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "fixtures": {
+      "description": "Which fixtures to replay through both environments.",
+      "$ref": "#/$defs/FixtureSelectionSpec"
+    },
+    "kind": {
+      "description": "Must equal [`KIND`]; checked by [`crate::load_lab`].",
+      "type": "string"
+    },
+    "policy": {
+      "description": "Regression policy. Omit entirely to accept every field's default\n(see [`PolicySpec`]'s `Default` impl).",
+      "$ref": "#/$defs/PolicySpec"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "baseline",
+    "candidate",
+    "fixtures"
+  ],
+  "$defs": {
+    "ComponentSpec": {
+      "description": "One admission-stack component to install into an [`EnvironmentSpec`].\n\nThis is the **user-facing YAML form**. Task 2.1 defines a separate\nresolved component model; this type only carries what a user writes\nby hand.",
+      "type": "object",
+      "properties": {
+        "install": {
+          "description": "How to install this component, if not driven entirely by\n`recipe`. Any relative paths inside it (`HelmInstallSpec::values_files`,\n`ManifestsInstallSpec::paths`) are carried through exactly as\nwritten by this task — resolving them against the configuration\nfile's directory is part of Task 2.1's full resolved component\nmodel, along with the rest of this field's resolution.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstallMethodSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "description": "The component's name, used to correlate it with its counterpart in\nthe other environment and to detect duplicates. Required by\n[`crate::resolve_lab`] until recipe-derived naming exists (Task\n2.5) — currently the only source of a resolved name.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "recipe": {
+          "description": "A named recipe to install this component from. Recipe resolution\nis Task 2.5's responsibility; this task only carries the name\nthrough unresolved.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "version": {
+          "description": "The component's version, in whatever form its install method\nunderstands (a Helm chart version, an image tag, and so on).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnvironmentSpec": {
+      "description": "One side (baseline or candidate) of a comparison: a Kubernetes version\nplus the extra components installed on top of it.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "Components to install on top of the base cluster, in installation\norder. Empty by default: a bare Kubernetes cluster with no extra\ncomponents is a valid environment.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentSpec"
+          }
+        },
+        "kubernetes": {
+          "description": "The Kubernetes version to provision, for example `\"1.30.4\"`. Must\nnot be empty — validated by [`crate::resolve_lab`].",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kubernetes"
+      ]
+    },
+    "FixtureSelectionSpec": {
+      "description": "Which fixtures to replay through both environments.",
+      "type": "object",
+      "properties": {
+        "include": {
+          "description": "Glob patterns selecting fixture files, resolved by\n[`crate::resolve_lab`] against this configuration file's own\ndirectory. Must not be empty — validated by [`crate::resolve_lab`].",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "InstallMethodSpec": {
+      "description": "The user-facing YAML form of a component's install method.\n\nThis is intentionally minimal: enough to express the two Alpha\ninstallers — a Helm chart, or a fixed set of raw manifests — exactly\nas a user would write them by hand. Task 2.1 defines the separate\n*resolved* `InstallMethod` the installer actually consumes; the two\nare distinct types by design and must not be merged or aliased.\n\nRepresented as an internally tagged enum (a `type` discriminant field\nalongside the variant's own fields), not the more common\nexternally-tagged `{helm: {...}}` shape: `serde_yaml`/`serde_norway`\nonly support externally tagged enums via an explicit YAML type tag\n(`!Helm ...`), not a wrapping single-key mapping, so external tagging\ncannot represent this the way a hand-written YAML config wants to.\nInternally tagged enums use a format-agnostic buffering strategy that\nworks with a plain mapping, giving both a natural YAML shape:\n\n```yaml\ninstall:\n  type: helm\n  chart: cert-manager\n  repo: https://charts.jetstack.io\n```\n\nand a strict one: an unrecognized `type` or a misspelled field inside\nthe variant is still a loud, named error.",
+      "oneOf": [
+        {
+          "description": "Install via a Helm chart.",
+          "type": "object",
+          "properties": {
+            "chart": {
+              "description": "The chart reference passed to `helm install` (a repo-relative\nchart name, a local path, or an `oci://` reference).",
+              "type": "string"
+            },
+            "repo": {
+              "description": "The Helm repository URL to add/use, if `chart` is a bare chart\nname rather than a path or `oci://` reference.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "helm"
+            },
+            "valuesFiles": {
+              "description": "Values override files. **Not yet resolved against the\nconfiguration file's directory** — [`crate::resolve_lab`] does not\ndescend into `install` (see [`ComponentSpec::install`]); these\npaths are exactly as written until Task 2.1's resolved component\nmodel resolves them.",
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "version": {
+              "description": "The chart version constraint passed to `helm install --version`.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "chart"
+          ]
+        },
+        {
+          "description": "Install a fixed set of raw Kubernetes manifests.",
+          "type": "object",
+          "properties": {
+            "paths": {
+              "description": "Manifest file or directory paths. **Not yet resolved** — see\n[`HelmInstallSpec::values_files`]'s documentation; the same\napplies here.",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "manifests"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "paths"
+          ]
+        }
+      ]
+    },
+    "LatencyPolicy": {
+      "description": "Thresholds below which a latency increase from baseline to candidate is\nnot itself treated as a regression.\n\nA candidate observation only counts as a latency regression once it\nexceeds *both* thresholds: `baseline + absolute_increase` and\n`baseline * relative_multiplier`. Exact evaluation semantics are Task\n4.8's responsibility; this type only carries the configured values.\n\n`absolute_increase` is written in YAML as a plain integer number of\nmilliseconds (for example `absoluteIncrease: 50`), not `serde`'s\ndefault `{secs, nanos}` object representation for [`Duration`] — that\ndefault is correct for machine-to-machine formats but not for a\nconfiguration file a person hand-writes.",
+      "type": "object",
+      "properties": {
+        "absoluteIncrease": {
+          "description": "The absolute latency increase, in milliseconds, tolerated before a\ncandidate observation counts as a regression. Defaults to zero\n(no tolerance) when `policy.latency` is omitted.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 0,
+          "minimum": 0
+        },
+        "relativeMultiplier": {
+          "description": "The multiplier on baseline latency tolerated before a candidate\nobservation counts as a regression. Defaults to `1.0` (no\ntolerance) when `policy.latency` is omitted.",
+          "type": "number",
+          "format": "double",
+          "default": 1.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "PolicyOverrideSpec": {
+      "description": "One targeted exception to the blanket [`PolicySpec::fail_on`] policy.\n\n`fixtures`, `subject`, and `path` narrow which regressions this\noverride applies to; omitting one leaves that dimension unrestricted.\n`path` names a location *within* the compared object (for example a\nJSON-pointer-like field path), not a filesystem path, so it is never\nresolved against the configuration file's directory.",
+      "type": "object",
+      "properties": {
+        "fixtures": {
+          "description": "Restrict this override to fixtures matching this pattern.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "kind": {
+          "description": "The regression category this override applies to (matches a\n[`PolicySpec::fail_on`] entry).",
+          "type": "string"
+        },
+        "path": {
+          "description": "Restrict this override to a specific field path within the\ncompared object.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "severity": {
+          "description": "The severity to report this regression as when the override\napplies, instead of failing the run outright.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "Restrict this override to a specific admission subject (webhook,\ncontroller, or similar).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "severity"
+      ]
+    },
+    "PolicySpec": {
+      "description": "The regression policy: which categories of behavioral difference fail\nthe run, targeted overrides, and latency-regression thresholds.\n\nEvery field defaults independently, so a user who wants the tool's\ndefaults everywhere may omit `policy` from their configuration\nentirely (see [`LabSpec::policy`]).",
+      "type": "object",
+      "properties": {
+        "failOn": {
+          "description": "Regression categories that fail the run when observed. A\n[`BTreeSet`] rather than a `Vec` so a duplicated entry collapses\nsilently and the serialized/schema representation has a\ndeterministic order. Semantics of what belongs in this set (which\ncategory names are meaningful) are Task 4.8's responsibility.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "latency": {
+          "description": "Thresholds below which a latency increase is not itself treated as\na regression.",
+          "$ref": "#/$defs/LatencyPolicy"
+        },
+        "overrides": {
+          "description": "Targeted exceptions to the blanket `fail_on` policy.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PolicyOverrideSpec"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}
