@@ -12,12 +12,41 @@ workspace = true
 name = "admissionlab"
 path = "src/main.rs"
 
+[features]
+# Preview surface for `doctor --deep` (the real cluster create/delete
+# probe lands in Task 1.9). Off by default, so a normal build — a plain
+# `cargo build`, a release build, or the default `cargo test` — never
+# exposes `--deep` at all: it is not on `DoctorArgs`, so passing it is a
+# plain Clap "unexpected argument" error and it never appears in
+# `--help`. This is Task 1.4's literal "hide the flag from release
+# builds via feature/test wiring rather than pretending it works" — enable
+# it only to exercise the honest "not available yet" refusal in tests
+# (`cargo test --features unstable-doctor-deep`); Task 1.9 removes this
+# feature gate entirely once it implements the real probe.
+unstable-doctor-deep = []
+
 [dependencies]
+# Read-only lookup of the Kubernetes compatibility matrix
+# (`compatibility/kubernetes.yaml`) for `doctor`'s kubectl client/server
+# skew warning. Safe to depend on from here despite also depending on
+# `admissionlab-core`: `admissionlab-cluster` does not (and, to avoid a
+# cycle when it later needs `ProcessRunner`, must not) depend back on
+# `admissionlab-core`, and nothing depends on this bin-only crate, so
+# `admissionlab-cli -> {admissionlab-core, admissionlab-cluster}` can
+# never become a cycle.
+admissionlab-cluster = { workspace = true }
 admissionlab-core = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
+# `rt` only: `doctor` drives `admissionlab-core`'s async `ProcessRunner`
+# calls from a hand-rolled `Builder::new_current_thread().block_on(..)`
+# runtime (mirroring `admissionlab-core`'s own `tests/artifact.rs`)
+# rather than `#[tokio::main]`, so this crate never needs the `macros`
+# feature.
+tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+async-trait = { workspace = true }
 predicates = { workspace = true }

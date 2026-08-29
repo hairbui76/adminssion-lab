@@ -36,6 +36,16 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 
+# `tool.rs`'s disk-space check needs `statvfs`, which has no safe std
+# wrapper and no portable equivalent outside Unix. `nix` provides a safe
+# (non-`unsafe`) wrapper, so it is scoped to `cfg(unix)` here rather than
+# declared as an unconditional dependency: on a non-Unix target it is
+# never fetched or built at all, matching `tool.rs`'s `#[cfg(not(unix))]`
+# fallback, which reports the check as indeterminate rather than calling
+# into this crate.
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+
 # `tests/process.rs` re-invokes itself as a child process to test the
 # runner in this crate without depending on any external binary (see
 # that file's module doc). Doing so requires full control over `fn

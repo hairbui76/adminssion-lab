@@ -8,11 +8,17 @@ license = "Apache-2.0"
 repository = "https://github.com/hairbui76/adminssion-lab"
 
 [workspace.dependencies]
+admissionlab-cluster = { path = "crates/admissionlab-cluster" }
 admissionlab-core = { path = "crates/admissionlab-core" }
 assert_cmd = "2.2.2"
 async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive"] }
 globset = "0.4.20"
+# Safe, non-`unsafe` access to POSIX `statvfs` (`admissionlab-core`'s
+# doctor disk-space check). Unix-only crate: every consumer pulls it in
+# through a `[target.'cfg(unix)'.dependencies]` table rather than an
+# unconditional one, so it is never even fetched for a non-Unix target.
+nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 predicates = "3.1.4"
 schemars = "1.2.2"
 serde = "1.0.229"

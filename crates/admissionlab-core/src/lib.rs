@@ -6,6 +6,7 @@ pub mod error;
 pub mod ids;
 pub mod process;
 pub mod side;
+pub mod tool;
 
 pub use artifact::{ArtifactError, ArtifactStore, RunDisposition, RunPaths};
 pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue};
@@ -15,6 +16,10 @@ pub use process::{
     CommandContext, CommandResult, CommandSpec, ProcessError, ProcessRunner, TokioProcessRunner,
 };
 pub use side::Side;
+pub use tool::{
+    DISK_WARNING_THRESHOLD_BYTES, DoctorReport, ToolName, ToolStatus, collect_doctor_report,
+    disk_space_warning, probe_tool,
+};
 
 /// Returns this crate's package identity.
 ///

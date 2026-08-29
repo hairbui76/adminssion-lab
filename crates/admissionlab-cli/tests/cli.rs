@@ -10,6 +10,13 @@
 //! constraint on `test`: at this phase of Admission Lab, `test` has no
 //! pipeline behind it, and it must never look like it created clusters,
 //! installed anything, or compared baseline/candidate behavior.
+//!
+//! `doctor`'s own command-surface tests live in `tests/doctor.rs`
+//! instead of here: unlike `test`, `doctor` is implemented (Task 1.4)
+//! and its tests need a controlled `PATH` of fake `kind`/`kubectl`/
+//! `helm`/`docker` stand-ins so they never depend on — or execute — the
+//! real tools that may or may not be installed on whatever machine runs
+//! this suite.
 
 use predicates::prelude::*;
 
@@ -39,48 +46,19 @@ fn verbose_flag_is_accepted_globally() {
     // (`output::init_tracing`). Placing it before the subcommand exercises
     // `global = true`; seeing our own "not implemented" message (rather
     // than Clap's "unexpected argument" usage error) proves it parsed.
+    // Uses `test` rather than `doctor` here specifically: `doctor` is
+    // implemented (Task 1.4) and would otherwise shell out to whatever
+    // real `kind`/`kubectl`/`helm`/`docker` happen to be on this
+    // process's real `PATH`, which this file must never do (see
+    // `tests/doctor.rs`), while `test` remains "not implemented" and
+    // untouched by this task.
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.arg("--verbose")
-        .arg("doctor")
+        .arg("test")
+        .arg("somefile.yaml")
         .assert()
         .failure()
         .stderr(predicates::str::contains("not implemented"));
-}
-
-#[test]
-fn doctor_is_reachable_and_reports_not_implemented() {
-    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
-    cmd.arg("doctor")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("not implemented"))
-        .stdout(predicates::str::contains("PASS").not())
-        .stdout(predicates::str::contains("prerequisite").not());
-}
-
-#[test]
-fn doctor_deep_flag_parses() {
-    // If `--deep` were not a recognized flag, Clap would reject it with
-    // its own usage error instead of ever reaching our command handler,
-    // so seeing our message (not Clap's) proves the flag was accepted.
-    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
-    cmd.arg("doctor")
-        .arg("--deep")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("not implemented"));
-}
-
-#[test]
-fn doctor_command_exits_with_the_internal_error_code() {
-    // Mirrors `test_command_exits_with_the_internal_error_code` below:
-    // `doctor` and `test` both route through the same `not_implemented`
-    // helper (`commands::not_implemented`), so both must be pinned to the
-    // same exit code (6, `RunDisposition::InternalError`'s discriminant).
-    // Without this, a future edit that gives `doctor` a different
-    // disposition than `test` could pass unnoticed.
-    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
-    cmd.arg("doctor").assert().code(6);
 }
 
 #[test]
