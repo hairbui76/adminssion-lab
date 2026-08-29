@@ -101,10 +101,17 @@ async fn run_with(
     let mut report = collect_doctor_report(runner, disk_check_path).await;
     apply_kubectl_skew_warning(&mut report);
     let platform_diagnostic = platform_support_diagnostic(std::env::consts::OS);
+    // Computed exactly once and threaded into `render_summary` below,
+    // rather than each recomputing `meets_prerequisites() &&
+    // platform_diagnostic.is_none()` independently: two copies of the
+    // same condition can drift if one is edited and not the other,
+    // which would let the printed summary and the process exit code
+    // disagree with each other.
+    let prerequisites_met = report.meets_prerequisites() && platform_diagnostic.is_none();
 
     println!(
         "{}",
-        render_summary(&report, platform_diagnostic.as_deref())
+        render_summary(&report, platform_diagnostic.as_deref(), prerequisites_met)
     );
 
     if let Some(notice) = deep_probe_notice(args) {
@@ -114,7 +121,7 @@ async fn run_with(
         return exit::code_for_disposition(RunDisposition::InternalError);
     }
 
-    if report.meets_prerequisites() && platform_diagnostic.is_none() {
+    if prerequisites_met {
         exit::code_for_disposition(RunDisposition::Passed)
     } else {
         exit::code_for_disposition(RunDisposition::InvalidInput)
@@ -262,11 +269,23 @@ fn minor_distance(client: (u32, u32), other: (u32, u32)) -> u32 {
 // Host platform support.
 // ---------------------------------------------------------------------
 
-/// Platforms Admission Lab is built and tested for — this repository's
-/// own cross-compilation targets (see `rust-toolchain.toml`'s installed
-/// targets: `x86_64-unknown-linux-gnu`, `x86_64-apple-darwin`,
-/// `x86_64-pc-windows-msvc`) map to these three `std::env::consts::OS`
-/// values.
+/// Platforms this check treats as supported.
+///
+/// Linux is this project's own development and CI platform
+/// (`.github/workflows/ci.yml` and `integration.yml` both run on
+/// `ubuntu-latest`). `ROADMAP.md`'s Task 4.16 Step 4 commits to a
+/// release workflow "building signed/checksummed binaries for Linux
+/// amd64/arm64 and macOS amd64/arm64" (ROADMAP.md:2747), so macOS
+/// belongs here on the same real, in-repo commitment — not because any
+/// macOS CI job exists yet (it does not: Task 9.7/10.1 add that later).
+/// Windows is listed too, but on weaker grounds, stated honestly rather
+/// than invented: ROADMAP.md:2749 says plainly that "Windows native
+/// support is not a v1 commitment because kind/Docker behavior differs;
+/// Windows users may use WSL2" — and a WSL2 invocation already reports
+/// `std::env::consts::OS` as `"linux"`, covered by the first entry
+/// anyway. Keeping `"windows"` here is a deliberately lenient default
+/// for the rare *native* invocation this shallow check has no stronger
+/// basis to reject outright, given PRODUCT.md §34 does not ask it to.
 ///
 /// `DoctorReport` has no field for this (Task 1.4's interface is fixed
 /// to `tools`/`docker_reachable`/`disk_warning`), so the check lives
@@ -299,9 +318,20 @@ fn platform_support_diagnostic(os: &str) -> Option<String> {
 /// Renders `report` (plus `platform_diagnostic`, if any) as the summary
 /// `run_with` prints to stdout.
 ///
+/// `prerequisites_met` is taken as a parameter, computed once by the
+/// caller, rather than recomputed here from `report`/`platform_diagnostic`
+/// — see `run_with`'s own comment on why: a second, independent copy of
+/// that condition could drift from the one that decides the process
+/// exit code, letting the summary's closing line and the actual exit
+/// code disagree.
+///
 /// Returns a `String` rather than printing directly, so its exact
 /// content is unit-testable without capturing process-wide stdout.
-fn render_summary(report: &DoctorReport, platform_diagnostic: Option<&str>) -> String {
+fn render_summary(
+    report: &DoctorReport,
+    platform_diagnostic: Option<&str>,
+    prerequisites_met: bool,
+) -> String {
     let mut lines = vec!["Admission Lab doctor".to_owned()];
 
     lines.push(match platform_diagnostic {
@@ -330,13 +360,11 @@ fn render_summary(report: &DoctorReport, platform_diagnostic: Option<&str>) -> S
     }
 
     lines.push(String::new());
-    lines.push(
-        if report.meets_prerequisites() && platform_diagnostic.is_none() {
-            "All required prerequisites are met.".to_owned()
-        } else {
-            "Some required prerequisites are missing; see above.".to_owned()
-        },
-    );
+    lines.push(if prerequisites_met {
+        "All required prerequisites are met.".to_owned()
+    } else {
+        "Some required prerequisites are missing; see above.".to_owned()
+    });
 
     lines.join("\n")
 }
@@ -690,7 +718,7 @@ mod tests {
             disk_warning: None,
         };
 
-        let summary = render_summary(&report, None);
+        let summary = render_summary(&report, None, true);
         for expected in [
             "kind",
             "v0.33.0",
@@ -725,7 +753,11 @@ mod tests {
             ),
         };
 
-        let summary = render_summary(&report, Some("host platform \"plan9\" is not supported"));
+        let summary = render_summary(
+            &report,
+            Some("host platform \"plan9\" is not supported"),
+            false,
+        );
         assert!(summary.contains("NOT FOUND"));
         assert!(summary.contains("plan9"));
         assert!(summary.contains("1.0 GiB"));
