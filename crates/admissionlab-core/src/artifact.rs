@@ -60,11 +60,17 @@
 //! looser, default permissions. Every mode is set explicitly after
 //! creation rather than requested from the creation call itself, because
 //! the process umask would otherwise mask down whatever the creation
-//! call requested. On a non-Unix platform this restriction cannot be
-//! enforced (there is no equivalent permission model to set it with);
-//! rather than silently doing nothing, [`ArtifactStore::create_run`] and
-//! [`ArtifactStore::write_bytes_atomic`] emit a `tracing` warning each
-//! time this happens, so the gap is visible at runtime instead of hidden.
+//! call requested. [`ArtifactStore::create_run`] also creates and
+//! restricts `raw` and `kubeconfigs` one at a time — rather than
+//! creating all six directories first and narrowing these two last — so
+//! neither sits at the platform default for longer than one
+//! creation-then-restrict pair takes, rather than for as long as the
+//! whole directory tree takes to create. On a non-Unix platform this
+//! restriction cannot be enforced (there is no equivalent permission
+//! model to set it with); rather than silently doing nothing,
+//! [`ArtifactStore::create_run`] and [`ArtifactStore::write_bytes_atomic`]
+//! emit a `tracing` warning each time this happens, so the gap is
+//! visible at runtime instead of hidden.
 //!
 //! # Path safety
 //!
@@ -189,6 +195,16 @@ impl RunPaths {
     }
 
     /// Directory for isolated baseline/candidate kubeconfigs.
+    ///
+    /// This directory is [`ArtifactStore::write_bytes_atomic`]'s *only*
+    /// signal for whether a file it is about to write is kubeconfig
+    /// material that must be restricted to mode `0600` on Unix (see the
+    /// module documentation's "Permissions" section): any destination
+    /// path with a component literally named `kubeconfigs` — in
+    /// practice, any path under this directory — gets that restriction.
+    /// There is no other signal and no way to opt a file in from
+    /// elsewhere: kubeconfig-shaped content written to a path that does
+    /// not fall under this directory will silently *not* be protected.
     #[must_use]
     pub fn kubeconfigs(&self) -> &Path {
         &self.kubeconfigs
@@ -303,23 +319,32 @@ impl ArtifactStore {
     pub async fn create_run(&self, id: &RunId) -> Result<RunPaths, ArtifactError> {
         let paths = RunPaths::new(&self.root, id);
 
+        // The four non-sensitive directories are created first and
+        // never narrowed. `raw` and `kubeconfigs` are each created and
+        // *immediately* restricted to owner-only, one directory at a
+        // time, rather than creating all six first and narrowing these
+        // two last: the latter would leave both sitting at the
+        // platform default for as long as the other four directories
+        // take to create, while interleaving shrinks that window to
+        // essentially one syscall's width, at no extra cost. See the
+        // module documentation's "Permissions" section.
         for dir in [
             paths.root(),
-            paths.raw(),
             paths.normalized(),
             paths.reports(),
             paths.logs(),
-            paths.kubeconfigs(),
         ] {
             tokio::fs::create_dir_all(dir)
                 .await
                 .map_err(|source| ArtifactError::io("create directory", dir, source))?;
         }
-
         // Restricted *after* creation, not via the creation call's mode
         // argument: see the module documentation's "Permissions"
         // section for why (the umask would mask it down regardless).
         for dir in [paths.raw(), paths.kubeconfigs()] {
+            tokio::fs::create_dir_all(dir)
+                .await
+                .map_err(|source| ArtifactError::io("create directory", dir, source))?;
             set_owner_only_mode(dir, 0o700).await?;
         }
 
@@ -462,18 +487,12 @@ async fn write_and_sync(temp_path: &Path, bytes: &[u8]) -> Result<(), ArtifactEr
 }
 
 /// Returns whether `path` lies under a directory named `kubeconfigs`
-/// anywhere in its ancestry — the marker [`ArtifactStore::write_bytes_atomic`]
-/// uses to decide whether a file it is about to write contains
-/// kubeconfig material and must therefore be created at mode `0600`
-/// rather than the platform default.
+/// anywhere in its ancestry.
 ///
-/// This is a location-based inference, not a content inspection:
-/// `write_bytes_atomic` has no separate "this is a kubeconfig" parameter
-/// (see the interface this type owns), so the destination path —
-/// specifically, whether it falls under [`RunPaths::kubeconfigs`] — is
-/// the only signal available. Every caller in this codebase that writes
-/// a kubeconfig does so through exactly that directory, so in practice
-/// this inference is exact, not merely a heuristic.
+/// See [`RunPaths::kubeconfigs`] for the canonical statement of this
+/// invariant (deliberately documented on the public accessor, not only
+/// here, since it is a real constraint a caller needs to know about)
+/// and what it means for content written anywhere else.
 fn is_kubeconfig_path(path: &Path) -> bool {
     path.components()
         .any(|component| component.as_os_str() == "kubeconfigs")

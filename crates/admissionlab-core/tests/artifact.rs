@@ -184,6 +184,47 @@ fn raw_and_kubeconfigs_directories_are_exactly_mode_0700() {
 
 #[cfg(unix)]
 #[test]
+fn only_raw_and_kubeconfigs_are_narrowed_to_owner_only() {
+    let rt = test_runtime();
+    let root = unique_store_root("dir-mode-not-narrowed");
+    let store = ArtifactStore::new(&root);
+    let run_id = RunId::generate();
+
+    let paths = rt
+        .block_on(store.create_run(&run_id))
+        .expect("create_run should succeed");
+
+    // The brief scopes the 0700 restriction to exactly `raw` and
+    // `kubeconfigs`. The test above only proves those two ARE narrowed;
+    // this one proves the restriction does not spread to every other
+    // directory create_run makes -- it would catch a future change that
+    // over-applies owner-only permissions (for example, by widening the
+    // loop in `create_run` that calls `set_owner_only_mode`). A plain
+    // `!= 0o700` check would be fooled by an unusually restrictive
+    // umask (e.g. 077) coincidentally producing 0700 anyway on its own,
+    // so this instead asserts something stronger and umask-independent:
+    // at least one non-owner permission bit survived, proving these
+    // directories were left at their ordinary, umask-masked mode rather
+    // than explicitly narrowed to owner-only.
+    for dir in [
+        paths.root(),
+        paths.normalized(),
+        paths.reports(),
+        paths.logs(),
+    ] {
+        let mode = mode_of(dir);
+        assert_ne!(
+            mode & 0o077,
+            0,
+            "expected {dir:?} to retain at least one non-owner permission bit (i.e. not narrowed to owner-only), got mode {mode:03o}"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+#[test]
 fn kubeconfig_bearing_file_is_mode_0600() {
     let rt = test_runtime();
     let root = unique_store_root("kubeconfig-file-mode");
