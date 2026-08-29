@@ -1,0 +1,11 @@
+# A misspelled `candidate` key (`candiate`). `deny_unknown_fields` must
+# reject this loudly rather than silently treating `candidate` as absent.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+baseline:
+  kubernetes: "1.29.4"
+candiate:
+  kubernetes: "1.29.4"
+fixtures:
+  include:
+    - "fixtures/**/*.yaml"

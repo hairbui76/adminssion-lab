@@ -1,0 +1,10 @@
+# `candidate` is entirely absent (not misspelled — just missing). Distinct
+# from unknown-field.yaml: this must fail as a missing required field, not
+# an unknown-field rejection.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+baseline:
+  kubernetes: "1.29.4"
+fixtures:
+  include:
+    - "fixtures/**/*.yaml"

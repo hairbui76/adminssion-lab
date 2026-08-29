@@ -12,9 +12,16 @@ admissionlab-core = { path = "crates/admissionlab-core" }
 assert_cmd = "2.2.2"
 async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive"] }
+globset = "0.4.20"
 predicates = "3.1.4"
 serde = "1.0.229"
 serde_json = "1.0.151"
+# `serde_yaml` is deprecated (its only remaining release is
+# 0.9.34+deprecated, archived upstream). `serde_norway` is a maintained
+# fork that continues the same 0.9 version lineage and API, so it is a
+# drop-in replacement rather than an architecture change (roadmap decision,
+# see admissionlab-spec).
+serde_norway = "0.9.42"
 thiserror = "2.0.20"
 tokio = "1.53.1"
 tracing = "0.1.44"

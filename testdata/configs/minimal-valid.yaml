@@ -1,0 +1,13 @@
+# The smallest configuration `load_lab`/`resolve_lab` accept: only the
+# fields Task 1.1's brief marks as required (apiVersion, kind, baseline,
+# candidate, fixtures). `policy` is omitted to exercise its defaults, and
+# neither environment declares any components.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+baseline:
+  kubernetes: "1.29.4"
+candidate:
+  kubernetes: "1.29.4"
+fixtures:
+  include:
+    - "fixtures/**/*.yaml"
