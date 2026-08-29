@@ -34,18 +34,50 @@ pub const API_VERSION: &str = "admissionlab.io/v1alpha1";
 /// The only `kind` value [`crate::load_lab`] accepts.
 pub const KIND: &str = "Lab";
 
+/// Schema-only override for [`LabSpec::api_version`]: a JSON Schema
+/// `const` locking the property to [`API_VERSION`], so an editor
+/// validating a YAML file against the generated schema flags a wrong
+/// `apiVersion` (for example `admissionlab.io/v1beta9`) directly, instead
+/// of only failing at load time. Does not affect deserialization — the
+/// field's Rust type stays `String` and [`crate::load_lab`] still performs
+/// the authoritative runtime check.
+fn api_version_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "const": API_VERSION
+    })
+}
+
+/// Schema-only override for [`LabSpec::kind`]: a JSON Schema `const`
+/// locking the property to [`KIND`]. See [`api_version_schema`] — same
+/// reasoning, same non-effect on deserialization.
+fn kind_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    schemars::json_schema!({
+        "type": "string",
+        "const": KIND
+    })
+}
+
 /// The root of an `admissionlab.yaml` configuration file.
 ///
-/// `api_version` and `kind` are plain strings here — parsing accepts any
-/// value — because rejecting the wrong value is a semantic check, not a
-/// syntactic one; [`crate::load_lab`] validates them against
-/// [`API_VERSION`] and [`KIND`] immediately after deserializing.
+/// `api_version` and `kind` are plain `String`s in Rust — parsing accepts
+/// any value at the type level — because rejecting the wrong value is a
+/// semantic check, not a syntactic one; [`crate::load_lab`] validates them
+/// against [`API_VERSION`] and [`KIND`] immediately after deserializing.
+/// The generated JSON Schema additionally `const`-locks both properties
+/// (see [`api_version_schema`]/[`kind_schema`]), so an editor validating
+/// against the schema also catches a wrong value, without changing what
+/// this Rust type accepts.
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LabSpec {
-    /// Must equal [`API_VERSION`]; checked by [`crate::load_lab`].
+    /// Must equal [`API_VERSION`]; checked by [`crate::load_lab`] and
+    /// `const`-locked in the generated schema (see [`api_version_schema`]).
+    #[schemars(schema_with = "api_version_schema")]
     pub api_version: String,
-    /// Must equal [`KIND`]; checked by [`crate::load_lab`].
+    /// Must equal [`KIND`]; checked by [`crate::load_lab`] and
+    /// `const`-locked in the generated schema (see [`kind_schema`]).
+    #[schemars(schema_with = "kind_schema")]
     pub kind: String,
     /// The unmodified stack being compared against.
     pub baseline: EnvironmentSpec,

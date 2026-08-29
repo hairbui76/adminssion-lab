@@ -17,19 +17,29 @@ use std::path::Path;
 use crate::error::SpecError;
 use crate::resolve::ResolvedComponent;
 
-/// Rejects an empty (or all-whitespace) Kubernetes version.
+/// Rejects an empty (or all-whitespace) Kubernetes version; otherwise
+/// returns it trimmed of surrounding whitespace, mirroring
+/// [`require_component_name`]'s trim-and-return shape so a padded
+/// Kubernetes version (`" 1.29.4 "`) doesn't keep its padding in
+/// [`crate::ResolvedEnvironment::kubernetes`] the way a padded component
+/// name wouldn't either.
 ///
 /// `field` is the dotted locator of the enclosing environment (`baseline`
 /// or `candidate`), used to build the error's locator prefix.
-pub(crate) fn kubernetes_version(field: &str, version: &str, path: &Path) -> Result<(), SpecError> {
-    if version.trim().is_empty() {
+pub(crate) fn kubernetes_version(
+    field: &str,
+    version: &str,
+    path: &Path,
+) -> Result<String, SpecError> {
+    let trimmed = version.trim();
+    if trimmed.is_empty() {
         return Err(SpecError::validation(
             path,
             format_args!("{field}.kubernetes"),
             "must not be empty",
         ));
     }
-    Ok(())
+    Ok(trimmed.to_owned())
 }
 
 /// Requires a component to have a non-empty resolved name, returning it.

@@ -313,6 +313,30 @@ fn relative_paths_resolve_against_config_directory_not_cwd() {
 // ---------------------------------------------------------------------
 
 #[test]
+fn kubernetes_version_is_trimmed() {
+    // A padded Kubernetes version must not keep its padding in the
+    // resolved form — consistent with how a padded component name is
+    // already trimmed by `require_component_name`.
+    let path = write_config(
+        "padded-k8s-version",
+        r#"
+        apiVersion: admissionlab.io/v1alpha1
+        kind: Lab
+        baseline:
+          kubernetes: "  1.29.4  "
+        candidate:
+          kubernetes: "1.29.4"
+        fixtures:
+          include: ["fixtures/**/*.yaml"]
+        "#,
+    );
+
+    let loaded = load_lab(&path).unwrap();
+    let resolved = resolve_lab(loaded).expect("padded-but-nonempty version must still resolve");
+    assert_eq!(resolved.baseline.kubernetes, "1.29.4");
+}
+
+#[test]
 fn empty_baseline_kubernetes_version_is_rejected() {
     let path = write_config(
         "empty-baseline-k8s",

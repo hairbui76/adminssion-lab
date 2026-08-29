@@ -100,8 +100,8 @@ pub struct ResolvedLab {
 /// One resolved side (baseline or candidate) of a comparison.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedEnvironment {
-    /// The Kubernetes version to provision. Never empty — validated by
-    /// [`resolve_lab`].
+    /// The Kubernetes version to provision. Never empty, and trimmed of
+    /// surrounding whitespace — validated by [`resolve_lab`].
     pub kubernetes: String,
     /// The environment's resolved components. Names are unique within
     /// this list — validated by [`resolve_lab`].
@@ -139,6 +139,12 @@ pub struct ResolvedFixtureSelection {
 /// its configuration file's own directory (see this module's
 /// documentation for why the current working directory is never used).
 ///
+/// Consumes `loaded` by value. A caller that wants both the as-written
+/// original *and* the resolved form (see this module's documentation on
+/// "preserve both the original and resolved paths for diagnostics")
+/// should `loaded.clone()` before calling this function, since
+/// [`LoadedLab`] implements [`Clone`].
+///
 /// # Errors
 ///
 /// Returns [`SpecError::Validation`] if the baseline or candidate
@@ -150,8 +156,8 @@ pub fn resolve_lab(loaded: LoadedLab) -> Result<ResolvedLab, SpecError> {
     let LoadedLab { source_path, raw } = loaded;
     let config_dir = config_directory(&source_path);
 
-    let baseline = resolve_environment("baseline", raw.baseline, &source_path)?;
-    let candidate = resolve_environment("candidate", raw.candidate, &source_path)?;
+    let baseline = resolve_environment("baseline", &raw.baseline, &source_path)?;
+    let candidate = resolve_environment("candidate", &raw.candidate, &source_path)?;
     let fixtures = resolve_fixtures(&raw.fixtures, &config_dir, &source_path)?;
     let expectations_file = raw
         .expectations_file
@@ -169,13 +175,25 @@ pub fn resolve_lab(loaded: LoadedLab) -> Result<ResolvedLab, SpecError> {
     })
 }
 
-/// The directory relative paths inside `source_path`'s configuration are
-/// resolved against.
+/// The directory every relative path originating in `source_path`'s
+/// configuration must be joined against.
 ///
-/// Deliberately never touches [`std::env::current_dir`]: this is the one
-/// place that property is enforced, so every caller below it (all pure
+/// **Invariant every caller in this crate must preserve:** any path that
+/// came from the configuration file — whether resolved today (fixtures
+/// root, `expectationsFile`) or still pending (a component's `install`
+/// block: `HelmInstallSpec::values_files`, `ManifestsInstallSpec::paths`,
+/// left unresolved by this task, see [`ResolvedComponent`]'s
+/// documentation) — must be joined against *this* directory and never
+/// against [`std::env::current_dir`]. `pub(crate)` rather than private so
+/// Task 2.1's resolved component model, the next consumer of this
+/// invariant, reuses this function instead of rediscovering (or
+/// mis-deriving) it when it starts opening `install`-block paths for
+/// `helm install -f`.
+///
+/// Deliberately never touches [`std::env::current_dir`] itself: this is
+/// the one place that property is enforced, so every caller (all pure
 /// path joins) automatically inherits it.
-fn config_directory(source_path: &Path) -> PathBuf {
+pub(crate) fn config_directory(source_path: &Path) -> PathBuf {
     match source_path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent.to_path_buf(),
         // `source_path` was a bare filename ("admissionlab.yaml") or had
@@ -199,10 +217,10 @@ fn resolve_relative(config_dir: &Path, path: PathBuf) -> PathBuf {
 
 fn resolve_environment(
     field: &str,
-    raw: EnvironmentSpec,
+    raw: &EnvironmentSpec,
     source_path: &Path,
 ) -> Result<ResolvedEnvironment, SpecError> {
-    validate::kubernetes_version(field, &raw.kubernetes, source_path)?;
+    let kubernetes = validate::kubernetes_version(field, &raw.kubernetes, source_path)?;
 
     let components = raw
         .components
@@ -213,7 +231,7 @@ fn resolve_environment(
     validate::unique_component_names(field, &components, source_path)?;
 
     Ok(ResolvedEnvironment {
-        kubernetes: raw.kubernetes,
+        kubernetes,
         components,
     })
 }

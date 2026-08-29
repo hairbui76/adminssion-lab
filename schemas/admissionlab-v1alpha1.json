@@ -1,12 +1,13 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "LabSpec",
-  "description": "The root of an `admissionlab.yaml` configuration file.\n\n`api_version` and `kind` are plain strings here — parsing accepts any\nvalue — because rejecting the wrong value is a semantic check, not a\nsyntactic one; [`crate::load_lab`] validates them against\n[`API_VERSION`] and [`KIND`] immediately after deserializing.",
+  "description": "The root of an `admissionlab.yaml` configuration file.\n\n`api_version` and `kind` are plain `String`s in Rust — parsing accepts\nany value at the type level — because rejecting the wrong value is a\nsemantic check, not a syntactic one; [`crate::load_lab`] validates them\nagainst [`API_VERSION`] and [`KIND`] immediately after deserializing.\nThe generated JSON Schema additionally `const`-locks both properties\n(see [`api_version_schema`]/[`kind_schema`]), so an editor validating\nagainst the schema also catches a wrong value, without changing what\nthis Rust type accepts.",
   "type": "object",
   "properties": {
     "apiVersion": {
-      "description": "Must equal [`API_VERSION`]; checked by [`crate::load_lab`].",
-      "type": "string"
+      "description": "Must equal [`API_VERSION`]; checked by [`crate::load_lab`] and\n`const`-locked in the generated schema (see [`api_version_schema`]).",
+      "type": "string",
+      "const": "admissionlab.io/v1alpha1"
     },
     "baseline": {
       "description": "The unmodified stack being compared against.",
@@ -29,8 +30,9 @@
       "$ref": "#/$defs/FixtureSelectionSpec"
     },
     "kind": {
-      "description": "Must equal [`KIND`]; checked by [`crate::load_lab`].",
-      "type": "string"
+      "description": "Must equal [`KIND`]; checked by [`crate::load_lab`] and\n`const`-locked in the generated schema (see [`kind_schema`]).",
+      "type": "string",
+      "const": "Lab"
     },
     "policy": {
       "description": "Regression policy. Omit entirely to accept every field's default\n(see [`PolicySpec`]'s `Default` impl).",
