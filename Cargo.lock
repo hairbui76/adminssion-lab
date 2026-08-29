@@ -21,6 +21,11 @@ dependencies = [
 [[package]]
 name = "admissionlab-cluster"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_norway",
+ "thiserror",
+]
 
 [[package]]
 name = "admissionlab-core"

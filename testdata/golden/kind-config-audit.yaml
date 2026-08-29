@@ -1,0 +1,42 @@
+# Golden fixture for `admissionlab_cluster::config::render_kind_config`
+# (see crates/admissionlab-cluster/tests/kind_config.rs,
+# `rendered_config_matches_golden_structure`).
+#
+# The test compares this file against the function's live output as
+# *parsed YAML structure* (including a second-level parse of the
+# embedded kubeadm ClusterConfiguration patch string below), not as raw
+# text — so reformatting this file (key order, quoting style,
+# whitespace) does not break the test, only a genuine structural
+# difference does. Keep the values below consistent with `sample_input()`
+# in that test file if you change either.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: adlab-baseline-golden
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed
+    extraMounts:
+      - hostPath: /var/lib/admissionlab/runs/golden/audit-policy.yaml
+        containerPath: /etc/kubernetes/policies/admissionlab-audit-policy.yaml
+        readOnly: true
+      - hostPath: /var/lib/admissionlab/runs/golden/audit-logs
+        containerPath: /var/log/kubernetes
+        readOnly: false
+    kubeadmConfigPatches:
+      - |
+        kind: ClusterConfiguration
+        apiServer:
+          extraArgs:
+            audit-log-path: /var/log/kubernetes/kube-apiserver-audit.log
+            audit-policy-file: /etc/kubernetes/policies/admissionlab-audit-policy.yaml
+          extraVolumes:
+            - name: audit-policies
+              hostPath: /etc/kubernetes/policies
+              mountPath: /etc/kubernetes/policies
+              readOnly: true
+              pathType: DirectoryOrCreate
+            - name: audit-logs
+              hostPath: /var/log/kubernetes
+              mountPath: /var/log/kubernetes
+              readOnly: false
+              pathType: DirectoryOrCreate
