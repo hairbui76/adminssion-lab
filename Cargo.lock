@@ -25,9 +25,12 @@ dependencies = [
 name = "admissionlab-cluster"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-core",
+ "async-trait",
  "serde",
  "serde_norway",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

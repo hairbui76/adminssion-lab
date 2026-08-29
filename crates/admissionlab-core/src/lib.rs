@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod artifact;
+pub mod cluster;
 pub mod diagnostic;
 pub mod error;
 pub mod ids;
@@ -9,6 +10,9 @@ pub mod side;
 pub mod tool;
 
 pub use artifact::{ArtifactError, ArtifactStore, RunDisposition, RunPaths};
+pub use cluster::{
+    ClusterDiagnostics, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, RollbackOutcome,
+};
 pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue};
 pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};

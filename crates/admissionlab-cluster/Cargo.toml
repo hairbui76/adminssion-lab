@@ -9,6 +9,34 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# `lifecycle.rs`'s `KindClusterManager` implements
+# `admissionlab_core::ClusterManager` and consumes
+# `admissionlab_core::{ProcessRunner, ArtifactStore, RunPaths, Side}` (Task
+# 1.7 / Controller Ruling R22). This is a one-way edge: `admissionlab-core`
+# must never depend back on this crate — see `cluster.rs`'s module
+# documentation in `admissionlab-core` for why the trait had to move here
+# to avoid exactly that cycle.
+admissionlab-core = { workspace = true }
+# Required on `impl ClusterManager for KindClusterManager` itself, not
+# only on the trait definition: `async_trait`'s desugaring must match on
+# both sides for the impl to typecheck.
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_norway = { workspace = true }
 thiserror = { workspace = true }
+# `fs` only: `lifecycle.rs` creates the per-side audit-log bind-mount
+# host directory via `tokio::fs::create_dir_all` and `kubeconfig.rs` reads
+# back the kubeconfig file `kind` wrote via `tokio::fs::read`/`metadata`.
+# Nothing in this crate's production code spawns a task or builds its own
+# runtime, so `rt` is a dev-only need (see `[dev-dependencies]` below) —
+# the same v2-resolver split `admissionlab-core`'s own `Cargo.toml`
+# documents for its `tokio` entry.
+tokio = { workspace = true, features = ["fs"] }
+
+[dev-dependencies]
+# `tests/lifecycle_unit.rs` drives `ClusterManager`'s async methods
+# directly, so it needs to build its own runtime (mirroring
+# `admissionlab-core`'s `tests/tool.rs` hand-rolled `Builder` rather than
+# `#[tokio::test]`, which would need the `macros` feature for no other
+# reason).
+tokio = { workspace = true, features = ["rt"] }
