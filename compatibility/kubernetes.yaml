@@ -1,0 +1,63 @@
+# Kubernetes minor versions Admission Lab can provision, mapped to exact,
+# digest-pinned `kind` node images.
+#
+# This file is the single source of truth for
+# `admissionlab_cluster::version::resolve_node_image` (loaded via
+# `load_matrix`, embedded into the compiled binary at build time — see
+# `crates/admissionlab-cluster/src/version.rs`). Admission Lab never
+# fetches this information over the network at runtime: adding or
+# dropping a supported minor is a deliberate, reviewed change to this
+# checked-in file (Task 1.8 Step 3; PRODUCT.md §32 "Kubernetes
+# Compatibility Policy" — human review is required before dropping a
+# supported version in a stable release line).
+#
+# `image`/`digest` are `kindest/node`'s official release digests for kind
+# v0.33.0, captured from its release notes. Every entry pins an exact
+# patch version and digest; never a floating tag.
+#
+# Populated 2026-08-30 against endoflife.date and
+# dl.k8s.io/release/stable.txt (which returned v1.37.0 at that time). Per
+# PRODUCT.md §32 ("Admission Lab targets the latest three Kubernetes
+# minor versions still supported upstream"), the three currently
+# upstream-supported minors are 1.35, 1.36, and 1.37.
+#
+# 1.37.0 (released 2026-08-26, three days before this file was written)
+# stays in this matrix and is `supported: true`, but is not Tier 1's
+# primary version: per-commit CI also installs Kyverno and Istio on top
+# of whatever Kubernetes version it uses, and PRODUCT.md §33
+# ("Performance and Reliability Targets") ranks repeated-run reliability
+# above tracking the newest minor for a release only days old. 1.37 is
+# exercised by the nightly tier (PRODUCT.md §32 Tier 2) instead.
+#
+# 1.36.4 is Tier 1's primary supported version.
+#
+# 1.34.11 is retained below with `supported: false` rather than deleted
+# outright: at the time this file was written it was a fully valid,
+# recently supported version (EOL 2026-10-27, about two months out), and
+# an existing `admissionlab.yaml` may still request it. Keeping the entry
+# (instead of omitting 1.34 entirely) lets `resolve_node_image` return a
+# specific, actionable "no longer supported" error naming the matched
+# minor and its EOL-adjacent status, instead of a generic "never heard of
+# this version" lookup failure — see `VersionError::UnsupportedMinor` vs.
+# `VersionError::UnknownVersion`.
+releases:
+  - minor: "1.37"
+    version: "1.37.0"
+    image: "kindest/node:v1.37.0"
+    digest: "sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5"
+    supported: true
+  - minor: "1.36"
+    version: "1.36.4"
+    image: "kindest/node:v1.36.4"
+    digest: "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"
+    supported: true
+  - minor: "1.35"
+    version: "1.35.8"
+    image: "kindest/node:v1.35.8"
+    digest: "sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0"
+    supported: true
+  - minor: "1.34"
+    version: "1.34.11"
+    image: "kindest/node:v1.34.11"
+    digest: "sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d"
+    supported: false
