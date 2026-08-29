@@ -57,19 +57,41 @@
 //! per-entry sensitivity flag — that is the canonical, cross-task shape
 //! of this type, and it is also exactly what must reach the child
 //! process unredacted for a real credential to do its job. Redaction
-//! therefore cannot live on `CommandSpec` itself without either breaking
-//! that shape or storing a second, redacted copy of every secret right
-//! next to the original (defeating the purpose).
+//! therefore cannot live on `CommandSpec.env` itself without either
+//! breaking that shape or storing a second, redacted copy of every
+//! secret right next to the original (defeating the purpose).
 //!
 //! Instead, [`CommandSpec::context`] derives a separate, safe-to-log type,
 //! [`CommandContext`], on demand. Building it is the *only* place a
-//! decision about sensitivity is made: any `env` key that looks
-//! credential-like (case-insensitively containing a marker such as
-//! `TOKEN`, `SECRET`, `KEY`, or `PASSWORD` — see PRODUCT.md §29.3's
-//! "common credential/token environment-variable values") becomes
-//! [`RedactedValue::Sensitive`] in the result. Because `Sensitive` carries
-//! no payload at all (the guarantee [`RedactedValue`] already provides
-//! for [`crate::diagnostic::Diagnostic`]), the raw value is never copied
+//! decision about sensitivity is made, and PRODUCT.md §29.3 lists two
+//! *distinct* obligations here, not one — either is independently
+//! sufficient to redact an entry:
+//!
+//! - **Heuristic, by key name.** Any `env` key that looks credential-like
+//!   (case-insensitively containing a marker such as `TOKEN`, `SECRET`,
+//!   `KEY`, or `PASSWORD` — see [`SENSITIVE_ENV_KEY_MARKERS`], mirroring
+//!   §29.3's "common credential/token environment-variable values") is
+//!   redacted automatically, with no caller action required. This catches
+//!   the common case but is necessarily incomplete: a key named `DB_PASS`,
+//!   `BEARER`, `SESSION_COOKIE`, or `DOCKER_CONFIG_JSON` matches none of
+//!   these markers.
+//! - **Explicit, by caller.** [`CommandSpec::sensitive_env_keys`] lets a
+//!   caller name exactly which keys must be redacted regardless of what
+//!   their name looks like — PRODUCT.md §29.3's separately-listed "values
+//!   explicitly marked sensitive by configuration," and this codebase's
+//!   established convention (see `diagnostic.rs`'s `RedactedValue::Public`:
+//!   "a value the caller has decided is safe to display verbatim") that
+//!   this decision belongs to the caller, not to a pattern match alone. A
+//!   later task building a `CommandSpec` for a secret-bearing env var that
+//!   doesn't happen to match the heuristic should add its key here rather
+//!   than contort the variable's name to fit the heuristic.
+//!
+//! The two checks are OR'd together in [`CommandSpec::context`]: a key
+//! redacted by either source stays redacted, and neither can un-redact
+//! what the other flagged. Either way the result is
+//! [`RedactedValue::Sensitive`], which carries no payload at all (the
+//! guarantee [`RedactedValue`] already provides for
+//! [`crate::diagnostic::Diagnostic`]), so the raw value is never copied
 //! into `CommandContext` in the first place — there is no field for it to
 //! leak from later, no matter how a `CommandContext` is formatted,
 //! logged, or serialized. [`ProcessError`]'s variants carry a
@@ -78,12 +100,39 @@
 //! derived) to redact through the same path, so that even an incidental
 //! `{:?}` of a `CommandSpec` anywhere in the codebase stays safe.
 //!
-//! This is necessarily a heuristic, not a guarantee about any specific
-//! value: it is biased toward over-redaction on purpose, because a
-//! public value hidden by mistake is merely inconvenient, while a
-//! credential logged by mistake is an incident.
+//! Both mechanisms are necessarily best-effort — a heuristic match or a
+//! caller's own list, not a guarantee about any specific value — and both
+//! are biased toward over-redaction on purpose: a public value hidden by
+//! mistake is merely inconvenient, while a credential logged by mistake is
+//! an incident.
+//!
+//! **This is a local layer, not the project's only one.** Task 4.10
+//! ("Build report-ready result model and central redaction pass") adds a
+//! further, centrally-configured redaction pass over the assembled
+//! `LabResult.diagnostics` before a report is written. That later pass
+//! cannot substitute for this one: it only ever sees diagnostics that made
+//! it into a final `LabResult`, while this module sits on the path of
+//! every `tracing` log line later tasks (1.4, 1.7, 2.2, 2.3, 3.8, ...)
+//! emit about a command *as it runs* — often well before any report
+//! exists, for example while narrating a `kind` bring-up or a `helm
+//! install` failure. PRODUCT.md §29.3 scopes the obligation to "reports
+//! **and logs**"; for the logs half, this module is the last line of
+//! defense, not a stopgap Task 4.10 will later replace.
+//!
+//! **What this module does not redact.** Only `env` *values* are ever
+//! classified. `program`, `args`, and `cwd` are always copied into
+//! `CommandContext` verbatim and are never redacted by either mechanism
+//! above — proving argv reached the child unmodified is one of this
+//! module's core jobs, so hiding it would be counterproductive, and there
+//! is no `args`/argv equivalent of `sensitive_env_keys`. A secret passed
+//! as a CLI flag rather than an environment variable (for example `helm
+//! install --set password=...` instead of an env var) gets **no**
+//! protection from this module. Tasks 2.2 (Helm installer) and 2.3
+//! (kubectl manifest apply), which build `helm`/`kubectl` argv directly,
+//! need to route any credential-like value through `env` rather than
+//! `args` if they want this module's redaction to apply to it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
@@ -101,12 +150,12 @@ use crate::diagnostic::RedactedValue;
 /// One external command to run: the program, its argv, an optional
 /// working directory, environment overrides, and a timeout.
 ///
-/// Every field here is passed to the child process exactly as given —
-/// including `env`, which is *not* redacted (see the module
-/// documentation for how a safe-to-log description is derived instead,
-/// via [`CommandSpec::context`]). There is no shell involved in
-/// interpreting any of these fields: `program` is executed directly and
-/// each element of `args` becomes exactly one argv element.
+/// Every field here except `sensitive_env_keys` is passed to the child
+/// process exactly as given — including `env`, which is *not* redacted
+/// (see the module documentation for how a safe-to-log description is
+/// derived instead, via [`CommandSpec::context`]). There is no shell
+/// involved in interpreting any of these fields: `program` is executed
+/// directly and each element of `args` becomes exactly one argv element.
 #[derive(Clone)]
 pub struct CommandSpec {
     /// The program to execute. Not looked up through a shell: this is
@@ -125,9 +174,20 @@ pub struct CommandSpec {
     /// process's own inherited environment (an entry here overrides an
     /// inherited variable of the same name; every other inherited
     /// variable is left untouched). See the module documentation for how
-    /// credential-like entries are kept out of diagnostics without being
+    /// credential-like entries — whether caught by the heuristic or named
+    /// in `sensitive_env_keys` — are kept out of diagnostics without being
     /// withheld from the child.
     pub env: BTreeMap<OsString, OsString>,
+    /// Additional `env` keys to treat as credential-like in
+    /// [`CommandSpec::context`], beyond whatever
+    /// [`SENSITIVE_ENV_KEY_MARKERS`] already catches by name. This is the
+    /// caller-facing half of redaction (PRODUCT.md §29.3's "values
+    /// explicitly marked sensitive by configuration"): use it for a
+    /// secret-bearing key whose name doesn't happen to match the
+    /// heuristic, such as `DB_PASS` or `SESSION_COOKIE`. Never consulted
+    /// when building the child's actual environment — only `env` itself
+    /// is; this field exists purely to inform redaction.
+    pub sensitive_env_keys: BTreeSet<OsString>,
     /// How long to let the child run before it is killed and
     /// [`ProcessError::TimedOut`] is reported.
     pub timeout: Duration,
@@ -138,11 +198,14 @@ impl CommandSpec {
     /// for attaching to a [`ProcessError`] or a
     /// [`crate::diagnostic::Diagnostic`].
     ///
-    /// Every `env` entry whose key looks credential-like is replaced
-    /// with [`RedactedValue::Sensitive`], which carries no payload, so
-    /// the raw value is never copied into the returned [`CommandContext`]
-    /// — it cannot later leak through any `Debug`/`Display` of that type
-    /// no matter how the result is logged or serialized. This has no
+    /// Every `env` entry whose key either looks credential-like (see
+    /// [`SENSITIVE_ENV_KEY_MARKERS`]) or is named in
+    /// `self.sensitive_env_keys` is replaced with
+    /// [`RedactedValue::Sensitive`], which carries no payload, so the raw
+    /// value is never copied into the returned [`CommandContext`] — it
+    /// cannot later leak through any `Debug`/`Display` of that type no
+    /// matter how the result is logged or serialized. The two checks are
+    /// OR'd: either one alone is enough to redact an entry. This has no
     /// effect on what is actually passed to the child process: that
     /// always uses `self.env` untouched.
     #[must_use]
@@ -155,7 +218,9 @@ impl CommandSpec {
                 .env
                 .iter()
                 .map(|(key, value)| {
-                    let rendered = if env_key_looks_sensitive(key) {
+                    let sensitive =
+                        env_key_looks_sensitive(key) || self.sensitive_env_keys.contains(key);
+                    let rendered = if sensitive {
                         RedactedValue::Sensitive
                     } else {
                         RedactedValue::Public(value.to_string_lossy().into_owned())
@@ -180,6 +245,9 @@ impl fmt::Debug for CommandSpec {
             .field("args", &self.args)
             .field("cwd", &self.cwd)
             .field("env", &self.context().env)
+            // Safe to show directly, unlike `env`: this holds only key
+            // *names* the caller marked sensitive, never values.
+            .field("sensitive_env_keys", &self.sensitive_env_keys)
             .field("timeout", &self.timeout)
             .finish()
     }
@@ -187,7 +255,9 @@ impl fmt::Debug for CommandSpec {
 
 /// Case-insensitive substrings that mark a [`CommandSpec`] environment
 /// *key* as credential-like for [`CommandSpec::context`], independent of
-/// whatever value it holds.
+/// whatever value it holds. This is the automatic half of redaction; see
+/// [`CommandSpec::sensitive_env_keys`] for the caller-facing half that
+/// catches a credential-bearing key this list doesn't recognize by name.
 ///
 /// Deliberately biased toward over-redaction (for example, `PUBLIC_KEY`
 /// still matches `KEY`): a value hidden that did not need to be is
@@ -403,12 +473,20 @@ impl ProcessRunner for TokioProcessRunner {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            // Best-effort backstop only: the primary mechanism for
-            // never leaking a child is the explicit `child.kill().await`
-            // on the timeout path below, which this crate's tests
-            // verify directly. This only helps in paths that never
-            // reach that code at all, such as an unrelated future
-            // cancelling `run`'s own future from the outside.
+            // A genuine second line of defense, not merely a passive
+            // backstop: tokio's orphan queue reaps a `kill_on_drop`
+            // child in the background once its `Child` handle is
+            // dropped, independent of whether *this* function's own
+            // explicit `child.kill().await` on the timeout path below
+            // ran or was itself somehow buggy — confirmed directly by
+            // temporarily breaking that explicit call during this
+            // module's development and observing this still caught it.
+            // The explicit call remains primary because it is
+            // synchronous with `run` returning (the caller can rely on
+            // "no leaked child" the instant `run` resolves, not
+            // "eventually, once tokio's background reaper gets to it"),
+            // and because it alone reports `ProcessError::KillFailed` if
+            // killing fails outright.
             .kill_on_drop(true);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);

@@ -11,9 +11,10 @@
 //!    loop (Global Constraint 12 / PRODUCT.md §29.4).
 //! 2. A command that exceeds its timeout is actually killed and reaped —
 //!    never abandoned as an orphan holding cluster state.
-//! 3. A credential-like environment value reaches the child normally but
-//!    can never render as anything but `[REDACTED]` in a diagnostic
-//!    (PRODUCT.md §29.3 / Global Constraint 14).
+//! 3. A credential-like environment value — whether recognized by name or
+//!    explicitly marked sensitive by the caller — reaches the child
+//!    normally but can never render as anything but `[REDACTED]` in a
+//!    diagnostic (PRODUCT.md §29.3 / Global Constraint 14).
 //!
 //! # Why this file has no test harness
 //!
@@ -34,7 +35,7 @@
 //! [`HELPER_MODE_VAR`] first, before anything else, and only runs the
 //! test table below if it is unset.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -79,6 +80,12 @@ const HELPER_STDOUT_LEN_VAR: &str = "ADMISSIONLAB_HELPER_STDOUT_LEN";
 /// Env var (helper mode `big-output`): number of bytes to write to
 /// stderr.
 const HELPER_STDERR_LEN_VAR: &str = "ADMISSIONLAB_HELPER_STDERR_LEN";
+/// Env var (helper mode `sleep-then-exit`): if set, a file path this
+/// process writes to *after* its sleep completes (never on being
+/// killed, since a kill ends the process before it gets there). Lets a
+/// test prove a kill actually prevented the child from finishing its
+/// work, portably (no `/proc`, no platform-specific liveness check).
+const HELPER_DONE_FILE_VAR: &str = "ADMISSIONLAB_HELPER_DONE_FILE";
 /// Env var (helper mode `print-env-var`): the name of the environment
 /// variable this process should look up and report.
 const HELPER_ENV_VAR_NAME_VAR: &str = "ADMISSIONLAB_HELPER_ENV_VAR_NAME";
@@ -139,6 +146,13 @@ fn helper_print_cwd() -> ExitCode {
 /// sleeps, then exits with a configurable code. Used both for the
 /// timeout-kills-the-child test (long sleep) and the
 /// non-zero-exit-is-not-a-runner-error test (short/no sleep).
+///
+/// If [`HELPER_DONE_FILE_VAR`] is set, a file is written at that path
+/// *after* the sleep completes — a portable (no `/proc`, no `unsafe`)
+/// way for a test to prove a kill actually landed before the child could
+/// finish: if the file never appears within a grace period comfortably
+/// longer than the configured sleep, the child cannot have run to
+/// completion.
 fn helper_sleep_then_exit() -> ExitCode {
     {
         let stdout = io::stdout();
@@ -151,6 +165,10 @@ fn helper_sleep_then_exit() -> ExitCode {
         .parse()
         .expect("valid sleep ms");
     std::thread::sleep(Duration::from_millis(sleep_ms));
+
+    if let Ok(done_file) = std::env::var(HELPER_DONE_FILE_VAR) {
+        std::fs::write(&done_file, b"done").expect("write done-file sentinel");
+    }
 
     let exit_code: u8 = helper_env_or(HELPER_EXIT_CODE_VAR, "0")
         .parse()
@@ -273,6 +291,10 @@ const TESTS: &[(&str, TestFn)] = &[
         command_context_redacts_credential_like_env_keys,
     ),
     (
+        "caller_marked_sensitive_env_value_reaches_child_but_is_redacted_in_diagnostics",
+        caller_marked_sensitive_env_value_reaches_child_but_is_redacted_in_diagnostics,
+    ),
+    (
         "command_context_preserves_non_sensitive_env_values",
         command_context_preserves_non_sensitive_env_values,
     ),
@@ -304,7 +326,7 @@ fn run_tests() -> ExitCode {
             Ok(()) => println!("ok"),
             Err(payload) => {
                 println!("FAILED");
-                failures.push((name, panic_message(&payload)));
+                failures.push((name, panic_message(&*payload)));
             }
         }
     }
@@ -352,6 +374,7 @@ fn helper_spec(mode: &str, timeout: Duration) -> CommandSpec {
         args: Vec::new(),
         cwd: None,
         env,
+        sensitive_env_keys: BTreeSet::new(),
         timeout,
     }
 }
@@ -547,42 +570,106 @@ fn nonzero_exit_status_is_a_successful_result_not_a_runner_error(rt: &tokio::run
 
 // =====================================================================
 // 6. Timeout kills and reaps the child (hazard 1).
+//
+// This project commits to macOS release binaries and macOS CI runners
+// (see the roadmap), which have no `/proc`. The primary proof below
+// must therefore be portable; the `/proc`-based reap check is kept only
+// as an *additional*, explicitly `cfg`-gated assertion on Linux, so its
+// absence elsewhere is visible in the source rather than silently
+// vacuous.
 // =====================================================================
 
+/// Timeout used by both timeout tests below: comfortably shorter than
+/// [`TIMEOUT_TEST_SLEEP`], while long enough (given this test binary's
+/// own process-spawn overhead) not to be flaky under load.
+const TIMEOUT_TEST_TIMEOUT: Duration = Duration::from_millis(300);
+/// Sleep duration used by both timeout tests below: comfortably longer
+/// (6-7x) than [`TIMEOUT_TEST_TIMEOUT`], so a runner that failed to kill
+/// the child cannot be mistaken for a correct one by scheduling jitter
+/// alone.
+const TIMEOUT_TEST_SLEEP: Duration = Duration::from_millis(2000);
+
 fn timeout_kills_and_reaps_the_child_process(rt: &tokio::runtime::Runtime) {
-    let mut spec = helper_spec("sleep-then-exit", Duration::from_millis(300));
-    spec.env
-        .insert(OsString::from(HELPER_SLEEP_MS_VAR), OsString::from("15000"));
+    let dir = unique_scratch_dir("timeout-kill");
+    let done_file = dir.join("done");
+
+    let mut spec = helper_spec("sleep-then-exit", TIMEOUT_TEST_TIMEOUT);
+    spec.env.insert(
+        OsString::from(HELPER_SLEEP_MS_VAR),
+        OsString::from(TIMEOUT_TEST_SLEEP.as_millis().to_string()),
+    );
+    spec.env.insert(
+        OsString::from(HELPER_DONE_FILE_VAR),
+        OsString::from(done_file.as_os_str()),
+    );
 
     let started = std::time::Instant::now();
     let err = run_spec(rt, spec).expect_err("a command that outlives its timeout must error");
     let wall_clock = started.elapsed();
 
-    let ProcessError::TimedOut { stdout, .. } = &err else {
-        panic!("expected ProcessError::TimedOut, got: {err:?}");
-    };
+    assert!(
+        matches!(&err, ProcessError::TimedOut { .. }),
+        "expected ProcessError::TimedOut, got: {err:?}"
+    );
 
     // The runner must not have simply waited the sleep out in the
     // background: it should report back close to the timeout, not close
     // to the (much longer) sleep duration.
     assert!(
-        wall_clock < Duration::from_secs(5),
+        wall_clock < Duration::from_secs(1),
         "run() took {wall_clock:?}, which looks like it waited out the child's full sleep \
          instead of killing it promptly after the timeout"
     );
 
-    let pid = parse_pid_line(stdout);
+    // Portable proof (works on every platform this crate targets,
+    // including macOS, which has no /proc, and needs no `unsafe`): the
+    // helper only ever writes the done-file *after* its sleep completes,
+    // so if that file ever appears, the child was not actually stopped
+    // by the kill. Wait past the point — measured from `started`, i.e.
+    // from spawn, not from when `run()` returned — at which an un-killed
+    // child would have finished sleeping and written it, with a
+    // comfortable buffer for scheduling jitter.
+    let grace_period =
+        (TIMEOUT_TEST_SLEEP + Duration::from_millis(1000)).saturating_sub(started.elapsed());
+    std::thread::sleep(grace_period);
     assert!(
-        !proc_dir_exists(pid),
-        "child pid {pid} still has a /proc entry after run() returned a Timeout error: \
-         it was not fully killed and reaped, so it is either still running or a zombie"
+        !done_file.exists(),
+        "the done-file appeared after run() returned: the child was not actually killed \
+         before it could finish its sleep and run to completion"
     );
+
+    // Linux-only additional proof: not just signalled, but reaped (no
+    // lingering zombie left behind by the time `run()` returns) — an
+    // end-to-end guarantee of `run()` as a whole (its explicit
+    // `child.kill().await` on the timeout path, backstopped by
+    // `kill_on_drop`, both contribute to it), which is what actually
+    // matters operationally ("no leaked cluster after normal failure
+    // paths"). A zombie still has a /proc entry, so this specifically
+    // catches "killed but left unreaped" — which the portable check
+    // above cannot distinguish from "properly cleaned up" (both leave
+    // no done-file either way).
+    #[cfg(target_os = "linux")]
+    {
+        let ProcessError::TimedOut { stdout, .. } = &err else {
+            unreachable!("variant already checked above")
+        };
+        let pid = parse_pid_line(stdout);
+        assert!(
+            !proc_dir_exists(pid),
+            "child pid {pid} still has a /proc entry after run() returned a Timeout error: \
+             it was not fully reaped, so it is a lingering zombie"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn timeout_error_carries_the_partial_output_captured_so_far(rt: &tokio::runtime::Runtime) {
-    let mut spec = helper_spec("sleep-then-exit", Duration::from_millis(300));
-    spec.env
-        .insert(OsString::from(HELPER_SLEEP_MS_VAR), OsString::from("15000"));
+    let mut spec = helper_spec("sleep-then-exit", TIMEOUT_TEST_TIMEOUT);
+    spec.env.insert(
+        OsString::from(HELPER_SLEEP_MS_VAR),
+        OsString::from(TIMEOUT_TEST_SLEEP.as_millis().to_string()),
+    );
 
     let err = run_spec(rt, spec).expect_err("a command that outlives its timeout must error");
     let ProcessError::TimedOut { stdout, .. } = &err else {
@@ -600,6 +687,12 @@ fn timeout_error_carries_the_partial_output_captured_so_far(rt: &tokio::runtime:
     );
 }
 
+/// Linux-only: parses the `PID=<digits>` line `helper_sleep_then_exit`
+/// writes. Defined only under `cfg(target_os = "linux")`, alongside its
+/// one caller, so an accidental non-Linux build cannot silently compile
+/// a liveness check that would be vacuous there (see the section note
+/// above).
+#[cfg(target_os = "linux")]
 fn parse_pid_line(stdout: &[u8]) -> u32 {
     let text = std::str::from_utf8(stdout).expect("pid line must be valid utf-8");
     let line = text.lines().next().expect("at least one line of output");
@@ -609,6 +702,7 @@ fn parse_pid_line(stdout: &[u8]) -> u32 {
     digits.parse().expect("valid pid")
 }
 
+#[cfg(target_os = "linux")]
 fn proc_dir_exists(pid: u32) -> bool {
     // /proc/<pid> exists for a running process *and* for a zombie that
     // has exited but not yet been reaped by its parent; it disappears
@@ -686,6 +780,7 @@ fn command_context_redacts_credential_like_env_keys(_rt: &tokio::runtime::Runtim
         args: vec![OsString::from("install")],
         cwd: None,
         env,
+        sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
     };
 
@@ -705,6 +800,49 @@ fn command_context_redacts_credential_like_env_keys(_rt: &tokio::runtime::Runtim
     assert!(!rendered.contains("another-secret"));
 }
 
+/// Proves, in one run, both halves of the caller-facing redaction
+/// mechanism at once: `DB_PASS` matches none of
+/// `SENSITIVE_ENV_KEY_MARKERS` (unlike the marker-based test above), so
+/// without `sensitive_env_keys` it would render in full. With it:
+/// - the *same* `CommandSpec`'s diagnostic-facing `context()`/`Debug`
+///   already redact it before anything is spawned;
+/// - spawning that *same* spec still delivers the raw value to the real
+///   child completely unmodified.
+fn caller_marked_sensitive_env_value_reaches_child_but_is_redacted_in_diagnostics(
+    rt: &tokio::runtime::Runtime,
+) {
+    // Deliberately a key `SENSITIVE_ENV_KEY_MARKERS` does NOT match on
+    // its own (unlike `HELM_REGISTRY_TOKEN`/`KUBECONFIG_PASSWORD` in the
+    // marker-based test above) — chosen to mirror the exact kind of gap
+    // called out for this mechanism: a real secret whose name doesn't
+    // happen to contain a recognized marker. Without `sensitive_env_keys`
+    // this would render in full.
+    const SECRET_KEY: &str = "DB_PASS";
+    const SECRET_VALUE: &str = "hunter2-real-secret";
+
+    let mut spec = helper_spec("print-env-var", DEFAULT_TIMEOUT);
+    spec.env.insert(
+        OsString::from(HELPER_ENV_VAR_NAME_VAR),
+        OsString::from(SECRET_KEY),
+    );
+    spec.env
+        .insert(OsString::from(SECRET_KEY), OsString::from(SECRET_VALUE));
+    spec.sensitive_env_keys.insert(OsString::from(SECRET_KEY));
+
+    // Half 1: diagnostics redact it, computed before the spec is spawned
+    // (and hence before `run_spec` below consumes it by value).
+    let context = spec.context();
+    assert_eq!(context.env.get(SECRET_KEY), Some(&RedactedValue::Sensitive));
+    let debug_output = format!("{spec:?}");
+    assert!(!debug_output.contains(SECRET_VALUE));
+    assert!(debug_output.contains("[REDACTED]"));
+
+    // Half 2: the same spec, actually run, still delivers the raw value
+    // to the child untouched.
+    let result = run_spec(rt, spec).expect("print-env-var must succeed");
+    assert_eq!(result.stdout, SECRET_VALUE.as_bytes());
+}
+
 fn command_context_preserves_non_sensitive_env_values(_rt: &tokio::runtime::Runtime) {
     let mut env = BTreeMap::new();
     env.insert(
@@ -716,6 +854,7 @@ fn command_context_preserves_non_sensitive_env_values(_rt: &tokio::runtime::Runt
         args: vec![],
         cwd: None,
         env,
+        sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
     };
 
@@ -745,6 +884,7 @@ fn command_spec_debug_output_never_contains_a_redacted_raw_value(_rt: &tokio::ru
         args: vec![OsString::from("create"), OsString::from("cluster")],
         cwd: None,
         env,
+        sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
     };
 
@@ -768,6 +908,7 @@ fn process_error_display_never_contains_a_redacted_raw_value(rt: &tokio::runtime
         args: vec![],
         cwd: None,
         env,
+        sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
     };
 

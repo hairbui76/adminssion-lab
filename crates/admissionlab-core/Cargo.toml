@@ -12,12 +12,21 @@ workspace = true
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["io-util", "process", "time"] }
+# `rt` is required here, not only in dev-dependencies: `process.rs`
+# itself calls `tokio::spawn`/uses `tokio::task::JoinHandle` (both
+# gated behind the `rt` feature) to drain the child's stdout/stderr
+# pipes concurrently with `wait()`. Cargo's v2 feature resolver keeps
+# dev-dependency-only features out of a plain library build, so if
+# `rt` lived only under `[dev-dependencies]`, `cargo build -p
+# admissionlab-core --lib` (or any downstream crate depending on this
+# one for its production build, not its tests) would fail to compile
+# even though `cargo test` — which pulls in dev-dependencies for every
+# target in the same build — would not catch it.
+tokio = { workspace = true, features = ["io-util", "process", "rt", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
 
 # `tests/process.rs` re-invokes itself as a child process to test the
 # runner in this crate without depending on any external binary (see
