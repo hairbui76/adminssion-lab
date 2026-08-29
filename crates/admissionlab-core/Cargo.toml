@@ -9,9 +9,24 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
+
+# `tests/process.rs` re-invokes itself as a child process to test the
+# runner in this crate without depending on any external binary (see
+# that file's module doc). Doing so requires full control over `fn
+# main`, which the default libtest harness does not give: its
+# generated `main` treats argv as test-name filters and prints its own
+# banner to stdout before any #[test] body runs, which would corrupt
+# the byte-for-byte stdout captures those tests rely on.
+[[test]]
+name = "process"
+path = "tests/process.rs"
+harness = false
