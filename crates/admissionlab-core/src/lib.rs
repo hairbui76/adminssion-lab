@@ -1,11 +1,13 @@
 #![forbid(unsafe_code)]
 
 pub mod artifact;
+pub mod diagnostic;
 pub mod error;
 pub mod ids;
 pub mod side;
 
 pub use artifact::{RunDisposition, RunPaths};
+pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue};
 pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};
 pub use side::Side;
