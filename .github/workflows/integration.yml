@@ -1,0 +1,30 @@
+name: Integration
+
+on:
+  pull_request:
+    paths:
+      - "crates/admissionlab-cluster/**"
+      - "crates/admissionlab-installer/**"
+      - "crates/admissionlab-admission/**"
+      - "crates/admissionlab-gateway/**"
+      - "recipes/**"
+      - "fixtures/**"
+      - "testdata/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    name: Integration checks (not yet implemented)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report placeholder status
+        run: |
+          echo "Integration checks are not implemented yet."
+          echo "This workflow only wires up the trigger paths for changes to the cluster, installer, admission, and gateway crates, plus recipes/fixtures/testdata."
+          echo "A later phase adds the real kind-based steps that create baseline and candidate clusters and replay fixtures through each."
