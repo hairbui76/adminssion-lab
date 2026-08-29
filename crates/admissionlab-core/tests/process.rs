@@ -39,7 +39,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io::{self, Write as _};
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::path::{Path, PathBuf};
+// `Path` is used only by the Linux-only `proc_dir_exists` below (see its
+// `#[cfg(target_os = "linux")]`); gating the import to match keeps it from
+// becoming an unused-import hard error under `-D warnings` on any other
+// target, which is exactly the class of bug this import previously caused
+// on macOS (see the fix report).
+#[cfg(target_os = "linux")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
