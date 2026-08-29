@@ -11,7 +11,16 @@ workspace = true
 [dependencies]
 async-trait = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# Used by `artifact.rs`'s `ArtifactStore::write_json_atomic` in
+# production code (not only by tests), so it belongs here rather than
+# under `[dev-dependencies]` — the same v2-resolver reasoning as the
+# comment on `tokio`'s `rt` feature below.
+serde_json = { workspace = true }
 thiserror = { workspace = true }
+# Emits a warning when `artifact.rs`'s owner-only permission logic is
+# compiled for a non-Unix target it cannot actually enforce permissions
+# on, so that degradation is visible at runtime rather than silent.
+tracing = { workspace = true }
 # `rt` is required here, not only in dev-dependencies: `process.rs`
 # itself calls `tokio::spawn`/uses `tokio::task::JoinHandle` (both
 # gated behind the `rt` feature) to drain the child's stdout/stderr
@@ -21,12 +30,11 @@ thiserror = { workspace = true }
 # admissionlab-core --lib` (or any downstream crate depending on this
 # one for its production build, not its tests) would fail to compile
 # even though `cargo test` — which pulls in dev-dependencies for every
-# target in the same build — would not catch it.
-tokio = { workspace = true, features = ["io-util", "process", "rt", "time"] }
+# target in the same build — would not catch it. `fs` is required for
+# the same reason: `artifact.rs`'s `ArtifactStore` performs its
+# directory creation and atomic writes through `tokio::fs`.
+tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "time"] }
 uuid = { workspace = true, features = ["v4"] }
-
-[dev-dependencies]
-serde_json = { workspace = true }
 
 # `tests/process.rs` re-invokes itself as a child process to test the
 # runner in this crate without depending on any external binary (see

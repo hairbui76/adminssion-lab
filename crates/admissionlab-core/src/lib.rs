@@ -7,7 +7,7 @@ pub mod ids;
 pub mod process;
 pub mod side;
 
-pub use artifact::{RunDisposition, RunPaths};
+pub use artifact::{ArtifactError, ArtifactStore, RunDisposition, RunPaths};
 pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue};
 pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};
