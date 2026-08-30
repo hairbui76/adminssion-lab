@@ -98,3 +98,26 @@ tracing = { workspace = true }
 # `tokio` entry (see that crate's `Cargo.toml` comment for the
 # v2-resolver reasoning this mirrors).
 tokio = { workspace = true, features = ["rt", "macros"] }
+# `readiness.rs`'s internal `tests` module drives `ResolvedTarget::fetch`
+# (its validating-then-mutating fallback for `WebhookConfigurationPresent`)
+# against a mocked Kubernetes API, the same way `kube-client`'s own test
+# suite does (`kube-client-4.2.0/src/client/mod.rs`'s `mod tests`, e.g.
+# `test_mock`): `Client::try_from(config)`/`ClientBuilder::build` are
+# synchronous and build a local `tower` service stack with no network I/O
+# (confirmed by reading `kube-client-4.2.0/src/client/mod.rs` and
+# `builder.rs` directly), so a `Client::new(mock_service, ns)` built from
+# `tower_test::mock::pair()` is a real, offline, non-network client for
+# this purpose -- not a live-cluster test. Pinned to the same `0.4.0`
+# `kube-client` itself dev-depends on (`kube-client-4.2.0/Cargo.toml`),
+# so this adds no new *version* to the resolved graph beyond what `kube`
+# already pulls in for its own test suite, only promotes it from
+# unreachable (a dependency's dev-dependency is never built for a
+# downstream consumer) to directly usable here.
+tower-test = "0.4.0"
+# `http::{Request, Response}` -- the request/response types
+# `tower_test::mock::pair` and `kube::Client::new` are generic over, and
+# what the mock test above asserts request URIs against and builds
+# responses with. Already resolved in `Cargo.lock` at `1.5.0` (a
+# transitive dependency of `kube-client` itself); this only names it
+# directly rather than changing what is fetched.
+http = "1.5.0"

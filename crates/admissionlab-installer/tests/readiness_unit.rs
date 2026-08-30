@@ -10,11 +10,21 @@
 //! backoff/deadline orchestration, exercised here against
 //! [`ScriptedFetch`]/[`AlwaysReturns`] — fake
 //! [`admissionlab_installer::readiness::ReadinessFetch`] implementations
-//! that never perform I/O — rather than the real
-//! [`admissionlab_installer::readiness::KubeReadinessProbe`], whose
-//! `wait` builds an actual `kube::Client` from a cluster's kubeconfig and
-//! so genuinely cannot be exercised without a live cluster (left for the
-//! Phase 2 exit gate).
+//! that never perform I/O.
+//!
+//! `readiness.rs`'s own internal `tests` module (not this file — those
+//! are private items, so an external test cannot reach them) separately
+//! covers `client_for`/`resolve_target`'s error paths offline (a real
+//! temp-file kubeconfig, no cluster) and `ResolvedTarget::fetch`'s
+//! validating-then-mutating fallback against a `tower_test::mock` fake
+//! service — `Client::try_from`/`ClientBuilder::build` are synchronous,
+//! local `tower`-stack construction with no network I/O, so those are
+//! genuinely offline tests too, not live-cluster ones. What remains
+//! untested anywhere, left for the Phase 2 exit gate: whether
+//! `client_for` actually *connects* using a real `kind`-produced
+//! kubeconfig, whether `ApiResource::from_gvk`'s plural guesser resolves
+//! correctly for real project-defined CRDs, and end-to-end behavior
+//! against a real Kyverno install.
 //!
 //! Covers Task 2.4 brief Step 1 and this task's minimum coverage list:
 //! - Each of the five [`admissionlab_spec::ReadinessCheck`] variants'
@@ -27,7 +37,11 @@
 //! - Backoff growth being capped.
 //! - The absolute deadline being respected.
 //! - A deadline failure carrying `last_observed` rather than losing it.
-//! - Redaction of `Secret`-shaped observed objects.
+//! - Redaction of `Secret`-shaped observed objects, and of a literal
+//!   credential-shaped `env[].value` in a `Deployment`/`DaemonSet`/`Job`
+//!   pod template (`redact_masks_a_hardcoded_credential_in_a_deployment_env_value`
+//!   and neighbors) — found in code review as the more likely of the two
+//!   vectors.
 
 use std::collections::VecDeque;
 use std::sync::Mutex;
@@ -671,4 +685,128 @@ fn redact_handles_a_secret_looked_up_via_custom_resource_condition() {
     });
     let redacted = redact_for_evidence(secret);
     assert_eq!(redacted["data"]["password"], "[REDACTED]");
+}
+
+#[test]
+fn redact_masks_a_hardcoded_credential_in_a_deployment_env_value() {
+    // The vector found in code review: a literal credential in a pod
+    // template's `env[].value` is a common real-world anti-pattern, and
+    // three of this module's five actual check targets (`Deployment`,
+    // `DaemonSet`, `Job`) always carry this shape in full once fetched.
+    const SENTINEL: &str = "hunter2-sentinel-must-not-leak";
+    let deployment = json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "kyverno-admission-controller"},
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{
+                        "name": "kyverno",
+                        "env": [
+                            {"name": "DB_PASSWORD", "value": SENTINEL},
+                            {"name": "LOG_LEVEL", "value": "debug"},
+                        ],
+                    }],
+                },
+            },
+        },
+        "status": {"conditions": [{"type": "Available", "status": "True"}]},
+    });
+
+    let redacted = redact_for_evidence(deployment);
+
+    let env = redacted["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("env array present");
+    assert_eq!(env[0]["name"], "DB_PASSWORD");
+    assert_eq!(env[0]["value"], "[REDACTED]");
+    assert_eq!(env[1]["name"], "LOG_LEVEL");
+    assert_eq!(
+        env[1]["value"], "debug",
+        "a non-sensitive value must survive untouched"
+    );
+
+    let rendered = redacted.to_string();
+    assert!(
+        !rendered.contains(SENTINEL),
+        "the sentinel credential must not appear anywhere in the redacted evidence"
+    );
+}
+
+#[test]
+fn redact_covers_init_containers_as_well_as_containers() {
+    const SENTINEL: &str = "init-container-secret-sentinel";
+    let job = json!({
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "spec": {
+            "template": {
+                "spec": {
+                    "initContainers": [{
+                        "name": "wait-for-db",
+                        "env": [{"name": "DB_PASSWORD", "value": SENTINEL}],
+                    }],
+                    "containers": [{"name": "main", "env": []}],
+                },
+            },
+        },
+    });
+
+    let redacted = redact_for_evidence(job);
+
+    assert_eq!(
+        redacted["spec"]["template"]["spec"]["initContainers"][0]["env"][0]["value"],
+        "[REDACTED]"
+    );
+    assert!(!redacted.to_string().contains(SENTINEL));
+}
+
+#[test]
+fn redact_leaves_value_from_references_untouched_even_when_the_name_looks_sensitive() {
+    // `valueFrom` (a `secretKeyRef`/`configMapKeyRef`/... reference) is
+    // the *safe*, indirect way to wire a Secret into a pod: there is no
+    // literal value inline to redact, and the reference itself (which
+    // Secret name/key it draws from) is useful, non-sensitive
+    // information a diagnostic should keep.
+    let deployment = json!({
+        "kind": "Deployment",
+        "spec": {
+            "template": {
+                "spec": {
+                    "containers": [{
+                        "name": "kyverno",
+                        "env": [{
+                            "name": "DB_PASSWORD",
+                            "valueFrom": {
+                                "secretKeyRef": {"name": "db-credentials", "key": "password"},
+                            },
+                        }],
+                    }],
+                },
+            },
+        },
+    });
+
+    let redacted = redact_for_evidence(deployment.clone());
+
+    assert_eq!(
+        redacted, deployment,
+        "no literal value exists here to redact"
+    );
+}
+
+#[test]
+fn redact_is_a_no_op_for_objects_with_no_pod_template() {
+    // `WebhookConfigurationPresent`'s targets and most custom resources
+    // have nothing at `.spec.template.spec` at all -- confirms the pass
+    // degrades to a safe no-op rather than panicking on a missing path.
+    let webhook = json!({
+        "apiVersion": "admissionregistration.k8s.io/v1",
+        "kind": "ValidatingWebhookConfiguration",
+        "metadata": {"name": "kyverno-policy-validating-webhook-cfg"},
+        "webhooks": [{"name": "validate.kyverno.svc"}],
+    });
+    let redacted = redact_for_evidence(webhook.clone());
+    assert_eq!(redacted, webhook);
 }

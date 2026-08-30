@@ -19,6 +19,7 @@ pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};
 pub use process::{
     CommandContext, CommandResult, CommandSpec, ProcessError, ProcessRunner, TokioProcessRunner,
+    env_key_looks_sensitive,
 };
 pub use run::{
     ClusterCreationFailure, LabRunner, PreparedLab, RunError, RunOptions, preserved_cluster_report,

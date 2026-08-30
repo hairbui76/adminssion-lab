@@ -9,15 +9,31 @@
 //! [`ReadinessCheck`] and an already-observed `serde_json::Value` (or
 //! `None`, if nothing has been observed yet) to `bool`. It never talks
 //! to a cluster, so it is unit-tested directly against captured objects
-//! in `tests/readiness_unit.rs` with no live cluster at all. Everything
-//! that *does* talk to a cluster — [`client_for`], [`resolve_target`],
-//! [`ResolvedTarget`]'s [`ReadinessFetch`] implementation — is kept
-//! separate, reached only through [`KubeReadinessProbe::wait`], which
-//! is consequently the one part of this module that cannot be
-//! exercised without a real kube-apiserver (left for the Phase 2 exit
-//! gate). [`poll_readiness`] (Step 3) sits in between: it is generic
-//! over any [`ReadinessFetch`], so its backoff/deadline orchestration is
-//! *also* unit-tested, against a fake implementation.
+//! in `tests/readiness_unit.rs` with no live cluster at all.
+//! [`poll_readiness`] (Step 3) sits in between: it is generic over any
+//! [`ReadinessFetch`], so its backoff/deadline orchestration is *also*
+//! unit-tested, against a fake implementation.
+//!
+//! Everything that *does* talk to a cluster — [`client_for`],
+//! [`resolve_target`], [`ResolvedTarget`]'s [`ReadinessFetch`]
+//! implementation — is kept separate, reached in production only
+//! through [`KubeReadinessProbe::wait`]. This is *not* uniformly
+//! "untestable without a real kube-apiserver", though an earlier version
+//! of this documentation claimed exactly that: `Client::try_from(config)`/
+//! `ClientBuilder::build` are synchronous and build a local `tower`
+//! service stack with no network I/O (confirmed by reading
+//! `kube-client-4.2.0/src/client/mod.rs`/`builder.rs` directly), so this
+//! module's own `tests` (an internal module, since these are private
+//! items) cover `client_for`'s and `resolve_target`'s error paths
+//! offline with a real temp-file kubeconfig, and `ResolvedTarget::fetch`'s
+//! validating-then-mutating fallback against a `tower_test::mock` fake
+//! service — the same technique `kube-client`'s own test suite uses.
+//! What genuinely remains untested without a live kube-apiserver: whether
+//! `client_for` actually *connects* using a real `kind`-produced
+//! kubeconfig, whether `ApiResource::from_gvk`'s plural guesser resolves
+//! correctly for real project-defined CRDs, and end-to-end behavior
+//! against a real Kyverno install — left for the Phase 2 exit gate. See
+//! this module's `tests` module documentation for the exact list.
 //!
 //! # Why poll, not watch (Brief Step 3)
 //!
@@ -46,13 +62,37 @@
 //!    handles all five through one mechanism: a [`ReadinessFetch`] that
 //!    returns `Option<serde_json::Value>`, plus [`evaluate`].
 //!
-//! # `DaemonSetReady`: no `.status.conditions`, and what zero desired means
+//! # `DaemonSetReady`: `.status.conditions` exists but isn't actionable, and what zero desired means
 //!
-//! `k8s-openapi`'s generated `DaemonSetStatus` has no `conditions` field
-//! at all (verified by reading
+//! Correction (found in code review, not caught before this module first
+//! shipped): an earlier version of this documentation claimed
+//! `k8s-openapi`'s generated `DaemonSetStatus` "has no `conditions`
+//! field at all", citing that as "verified by reading
+//! `daemon_set_status.rs` directly". ~~That claim was false.~~ Having
+//! now personally re-read
 //! `k8s-openapi-0.28.0/src/v1_36/api/apps/v1/daemon_set_status.rs`
-//! directly) — only scalar counters. [`daemonset_ready`] follows the
-//! same algorithm `kubectl rollout status daemonset` itself uses
+//! myself: line 10 is `pub conditions:
+//! Option<std::vec::Vec<crate::api::apps::v1::DaemonSetCondition>>` —
+//! **the field exists.** See this task's report for how the false claim
+//! originated and why it shipped uncaught the first time.
+//!
+//! What remains true, and is why [`daemonset_ready`] still does not read
+//! `.status.conditions`: the *built-in `DaemonSet` controller does not
+//! populate this field with an actionable, standardized condition* the
+//! way Deployment's `Available` or Job's `Complete` are. Unlike the
+//! field's existence, this is not something a struct definition alone
+//! can prove — it is the controller's runtime behavior, not its
+//! generated Rust shape, so it cannot be "verified by reading" a type
+//! definition; it is well-established Kubernetes operational knowledge
+//! (`kubectl get daemonset -o yaml` against a real, healthy cluster
+//! routinely shows `conditions` empty or absent, even for a fully ready
+//! `DaemonSet`) and would need reading the `DaemonSet` controller's own
+//! source in `kubernetes/kubernetes`, or a live cluster, to verify to
+//! the same standard as the field's existence. [`daemonset_ready`]'s
+//! generation-then-counters algorithm is unaffected by the correction
+//! above — it was never based on the field being absent, only on it not
+//! being a reliable, actionable signal — and follows the same algorithm
+//! `kubectl rollout status daemonset` itself uses
 //! (`k8s.io/kubectl`'s `polymorphichelpers/rollout_status.go`): first
 //! require `status.observedGeneration >= metadata.generation` — the
 //! controller has reconciled at least the current spec — and only then
@@ -109,22 +149,50 @@
 //! type is fixed by the cross-task struct registry as a plain
 //! `serde_json::Value` (not `RedactedValue`), and is populated here,
 //! long before that central pass exists. [`redact_for_evidence`] is a
-//! deliberately narrow stand-in, not that general pass: it recognizes
-//! only `kind == "Secret"` and masks `.data`/`.stringData` map *values*
-//! (never their keys — field names like `"tls.crt"` are useful
-//! diagnostics on their own) with the literal `"[REDACTED]"`, the same
-//! text [`admissionlab_core::RedactedValue::Sensitive`] renders as, so
-//! a report reads consistently regardless of which layer produced it.
-//! This matters even though none of the five checks *target* a Secret:
-//! nothing in [`ReadinessCheck::CustomResourceCondition`]'s own type
-//! stops a caller from naming `api_version: "v1", kind: "Secret"` — it
-//! is the one check that reads a resource of genuinely arbitrary kind
-//! (via `kube`'s dynamic API; see [`resolve_target`]) — so it is the
-//! one path that can actually observe a real Secret. This pass does
-//! *not* attempt to find secret material nested inside some other
-//! kind's fields (for example a `kubectl.kubernetes.io/last-applied-configuration`
-//! annotation that happens to embed a prior Secret) — that is Task
-//! 4.10's job, not this one's.
+//! deliberately narrow stand-in, not that general pass, covering two
+//! vectors:
+//!
+//! 1. **`Secret` objects.** Recognizes `kind == "Secret"` and masks
+//!    `.data`/`.stringData` map *values* (never their keys — field
+//!    names like `"tls.crt"` are useful diagnostics on their own).
+//!    Matters even though none of the five checks *target* a Secret:
+//!    nothing in [`ReadinessCheck::CustomResourceCondition`]'s own type
+//!    stops a caller from naming `api_version: "v1", kind: "Secret"` —
+//!    it is the one check that reads a resource of genuinely arbitrary
+//!    kind (via `kube`'s dynamic API; see [`resolve_target`]) — so it is
+//!    the one path that can observe a real Secret *object*.
+//! 2. **Literal credential-shaped `env[].value` entries** inside
+//!    `.spec.template.spec.containers[]`/`initContainers[]` — found in
+//!    code review, and a materially more likely leak than (1): a
+//!    hardcoded credential in a literal environment variable (`- name:
+//!    DB_PASSWORD\n  value: "hunter2"`) is a common real-world
+//!    anti-pattern, and `Deployment`/`DaemonSet`/`Job` — three of this
+//!    module's five actual check targets, not a hypothetical constructed
+//!    check — always carry this shape in full when fetched (see
+//!    `ResolvedTarget`'s `fetch`, which serializes the whole object).
+//!    [`redact_pod_template_env`] reuses
+//!    [`admissionlab_core::env_key_looks_sensitive`] verbatim — the same
+//!    heuristic [`admissionlab_core::CommandSpec::context`] already uses
+//!    for PRODUCT.md §29.3 — rather than a second, independently
+//!    maintained copy that could silently drift from it. Only a literal
+//!    `env[].value` is touched; `env[].valueFrom` (a `secretKeyRef`/
+//!    `configMapKeyRef` *reference*, the safe, indirect way to wire a
+//!    Secret into a pod) carries no literal value inline and is left
+//!    alone.
+//!
+//! Both masks use the literal `"[REDACTED]"`, the same text
+//! [`admissionlab_core::RedactedValue::Sensitive`] renders as, so a
+//! report reads consistently regardless of which layer produced it.
+//!
+//! What this still does **not** cover, deliberately (Task 4.10's job,
+//! not this one's): secret material nested inside some other field
+//! shape entirely — for example a
+//! `kubectl.kubernetes.io/last-applied-configuration` annotation that
+//! happens to embed a prior Secret, or a credential passed via a
+//! container's `args`/`command` rather than `env`. A partial list is
+//! worse than none if it is read as complete, so this list is the
+//! intended full account of what this pass covers today, not an
+//! illustrative sample.
 
 use std::time::{Duration, Instant};
 
@@ -375,9 +443,9 @@ fn condition_status<'a>(observed: &'a serde_json::Value, condition_type: &str) -
 }
 
 /// `DaemonSet` readiness from its scalar status counters. See this
-/// module's documentation ("`DaemonSetReady`: no `.status.conditions`,
-/// and what zero desired means") for the algorithm and why the
-/// generation check comes first.
+/// module's documentation ("`DaemonSetReady`: `.status.conditions`
+/// exists but isn't actionable, and what zero desired means") for the
+/// algorithm and why the generation check comes first.
 fn daemonset_ready(observed: &serde_json::Value) -> bool {
     let generation = observed
         .get("metadata")
@@ -408,14 +476,29 @@ fn daemonset_ready(observed: &serde_json::Value) -> bool {
     counter("updatedNumberScheduled") >= desired && counter("numberAvailable") >= desired
 }
 
+/// The literal text every redaction below masks a value with. Matches
+/// [`admissionlab_core::RedactedValue::Sensitive`]'s own rendering, so a
+/// report reads consistently regardless of which layer produced the
+/// redaction — but is not the same *type*: `RedactedValue` itself cannot
+/// be reused here, since [`ReadinessEvidence::last_observed`]'s type is
+/// fixed by the cross-task struct registry as `serde_json::Value`.
+const REDACTED_MARKER: &str = "[REDACTED]";
+
 /// Applied to every object about to be stored in
 /// [`ReadinessEvidence::last_observed`]. See this module's
-/// documentation ("Redaction of `last_observed`, today") for what this
-/// does and does not cover, and why.
+/// documentation ("Redaction of `last_observed`, today") for the two
+/// vectors this covers, and what it deliberately does not.
 #[must_use]
 pub fn redact_for_evidence(mut value: serde_json::Value) -> serde_json::Value {
-    const REDACTED_MARKER: &str = "[REDACTED]";
+    redact_secret_data(&mut value);
+    redact_pod_template_env(&mut value);
+    value
+}
 
+/// Masks a `Secret` object's `.data`/`.stringData` map values (never
+/// their keys) in place. A no-op for any object whose `kind` is not
+/// exactly `"Secret"`.
+fn redact_secret_data(value: &mut serde_json::Value) {
     let is_secret = value.get("kind").and_then(serde_json::Value::as_str) == Some("Secret");
     if is_secret {
         for field in ["data", "stringData"] {
@@ -426,7 +509,59 @@ pub fn redact_for_evidence(mut value: serde_json::Value) -> serde_json::Value {
             }
         }
     }
-    value
+}
+
+/// Masks literal `env[].value` entries whose `name` looks
+/// credential-like (via [`admissionlab_core::env_key_looks_sensitive`]),
+/// across every entry of `.spec.template.spec.containers[]` and
+/// `.spec.template.spec.initContainers[]`, in place.
+///
+/// Applied unconditionally, regardless of `kind`: this is the shape of a
+/// `PodTemplateSpec`, which `Deployment`, `DaemonSet`, and `Job` all
+/// embed at exactly this path, and a project-defined custom resource
+/// that also embeds one at the same conventional path (not unusual —
+/// several real-world workflow/pipeline CRDs do) is covered for free
+/// rather than needing this taught a new `kind` by hand. A no-op for any
+/// object with nothing at `.spec.template.spec` (webhook configurations,
+/// most custom resources, `Secret`).
+///
+/// Only a literal `env[].value` is touched — `env[].valueFrom` (a
+/// `secretKeyRef`/`configMapKeyRef`/`fieldRef`/`resourceFieldRef`
+/// *reference*, not an inline literal) is left alone; there is no
+/// literal value there to redact, and the reference itself (for example
+/// which Secret *name* a key is drawn from) is useful, non-sensitive
+/// diagnostic information.
+fn redact_pod_template_env(value: &mut serde_json::Value) {
+    let Some(pod_spec) = value.pointer_mut("/spec/template/spec") else {
+        return;
+    };
+    for field in ["containers", "initContainers"] {
+        let Some(containers) = pod_spec
+            .get_mut(field)
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            continue;
+        };
+        for container in containers {
+            let Some(env) = container
+                .get_mut("env")
+                .and_then(serde_json::Value::as_array_mut)
+            else {
+                continue;
+            };
+            for entry in env {
+                let name_looks_sensitive = entry
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|name| {
+                        admissionlab_core::env_key_looks_sensitive(std::ffi::OsStr::new(name))
+                    });
+                if name_looks_sensitive && let Some(literal_value) = entry.get_mut("value") {
+                    *literal_value = serde_json::Value::String(REDACTED_MARKER.to_string());
+                }
+            }
+        }
+    }
 }
 
 /// Builds a `kube::Client` from `cluster`'s own kubeconfig — never the
@@ -496,16 +631,45 @@ fn to_value_opt<T: Serialize>(object: Option<T>) -> Result<Option<serde_json::Va
         .transpose()
 }
 
+/// Parses `api_version` (for example `"apps/v1"` or
+/// `"kyverno.io/v2beta1"`, and `"v1"` for the core API group) into a
+/// [`GroupVersion`]. Pure and synchronous — no cluster access, no
+/// client — so it is unit-tested directly (this module's own `tests`),
+/// independent of whether a Kubernetes client can be built at all.
+///
+/// In practice this is close to infallible for any realistic input:
+/// `GroupVersion::from_str` (confirmed by reading `kube-core-4.2.0/src/gvk.rs`
+/// directly) splits on the first `/` and has no reachable rejecting arm
+/// for that split. It is still handled as a `Result` — never
+/// `.unwrap()`/`.expect()` — both because that guarantee belongs to
+/// `kube-core`, not to this function, and because a `Result` here is
+/// what lets [`resolve_target`] fail on a malformed `api_version` before
+/// ever attempting to build a Kubernetes client, rather than coupling
+/// that check to client construction by statement order.
+fn parse_group_version(api_version: &str) -> Result<GroupVersion, String> {
+    api_version
+        .parse()
+        .map_err(|error: kube::core::gvk::ParseGroupVersionError| {
+            format!("invalid api_version {api_version:?}: {error}")
+        })
+}
+
 /// Builds the [`ResolvedTarget`] for `check` against `cluster`. Both of
 /// this function's failure modes are permanent, discovered once, before
 /// any poll attempt begins — see [`InstallError::ReadinessUnavailable`]:
-/// the client itself ([`client_for`]), or — only for
-/// [`ReadinessCheck::CustomResourceCondition`] — parsing `api_version`
-/// into a group/version.
+/// parsing `api_version` (only for
+/// [`ReadinessCheck::CustomResourceCondition`], via
+/// [`parse_group_version`], checked *before* the client below so a
+/// malformed `api_version` fails fast rather than after an unnecessary
+/// client-build attempt), or the client itself ([`client_for`]).
 async fn resolve_target(
     cluster: &ClusterHandle,
     check: &ReadinessCheck,
 ) -> Result<ResolvedTarget, String> {
+    if let ReadinessCheck::CustomResourceCondition { api_version, .. } = check {
+        parse_group_version(api_version)?;
+    }
+
     let client = client_for(cluster)
         .await
         .map_err(|error| error.to_string())?;
@@ -529,9 +693,14 @@ async fn resolve_target(
             name,
             ..
         } => {
-            let group_version: GroupVersion = api_version
-                .parse()
-                .map_err(|error| format!("invalid api_version {api_version:?}: {error}"))?;
+            // Re-parses rather than threading the already-validated
+            // value through from the guard clause above: `parse_group_version`
+            // is a cheap, pure string split (see its own doc), so doing
+            // this keeps every match arm here a single, uniform
+            // construction step, with no `.expect()`/`unreachable!()`
+            // needed to bridge an artificial "this Option is always Some
+            // here" invariant across the two passes over `check`.
+            let group_version = parse_group_version(api_version)?;
             let resource = ApiResource::from_gvk(&group_version.with_kind(kind));
             let api = match namespace {
                 Some(ns) => Api::namespaced_with(client, ns, &resource),
@@ -571,5 +740,257 @@ impl ReadinessProbe for KubeReadinessProbe {
             }
         })?;
         Ok(poll_readiness(check, deadline, &BackoffPolicy::default(), &target).await)
+    }
+}
+
+// =========================================================================
+// Internal tests: what genuinely needs a live API server, versus what
+// merely wasn't seamed for testing.
+//
+// `tests/readiness_unit.rs` (an external test, public-API-only) covers
+// Brief Step 1's predicates and Step 3's backoff/deadline orchestration
+// against fakes. The tests below cover this module's remaining private
+// surface -- `client_for`, `resolve_target`, `parse_group_version`, and
+// `ResolvedTarget::fetch` -- as an internal module (needs access to
+// private items, which an external `tests/*.rs` file cannot have).
+//
+// What is proven here, offline, with no cluster and no network:
+// - `client_for`'s error path: a missing or malformed kubeconfig file
+//   fails with a non-empty, readable message -- exactly the string that
+//   ends up in `InstallError::ReadinessUnavailable::reason`, a
+//   PRODUCT.md §33 diagnostic that had zero coverage before this pass.
+//   `Client::try_from(config)`/`ClientBuilder::build` are synchronous
+//   and build a local `tower` service stack with no network I/O
+//   (confirmed by reading `kube-client-4.2.0/src/client/mod.rs` and
+//   `builder.rs` directly) -- so this really is an offline test, not a
+//   live-cluster one wearing a disguise.
+// - `resolve_target`'s error surfacing end to end (not just `client_for`
+//   in isolation).
+// - `parse_group_version` directly, decoupled from client construction.
+// - `ResolvedTarget::fetch`'s one piece of hand-written conditional
+//   logic -- the validating-then-mutating fallback for
+//   `WebhookConfigurationPresent` -- against a `tower_test::mock` fake
+//   service, the same technique `kube-client`'s own test suite uses
+//   (`kube-client-4.2.0/src/client/mod.rs`'s `mod tests`, e.g.
+//   `test_mock`) to drive a real `Api<K>` with no network at all.
+//
+// What remains genuinely untestable without a live kube-apiserver, and
+// is left for the Phase 2 exit gate: whether `client_for` connects
+// successfully to a real `kind`-produced kubeconfig (as opposed to
+// merely constructing a `Client` value from one); whether
+// `ApiResource::from_gvk`'s plural guesser resolves correctly for
+// whatever real CRDs Phase 2's recipes name; and whether a poll loop
+// against a real Kyverno install actually observes its webhook
+// configuration appear after the admission controller starts.
+// =========================================================================
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::PathBuf;
+    use std::pin::pin;
+
+    use admissionlab_core::{ClusterSpec, RunId, Side};
+    use http::{Request, Response};
+    use kube::client::Body;
+    use tower_test::mock;
+
+    use super::{
+        Api, ApiResource, Client, ClusterHandle, MutatingWebhookConfiguration, ReadinessCheck,
+        ReadinessFetch, ResolvedTarget, ValidatingWebhookConfiguration, client_for,
+        parse_group_version, resolve_target,
+    };
+
+    /// A fresh, guaranteed-unique path under the OS temp dir, for one
+    /// test's kubeconfig file. Mirrors the unique-temp-path pattern
+    /// already established in `admissionlab-core`'s own
+    /// `tests/process.rs`/`tests/artifact.rs`, rather than pulling in a
+    /// new dependency just for a test-only temp file.
+    fn unique_kubeconfig_path(label: &str) -> PathBuf {
+        let unique = RunId::generate();
+        std::env::temp_dir().join(format!(
+            "admissionlab-installer-readiness-test-{label}-{}.yaml",
+            unique.as_str()
+        ))
+    }
+
+    /// A minimal, otherwise-valid [`ClusterHandle`] pointing at
+    /// `kubeconfig`. Only `kubeconfig` varies per test; every other
+    /// field is a fixed, inert placeholder `client_for` never inspects.
+    fn cluster_handle_with_kubeconfig(kubeconfig: PathBuf) -> ClusterHandle {
+        ClusterHandle {
+            spec: ClusterSpec {
+                side: Side::Baseline,
+                name: "readiness-test-cluster".to_string(),
+                kubernetes_version: "1.36.0".to_string(),
+                node_image: "kindest/node:v1.36.0".to_string(),
+            },
+            kubeconfig,
+            audit_log: std::env::temp_dir().join("admissionlab-installer-readiness-test-audit.log"),
+        }
+    }
+
+    #[tokio::test]
+    async fn client_for_fails_with_a_readable_message_when_the_kubeconfig_is_missing() {
+        let missing = unique_kubeconfig_path("missing");
+        let cluster = cluster_handle_with_kubeconfig(missing);
+
+        let error = client_for(&cluster)
+            .await
+            .err()
+            .expect("a nonexistent kubeconfig path must not succeed");
+
+        assert!(
+            !error.to_string().is_empty(),
+            "InstallError::ReadinessUnavailable::reason must carry a real message, not an empty one"
+        );
+    }
+
+    #[tokio::test]
+    async fn client_for_fails_with_a_readable_message_when_the_kubeconfig_is_malformed() {
+        let path = unique_kubeconfig_path("malformed");
+        std::fs::write(&path, "not: [valid yaml: at all -- }}}")
+            .expect("write malformed kubeconfig");
+        let cluster = cluster_handle_with_kubeconfig(path.clone());
+
+        let error = client_for(&cluster)
+            .await
+            .err()
+            .expect("malformed kubeconfig YAML must not parse into a usable client");
+
+        assert!(!error.to_string().is_empty());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn resolve_target_surfaces_the_client_failure_as_a_reason_string() {
+        // Exercises `resolve_target` itself -- the exact function
+        // `KubeReadinessProbe::wait` calls -- not only `client_for` in
+        // isolation, proving the failure reaches
+        // `InstallError::ReadinessUnavailable.reason` end to end as a
+        // non-empty, human-readable `String`.
+        let missing = unique_kubeconfig_path("resolve-target-missing");
+        let cluster = cluster_handle_with_kubeconfig(missing);
+        let check = ReadinessCheck::DeploymentAvailable {
+            namespace: "kyverno".to_string(),
+            name: "kyverno-admission-controller".to_string(),
+        };
+
+        let reason = resolve_target(&cluster, &check)
+            .await
+            .err()
+            .expect("a missing kubeconfig must fail resolve_target too");
+
+        assert!(!reason.is_empty());
+    }
+
+    #[test]
+    fn parse_group_version_splits_group_and_version() {
+        let group_version = parse_group_version("apps/v1").expect("valid api_version");
+        assert_eq!(group_version.group, "apps");
+        assert_eq!(group_version.version, "v1");
+    }
+
+    #[test]
+    fn parse_group_version_handles_the_core_api_group() {
+        // The core API group has no `/`-prefixed group name at all --
+        // `"v1"` alone, not `"core/v1"` or `"/v1"`.
+        let group_version = parse_group_version("v1").expect("valid api_version");
+        assert_eq!(group_version.group, "");
+        assert_eq!(group_version.version, "v1");
+    }
+
+    #[test]
+    fn parse_group_version_is_used_by_resource_gvk_construction() {
+        // Not a client/cluster concern at all: proves `parse_group_version`'s
+        // output composes correctly with `ApiResource::from_gvk`, the
+        // next step `resolve_target` takes for `CustomResourceCondition`.
+        let group_version = parse_group_version("kyverno.io/v2").expect("valid api_version");
+        let resource = ApiResource::from_gvk(&group_version.with_kind("ClusterPolicy"));
+        assert_eq!(resource.group, "kyverno.io");
+        assert_eq!(resource.version, "v2");
+        assert_eq!(resource.kind, "ClusterPolicy");
+        assert_eq!(resource.plural, "clusterpolicies");
+    }
+
+    /// Drives [`ResolvedTarget::Webhook`]'s `fetch` against a
+    /// `tower_test` mock service: the first request (validating) is
+    /// answered `404 Not Found`, the second (mutating) with a real
+    /// object, proving the fallback genuinely happens because the first
+    /// lookup returned "not found" -- not merely because the code
+    /// compiles as intended. Mirrors `kube-client-4.2.0/src/client/mod.rs`'s
+    /// own `test_mock`.
+    #[tokio::test]
+    async fn webhook_fetch_falls_back_to_mutating_when_validating_is_not_found() {
+        let (mock_service, handle) = mock::pair::<Request<Body>, Response<Body>>();
+        let client = Client::new(mock_service, "default");
+
+        let target = ResolvedTarget::Webhook(
+            Api::<ValidatingWebhookConfiguration>::all(client.clone()),
+            Api::<MutatingWebhookConfiguration>::all(client),
+            "kyverno-policy-webhook-cfg".to_string(),
+        );
+
+        let responder = tokio::spawn(async move {
+            let mut handle = pin!(handle);
+
+            let (request, send) = handle.next_request().await.expect("validating lookup");
+            assert_eq!(
+                request.uri().path(),
+                "/apis/admissionregistration.k8s.io/v1/validatingwebhookconfigurations/kyverno-policy-webhook-cfg"
+            );
+            let not_found = serde_json::json!({
+                "kind": "Status",
+                "apiVersion": "v1",
+                "status": "Failure",
+                "reason": "NotFound",
+                "code": 404,
+            });
+            send.send_response(
+                Response::builder()
+                    .status(404)
+                    .body(Body::from(
+                        serde_json::to_vec(&not_found).expect("serialize Status"),
+                    ))
+                    .expect("build 404 response"),
+            );
+
+            let (request, send) = handle.next_request().await.expect("mutating lookup");
+            assert_eq!(
+                request.uri().path(),
+                "/apis/admissionregistration.k8s.io/v1/mutatingwebhookconfigurations/kyverno-policy-webhook-cfg"
+            );
+            let found = serde_json::json!({
+                "apiVersion": "admissionregistration.k8s.io/v1",
+                "kind": "MutatingWebhookConfiguration",
+                "metadata": {"name": "kyverno-policy-webhook-cfg"},
+                "webhooks": [{"name": "mutate.kyverno.svc"}],
+            });
+            send.send_response(Response::new(Body::from(
+                serde_json::to_vec(&found).expect("serialize MutatingWebhookConfiguration"),
+            )));
+        });
+
+        let observed = target
+            .fetch()
+            .await
+            .expect("fetch must succeed via the mutating fallback")
+            .expect("the mutating webhook configuration was found");
+        assert_eq!(observed["kind"], "MutatingWebhookConfiguration");
+
+        responder.await.expect("mock responder task must not panic");
+    }
+
+    // Sanity: `OsStr` conversion in `redact_pod_template_env` round-trips
+    // a plain UTF-8 JSON string key through `admissionlab_core::env_key_looks_sensitive`
+    // the same way a real environment-variable key would.
+    #[test]
+    fn env_key_conversion_matches_the_reused_core_heuristic_directly() {
+        assert!(admissionlab_core::env_key_looks_sensitive(OsStr::new(
+            "DB_PASSWORD"
+        )));
+        assert!(!admissionlab_core::env_key_looks_sensitive(OsStr::new(
+            "LOG_LEVEL"
+        )));
     }
 }

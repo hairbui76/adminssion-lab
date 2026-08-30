@@ -278,7 +278,19 @@ const SENSITIVE_ENV_KEY_MARKERS: &[&str] = &[
 
 /// Returns whether `key` looks credential-like by
 /// [`SENSITIVE_ENV_KEY_MARKERS`].
-fn env_key_looks_sensitive(key: &OsStr) -> bool {
+///
+/// `pub` (not only used by [`CommandSpec::context`] above): Task 2.4's
+/// `admissionlab-installer` reuses this exact heuristic to redact literal
+/// `env[].value` entries in a captured `Deployment`/`DaemonSet`/`Job`'s
+/// pod template before it can reach a user-facing readiness diagnostic
+/// (PRODUCT.md §29.3 applies there too — a hardcoded credential in an
+/// env var is exactly the same anti-pattern regardless of whether it
+/// reached this crate via a child process's environment or via a
+/// captured Kubernetes object). Re-exported here rather than duplicated
+/// so the two call sites can never quietly drift into differently
+/// behaving heuristics.
+#[must_use]
+pub fn env_key_looks_sensitive(key: &OsStr) -> bool {
     let upper = key.to_string_lossy().to_ascii_uppercase();
     SENSITIVE_ENV_KEY_MARKERS
         .iter()
