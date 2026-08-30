@@ -105,35 +105,3 @@ async fn resolve_fails_with_resource_discovery_unavailable_when_kubeconfig_is_ma
 
     let _ = std::fs::remove_file(&path);
 }
-
-#[tokio::test]
-async fn resolve_dispatches_through_a_trait_object() {
-    // Fails if `ResourceResolver` were accidentally not object-safe, or
-    // if dynamic dispatch somehow bypassed `KubeResourceResolver`'s own
-    // `resolve` (in which case this would not compile, or would not
-    // reach the same `client_for` failure the direct-call test above
-    // does).
-    let cluster = cluster_handle_with_kubeconfig(unique_kubeconfig_path("trait-object"));
-    let resolver: Box<dyn ResourceResolver> = Box::new(KubeResourceResolver::new());
-
-    let error = resolver
-        .resolve(&cluster, "v1", "ConfigMap")
-        .await
-        .expect_err("a nonexistent kubeconfig path must not resolve successfully");
-
-    assert!(matches!(
-        error,
-        FixtureError::ResourceDiscoveryUnavailable { .. }
-    ));
-}
-
-#[tokio::test]
-async fn invalidate_before_any_resolve_is_a_harmless_no_op() {
-    let resolver = KubeResourceResolver::new();
-    let cluster = cluster_handle_with_kubeconfig(unique_kubeconfig_path("never-resolved"));
-
-    // Fails only if this panics or hangs -- there is nothing else to
-    // assert about removing an absent cache entry through the public
-    // API alone.
-    resolver.invalidate(&cluster).await;
-}

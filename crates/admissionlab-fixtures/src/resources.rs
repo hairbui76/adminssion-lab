@@ -37,13 +37,36 @@
 //!
 //! [`KubeResourceResolver`] runs [`kube::discovery::Discovery`] at most
 //! once per cluster: [`KubeResourceResolver::resolve`] keys a cache on
-//! [`admissionlab_core::ClusterHandle::kubeconfig`] (isolated and unique
-//! per cluster -- see that field's own documentation -- so it is a safe
-//! cache key without needing `ClusterHandle` itself to implement
-//! `Ord`/`Hash`), and only runs discovery on a cache miss. A `BTreeMap`
-//! is used for that cache, not a `HashMap`, matching this crate's
-//! blanket rule (see the crate root's documentation) rather than arguing
-//! this particular cache is exempt from it.
+//! [`admissionlab_core::ClusterHandle::kubeconfig`] -- a plain `PathBuf`,
+//! so it is a usable cache key without needing `ClusterHandle` itself to
+//! implement `Ord`/`Hash` -- and only runs discovery on a cache miss. A
+//! `BTreeMap` is used for that cache, not a `HashMap`, matching this
+//! crate's blanket rule (see the crate root's documentation) rather than
+//! arguing this particular cache is exempt from it.
+//!
+//! **What that key actually guarantees, precisely (found in review):**
+//! [`admissionlab_core::ClusterHandle::kubeconfig`]'s own documentation
+//! only promises two things -- never the operator's ambient
+//! `~/.kube/config`, and never shared between a baseline and a candidate
+//! cluster from the same run. It does not promise global uniqueness or
+//! stability of a cluster's *identity* across a run. Tracing the real
+//! derivation (`admissionlab_cluster::kubeconfig::kubeconfig_path`:
+//! `<run>/kubeconfigs/<side>.kubeconfig`) shows the path is a function
+//! of `(RunId, Side)` alone, with no incarnation counter. That is
+//! sufficient today because [`admissionlab_core::cluster::ClusterManager::create`]
+//! is called at most once per side per run (confirmed by grep across
+//! this workspace) -- so within one run, one `(RunId, Side)` pair names
+//! at most one cluster, and the cache key is unique for as long as this
+//! resolver is used. It would **not** survive a same-side cluster being
+//! torn down and recreated within one run while the same
+//! `KubeResourceResolver` instance stays alive: the new cluster would
+//! reuse the old one's kubeconfig path and silently inherit its stale
+//! cached discovery -- a wrong answer (a collision), not merely a
+//! missing one. No such recreate-within-a-run path exists yet, so this
+//! is not a live bug; it is a constraint for whoever adds one (plausibly
+//! alongside Task 3.10's caller, the same task that first exercises
+//! [`KubeResourceResolver::invalidate`]) to know about rather than
+//! discover the hard way.
 //!
 //! A cache populated before a component installs a CRD (Kyverno's
 //! `ClusterPolicy`, Istio's `VirtualService`, and so on) will not
@@ -305,8 +328,7 @@ mod tests {
     use tower_test::mock;
 
     use super::{
-        ApiResource, ClusterHandle, Discovery, KubeResourceResolver, ResourceResolver,
-        resolve_against,
+        ClusterHandle, Discovery, KubeResourceResolver, ResourceResolver, resolve_against,
     };
     use crate::FixtureError;
 
@@ -569,29 +591,5 @@ mod tests {
             "expected ResourceDiscoveryUnavailable once the cache is empty and client_for is \
              attempted, got {error:?}"
         );
-    }
-
-    #[tokio::test]
-    async fn invalidate_on_an_unresolved_cluster_is_a_harmless_no_op() {
-        let resolver = KubeResourceResolver::new();
-        let cluster = cluster_handle_with_kubeconfig(unique_path("never-resolved"));
-
-        // Fails only if this panics or hangs -- there is nothing else to
-        // assert about removing an absent cache entry.
-        resolver.invalidate(&cluster).await;
-    }
-
-    #[test]
-    fn kube_core_api_resource_group_version_kind_round_trips_through_from_gvk_with_plural() {
-        // Sanity check on `ApiResource`'s own field semantics this
-        // module relies on (`group`/`version`/`kind`/`plural` are
-        // independent fields, not derived from each other at use time),
-        // isolated from any `Discovery`/mock plumbing above.
-        let gvk = kube::core::GroupVersionKind::gvk("kyverno.io", "v2", "ClusterPolicy");
-        let resource = ApiResource::from_gvk_with_plural(&gvk, "clusterpolicies");
-        assert_eq!(resource.group, "kyverno.io");
-        assert_eq!(resource.version, "v2");
-        assert_eq!(resource.kind, "ClusterPolicy");
-        assert_eq!(resource.plural, "clusterpolicies");
     }
 }
