@@ -7,3 +7,25 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `AdmissionOutcome`/`AdmissionTrace` (Task 3.3) carry
+# `admissionlab_core::{FixtureId, Side, Diagnostic}` directly (Controller
+# supplement §3, Task 3.3). This is the first edge out of this crate, and
+# a one-way one: `admissionlab-core` must never depend back on this
+# crate. Task 3.10 integrates this crate's capture pipeline into
+# `core/src/run.rs` through a trait declared in `core` and implemented
+# here -- the same shape `ClusterManager`/`StackInstaller`/Task 3.2's
+# resolver already use -- not a new `core -> admission` edge, which would
+# close a cycle Cargo would reject outright once `admission -> fixtures
+# -> core` also exists.
+admissionlab-core = { workspace = true }
+# `WebhookInvocation::patch` (Task 3.3) is `Option<Vec<json_patch::PatchOperation>>`
+# -- see the root `Cargo.toml`'s own comment on this entry for why.
+json-patch = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# `AdmissionOutcome::final_object` and every `WebhookOutcome`/`AdmissionDecision`
+# JSON-text assertion in `tests/model.rs` (Task 3.3) name
+# `serde_json::Value`/`serde_json::to_string` directly, not only through
+# `serde`'s generic (de)serialize traits.
+serde_json = { workspace = true }

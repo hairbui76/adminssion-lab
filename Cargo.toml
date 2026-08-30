@@ -42,6 +42,19 @@ http-body-util = "0.1.5"
 hyper = { version = "1.11.1", features = ["http1", "server"] }
 # `tokio`: the async runtime `TokioIo` adapts hyper's IO traits onto.
 hyper-util = { version = "0.1.20", features = ["tokio"] }
+# `admissionlab-admission`'s `WebhookInvocation::patch` (Task 3.3) stores
+# the observed mutation as RFC 6902 JSON Patch operations
+# (`json_patch::PatchOperation`), not a raw `serde_json::Value` diff, so
+# a later task (4.6's diff comparison) can inspect individual patch
+# operations rather than re-parsing an opaque JSON blob. The crate's
+# registry name uses a hyphen (`json-patch`); the library Rust code
+# `use`s is `json_patch` (its own `Cargo.toml` sets `[lib] name =
+# "json_patch"`). License `MIT/Apache-2.0`, already on this workspace's
+# `deny.toml` allow-list -- no new exception needed. `PatchOperation`
+# itself derives `Serialize`/`Deserialize`/`Clone`/`PartialEq`/`Eq`
+# (verified by reading `json-patch-4.2.0/src/lib.rs` directly), which is
+# exactly what this field's own model tests round-trip.
+json-patch = "4.2.0"
 # `admissionlab-installer`'s readiness probes (Task 2.4) read `Deployment`/
 # `DaemonSet`/`Job`/webhook-configuration objects through `k8s-openapi`'s
 # generated types. `k8s-openapi` requires *exactly one* `v1_*` Kubernetes
