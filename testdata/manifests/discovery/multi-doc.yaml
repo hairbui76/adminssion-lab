@@ -1,0 +1,20 @@
+---
+# A leading document that is only a comment: it parses to YAML null and
+# `discover_fixtures` must skip it without treating the two real
+# documents below as though they were the first and second documents in
+# this file. See tests/discover.rs's
+# `document_index_survives_a_skipped_empty_document_without_renumbering`.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-doc-first
+data:
+  key: first
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: multi-doc-second
+data:
+  key: second

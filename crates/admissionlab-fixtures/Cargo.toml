@@ -7,3 +7,64 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `FixtureId` (Task 3.1's target identifier type, already defined in
+# `admissionlab_core::ids` ahead of this task -- see that module's own
+# documentation) and `IdParseError`, the failure mode `identity.rs`
+# reports when a computed candidate string still fails to parse.
+admissionlab-core = { workspace = true }
+# `discover_fixtures` (this crate's own entry point) takes
+# `&admissionlab_spec::ResolvedFixtureSelection` -- the compiled glob
+# patterns and match root `resolve_lab` already produced (Task 1.10/2.1).
+# Controller supplement §2 (Task 3.1): this edge, `fixtures -> spec`, is
+# fine -- `spec` depends on none of this workspace's other crates, so
+# there is no path back from it to this crate. The edge this crate must
+# never grow is the *reverse* one, `admissionlab-core -> admissionlab-fixtures`;
+# Phase 3 closes the loop that would otherwise create with a trait
+# declared in `core` and implemented elsewhere (`ClusterManager` and
+# `StackInstaller` already establish that shape).
+admissionlab-spec = { workspace = true }
+# `ResolvedFixtureSelection::include` is `Vec<globset::Glob>`, compiled
+# by `admissionlab-spec::resolve_lab` -- not here. `discover.rs` compiles
+# each into a `GlobMatcher` (`Glob::compile_matcher`) and tests every
+# discovered file's path-relative-to-root against it. Naming `Glob`
+# directly (both in production code's `ResolvedFixtureSelection` field
+# access and in this crate's own tests, which construct selections
+# in-process) requires this crate to depend on `globset` itself --
+# `admissionlab-core`'s own `tests/run_lifecycle.rs` documents the
+# alternative (route every construction through `admissionlab_spec`'s
+# own `load_lab`/`resolve_lab` to avoid the dependency entirely), which
+# is not available here since this crate's whole job is to consume a
+# `ResolvedFixtureSelection` directly, including in tests that need to
+# vary its glob patterns per case.
+globset = { workspace = true }
+# The base `serde` crate itself, not only `serde_json`/`serde_norway`:
+# `discover.rs` calls `serde_json::Value`'s existing `Deserialize` impl
+# generically against a `serde_norway::Deserializer` document (mirroring
+# `admissionlab_installer::manifests`), which requires naming the
+# `Deserialize` trait directly -- neither `serde_json` nor `serde_norway`
+# re-exports it. No derive feature needed: nothing in this crate derives
+# `Serialize`/`Deserialize` for one of its own types.
+serde = { workspace = true }
+# `FixtureSource::object`, and every intermediate parsed document, is a
+# `serde_json::Value` -- the same "one dynamic value, not a projected
+# struct" choice `admissionlab_installer::manifests::ManifestBundle`
+# already makes, for the same reason: a fixture document's shape is
+# arbitrary user-authored Kubernetes YAML, not a fixed schema this crate
+# owns.
+serde_json = { workspace = true }
+# `discover.rs` parses each matched fixture file as a (possibly
+# multi-document) YAML stream via `serde_norway::Deserializer`, exactly
+# as `admissionlab_installer::manifests` already does for raw manifests
+# -- see that module's documentation. No derive feature needed, for the
+# same reason `serde` above needs none.
+serde_norway = { workspace = true }
+# `hash.rs` computes `FixtureSource::sha256`: SHA-256 of a fixture file's
+# canonical (raw, on-disk, never re-serialized) source bytes, lowercase
+# hex -- the same convention and the same pinned version
+# `admissionlab_installer::manifests::ManifestBundle::source_hash` (Task
+# 2.3) already established; see the root `Cargo.toml` comment on this
+# dependency for the version-pin reasoning.
+sha2 = { workspace = true }
+thiserror = { workspace = true }

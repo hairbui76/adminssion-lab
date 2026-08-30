@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: namespaced-fixture
+  namespace: admission-lab-test
+data:
+  key: value

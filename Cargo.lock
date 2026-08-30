@@ -60,6 +60,16 @@ version = "0.1.0"
 [[package]]
 name = "admissionlab-fixtures"
 version = "0.1.0"
+dependencies = [
+ "admissionlab-core",
+ "admissionlab-spec",
+ "globset",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "sha2",
+ "thiserror",
+]
 
 [[package]]
 name = "admissionlab-gateway"
