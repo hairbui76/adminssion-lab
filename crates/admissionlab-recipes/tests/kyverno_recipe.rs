@@ -110,11 +110,12 @@
 //! at the very tail of [`run_smoke_test`], after
 //! [`ClusterGuard::cleanup`] had already run — genuinely unconditional
 //! for any failure *inside* [`install_and_verify`] (every one of those
-//! returns through that same tail), but **not** for the five fallible
+//! returns through that same tail), but **not** for the six fallible
 //! steps between creating the root directory and constructing
-//! [`ClusterGuard`] itself (`kyverno_certified_kubernetes_version`,
-//! `load_matrix`, `resolve_node_image`, `cluster_name`,
-//! `manager.create`): each is a `?` that returns before `guard` exists,
+//! [`ClusterGuard`] itself (`store.create_run`,
+//! `kyverno_certified_kubernetes_version`, `load_matrix`,
+//! `resolve_node_image`, `cluster_name`, `manager.create`): each is a
+//! `?` that returns before `guard` exists,
 //! bypassing that tail entirely and leaking `root`. `manager.create`
 //! failing — a `kind create cluster` failure on a loaded runner — is
 //! the operationally realistic way to trigger this, and is exactly the

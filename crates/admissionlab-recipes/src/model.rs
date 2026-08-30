@@ -150,8 +150,10 @@ pub enum RecipeError {
     #[error("failed to parse recipe {source_label}: {source}")]
     Parse {
         /// Identifies which recipe document failed: a built-in's
-        /// embedded label (its file name, e.g. `"kyverno.yaml"`) or an
-        /// override recipe's real file path, displayed. A plain
+        /// embedded label (its checked-in repository-relative path, used
+        /// purely as a diagnostic name, e.g.
+        /// `"recipes/kyverno/recipe.yaml"`) or an override recipe's real
+        /// file path, displayed. A plain
         /// `String` rather than a `PathBuf` because a built-in recipe
         /// has no real filesystem location at all — see
         /// [`crate::load`]'s module documentation.
