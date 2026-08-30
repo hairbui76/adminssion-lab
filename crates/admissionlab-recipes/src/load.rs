@@ -40,15 +40,22 @@
 //! certified Istio recipe (`recipes/istio/recipe.yaml`, `istio/istiod`
 //! only — see that recipe's own README.md for why `istio/base` is
 //! deliberately not a second entry here). Both install purely via Helm
-//! (no `install.paths` at all), so neither ever hits `model.rs`'s
-//! private `resolve_manifests` helper's relative-path rejection the way
-//! a manifests-based recipe embedded as a built-in would —
-//! `recipes/test-webhook/recipe.yaml`'s own header comment covers why a
-//! manifests-based built-in is a harder, still-open problem neither
-//! recipe needs to solve. Adding a further real entry is a one-line
+//! (no `install.paths` at all), so neither ever exercises `model.rs`'s
+//! private `resolve_manifests` helper's *built-in* relative-path
+//! rejection the way a manifests-based recipe embedded as a built-in
+//! would still hit today — that rejection is a deliberate, permanent
+//! restriction on an embedded built-in specifically (it has no
+//! filesystem location at all to resolve a relative path against), not
+//! an unsolved problem: `recipes/test-webhook/recipe.yaml` is a real
+//! manifests-based recipe using relative `install.paths` entries
+//! successfully (Task 2.10), just never as a [`BUILTIN_RECIPES`] entry
+//! — it is always loaded through [`load_recipe_overrides`] instead,
+//! which resolves those paths against the recipe's own on-disk
+//! directory. Adding a further real *built-in* entry is a one-line
 //! addition to [`BUILTIN_RECIPES`] plus the new
-//! `recipes/<name>/recipe.yaml` file it `include_str!`s — the loading
-//! mechanism itself does not change.
+//! `recipes/<name>/recipe.yaml` file it `include_str!`s, provided that
+//! entry installs via Helm (or supplies only absolute `install.paths`
+//! entries) — the loading mechanism itself does not change.
 //! [`load_builtin_recipes`] was already fully exercised end-to-end
 //! before this task (see `tests/load.rs`): it parsed and resolved
 //! whatever [`BUILTIN_RECIPES`] held, which before Task 2.8 was nothing,
@@ -123,16 +130,27 @@ const BUILTIN_RECIPES: &[(&str, &str)] = &[
 pub fn load_builtin_recipes() -> Result<Vec<Recipe>, RecipeError> {
     BUILTIN_RECIPES
         .iter()
-        .map(|(label, yaml)| parse_recipe(label, yaml))
+        .map(|(label, yaml)| parse_recipe(label, yaml, None))
         .collect()
 }
 
-fn parse_recipe(source_label: &str, yaml: &str) -> Result<Recipe, RecipeError> {
+/// Parses and resolves one recipe document. `base_dir` is the directory
+/// a relative `install.paths` entry resolves against — `None` here
+/// always, for every [`load_builtin_recipes`] call site, since an
+/// embedded built-in's text has no filesystem location at all (see this
+/// module's own documentation); [`load_recipe_overrides`] is the other,
+/// and only other, caller, and passes `Some` — see its own
+/// documentation for exactly which directory.
+fn parse_recipe(
+    source_label: &str,
+    yaml: &str,
+    base_dir: Option<&Path>,
+) -> Result<Recipe, RecipeError> {
     let raw: RawRecipe = serde_norway::from_str(yaml).map_err(|source| RecipeError::Parse {
         source_label: source_label.to_owned(),
         source,
     })?;
-    resolve_recipe(source_label, raw)
+    resolve_recipe(source_label, raw, base_dir)
 }
 
 /// Loads every recipe YAML file (`.yaml`/`.yml`, by extension) directly
@@ -140,6 +158,15 @@ fn parse_recipe(source_label: &str, yaml: &str) -> Result<Recipe, RecipeError> {
 /// deterministic ordering. A file with any other extension, and a
 /// subdirectory, are silently skipped: neither one is a candidate recipe
 /// document to begin with, so there is nothing to reject.
+///
+/// A relative `install.paths` entry inside one of these files resolves
+/// against *that file's own* directory — for every file this function
+/// finds directly inside `dir`, that directory is `dir` itself, passed
+/// as `resolve_recipe`'s `base_dir` (Task 2.10; mirrors
+/// `admissionlab_spec::resolve_lab`'s established pattern for a lab
+/// file's own relative paths). See `crate::model::resolve_manifests`'s
+/// documentation for exactly how a relative path is resolved, and for
+/// the traversal confinement it is held to.
 ///
 /// This function is never called implicitly by anything else in this
 /// crate — see this module's own documentation ("explicit opt-in").
@@ -149,10 +176,12 @@ fn parse_recipe(source_label: &str, yaml: &str) -> Result<Recipe, RecipeError> {
 /// Returns [`RecipeError::Io`] if `dir` cannot be read (including if it
 /// does not exist) or if one of its recipe files cannot be read.
 /// Returns [`RecipeError::Parse`] or [`RecipeError::Validation`] if a
-/// recipe file's contents are invalid. Returns
-/// [`RecipeError::DuplicateOverrideName`] if two files in `dir` declare
-/// the same [`Recipe::name`] — see that variant's documentation for why
-/// this is rejected rather than resolved by file order.
+/// recipe file's contents are invalid — including a relative
+/// `install.paths` entry that resolves outside `dir`'s own directory
+/// tree. Returns [`RecipeError::DuplicateOverrideName`] if two files in
+/// `dir` declare the same [`Recipe::name`] — see that variant's
+/// documentation for why this is rejected rather than resolved by file
+/// order.
 pub fn load_recipe_overrides(dir: &Path) -> Result<Vec<Recipe>, RecipeError> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .map_err(|source| RecipeError::Io {
@@ -179,7 +208,15 @@ pub fn load_recipe_overrides(dir: &Path) -> Result<Vec<Recipe>, RecipeError> {
             source,
         })?;
         let source_label = path.display().to_string();
-        let recipe = parse_recipe(&source_label, &text)?;
+        // `path` is `dir.join(file_name)` (`std::fs::read_dir` never
+        // rewrites the directory argument it was given), so `.parent()`
+        // here is `dir` itself -- computed from `path` rather than
+        // captured from `dir` directly only to mirror
+        // `admissionlab_spec::resolve::config_directory`'s own
+        // established convention of deriving a base directory from the
+        // file's own path.
+        let base_dir = path.parent();
+        let recipe = parse_recipe(&source_label, &text, base_dir)?;
 
         if let Some(first) = seen.get(&recipe.name) {
             return Err(RecipeError::DuplicateOverrideName {

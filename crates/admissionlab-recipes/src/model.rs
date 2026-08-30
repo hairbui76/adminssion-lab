@@ -65,7 +65,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
 use admissionlab_spec::component::HelmInstallSpec;
 use admissionlab_spec::{
@@ -316,9 +316,11 @@ pub(crate) struct RawHelmInstall {
 /// Install method: a fixed set of raw Kubernetes manifests, exactly as a
 /// recipe author writes it.
 ///
-/// Every path must be absolute — see [`resolve_manifests`]'s
-/// documentation for why a relative path is rejected outright rather
-/// than resolved against some base directory.
+/// An absolute path is used exactly as written. A relative path is
+/// resolved against the recipe's own directory — see
+/// [`resolve_manifests`]'s documentation for exactly how, for why a
+/// built-in (embedded, no filesystem location) recipe cannot use one at
+/// all, and for the traversal restriction a relative path is held to.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct RawManifestsInstall {
@@ -406,19 +408,32 @@ pub(crate) enum RawNormalizeRule {
 ///
 /// `source_label` identifies which document `raw` came from for every
 /// error message this produces — see [`RecipeError::Parse::source_label`].
+/// `base_dir` is the directory a relative `install.paths` entry
+/// resolves against: `Some` for an on-disk override recipe (the
+/// directory [`crate::load::load_recipe_overrides`] found the recipe
+/// file in), `None` for a built-in, embedded recipe, which has no
+/// filesystem location at all. See [`resolve_manifests`]'s
+/// documentation for exactly how a relative path is resolved and
+/// confined once `base_dir` is `Some`.
 ///
 /// # Errors
 ///
 /// Returns [`RecipeError::Validation`] if `name` or `version` is empty
 /// (or all whitespace), if a Helm install's `chart`/`repo` is empty or
 /// whose `version` is not an exact pin, if a manifests install's `paths`
-/// is empty or contains a relative path, if any readiness check or
-/// normalize rule field is empty, or if a `capabilities` entry is not a
-/// recognized spelling (see [`crate::capability::parse_capability`]).
-pub(crate) fn resolve_recipe(source_label: &str, raw: RawRecipe) -> Result<Recipe, RecipeError> {
+/// is empty, contains a relative path while `base_dir` is `None`, or
+/// contains a relative path that resolves outside `base_dir`'s own
+/// directory tree, if any readiness check or normalize rule field is
+/// empty, or if a `capabilities` entry is not a recognized spelling (see
+/// [`crate::capability::parse_capability`]).
+pub(crate) fn resolve_recipe(
+    source_label: &str,
+    raw: RawRecipe,
+    base_dir: Option<&Path>,
+) -> Result<Recipe, RecipeError> {
     let name = require_nonempty(source_label, "name", &raw.name)?;
     let version = require_nonempty(source_label, "version", &raw.version)?;
-    let install = resolve_install(source_label, &name, raw.install)?;
+    let install = resolve_install(source_label, &name, raw.install, base_dir)?;
 
     let readiness = raw
         .readiness
@@ -463,6 +478,7 @@ fn resolve_install(
     source_label: &str,
     recipe_name: &str,
     raw: RawInstallMethod,
+    base_dir: Option<&Path>,
 ) -> Result<InstallMethod, RecipeError> {
     match raw {
         RawInstallMethod::Helm(helm) => Ok(InstallMethod::Helm(resolve_helm(
@@ -473,6 +489,7 @@ fn resolve_install(
         RawInstallMethod::Manifests(manifests) => Ok(InstallMethod::Manifests(resolve_manifests(
             source_label,
             manifests,
+            base_dir,
         )?)),
     }
 }
@@ -506,19 +523,32 @@ fn resolve_helm(
 
 /// Resolves a manifests install method.
 ///
-/// Every path must already be absolute. A relative path is rejected
-/// rather than resolved against some base directory, because a recipe
-/// has no single, well-defined directory to resolve it against: an
-/// on-disk override recipe has a real parent directory, but an embedded
-/// built-in recipe's text has no filesystem location at all (see
-/// `crate::load`'s module documentation) — inventing one for embedded
-/// content would fabricate a location that does not exist, and silently
-/// treating built-in and override recipes differently for this one field
-/// would be its own surprise. Revisit once a real manifests-based recipe
-/// needs relative paths and can settle this with a concrete use case.
+/// An absolute path is used exactly as written, unconditionally — this
+/// project places no restriction on what an absolute path may name, for
+/// a built-in or an override recipe alike, both before this function
+/// existed and after.
+///
+/// A relative path is resolved against `base_dir`, mirroring
+/// `admissionlab_spec::resolve_lab`'s own established pattern for a lab
+/// file's relative paths (`admissionlab_spec::resolve::resolve_relative`)
+/// — except a relative path here is additionally confined to
+/// `base_dir`'s own subtree (see [`join_confined`]'s documentation for
+/// exactly what that confinement does and does not stop), because
+/// PRODUCT.md §29.1 treats everything a recipe causes to be installed as
+/// an untrusted test workload, unlike a lab file a user hand-writes and
+/// runs against their own machine directly.
+///
+/// `base_dir` is `None` for a built-in, embedded recipe — its text is
+/// `include_str!`-embedded into the compiled binary (`crate::load`'s
+/// module documentation) and has no filesystem location at all to
+/// resolve a relative path against — so a relative path always fails
+/// for one, with an error explaining why. It is `Some` for an on-disk
+/// override recipe: [`crate::load::load_recipe_overrides`] passes the
+/// directory the recipe file itself was found in.
 fn resolve_manifests(
     source_label: &str,
     raw: RawManifestsInstall,
+    base_dir: Option<&Path>,
 ) -> Result<ManifestInstallSpec, RecipeError> {
     if raw.paths.is_empty() {
         return Err(RecipeError::validation(
@@ -530,24 +560,125 @@ fn resolve_manifests(
     let paths = raw
         .paths
         .into_iter()
-        .map(|path| {
-            if path.is_absolute() {
-                Ok(path)
-            } else {
-                Err(RecipeError::validation(
-                    source_label,
-                    "install.paths",
-                    format_args!(
-                        "{} is relative, but a recipe has no directory to resolve it against \
-                         yet (an embedded built-in recipe has no filesystem location at all) -- \
-                         use an absolute path",
-                        path.display()
-                    ),
-                ))
-            }
-        })
+        .map(|path| resolve_manifest_path(source_label, base_dir, path))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(ManifestInstallSpec { paths })
+}
+
+/// Resolves one `install.paths` entry.
+///
+/// An absolute `path` passes through unchanged. A relative `path` with
+/// `base_dir` `None` (a built-in recipe) always fails. A relative `path`
+/// with `base_dir` `Some` is joined onto it and confined to it via
+/// [`join_confined`]; failing that confinement is reported the same way
+/// as any other validation failure (a [`RecipeError::Validation`]
+/// naming `install.paths`), not a distinct error variant — from a
+/// recipe author's point of view, a `..` that escapes `base_dir` is
+/// exactly as invalid a value for this field as a relative path with no
+/// `base_dir` to resolve against at all.
+fn resolve_manifest_path(
+    source_label: &str,
+    base_dir: Option<&Path>,
+    path: PathBuf,
+) -> Result<PathBuf, RecipeError> {
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let Some(base_dir) = base_dir else {
+        return Err(RecipeError::validation(
+            source_label,
+            "install.paths",
+            format_args!(
+                "{} is relative, but this recipe has no directory to resolve it against -- a \
+                 built-in recipe's text is embedded into the compiled binary and has no \
+                 filesystem location at all (see crate::load's module documentation); use an \
+                 absolute path, or load this recipe from an on-disk override directory instead",
+                path.display()
+            ),
+        ));
+    };
+    join_confined(base_dir, &path).ok_or_else(|| {
+        RecipeError::validation(
+            source_label,
+            "install.paths",
+            format_args!(
+                "{} would resolve outside this recipe's own directory ({}) -- a relative \
+                 install.paths entry may only reach a file inside the recipe's own directory \
+                 tree",
+                path.display(),
+                base_dir.display()
+            ),
+        )
+    })
+}
+
+/// Joins `relative` onto `base_dir`, but only when that can be proven,
+/// from `relative`'s own text alone, to stay inside `base_dir`'s
+/// subtree; returns `None` otherwise.
+///
+/// # What this stops
+///
+/// Rejects `relative` if any of its own components — read purely as
+/// text, independent of whatever `base_dir` happens to contain on disk
+/// — would step above the point `relative` itself started resolving
+/// from. A leading `..` (`"../x"`), or enough of them to outrun the
+/// preceding components available to cancel each one
+/// (`"a/../../x"`, `"../../../etc/passwd"`), is rejected regardless of
+/// how deep `base_dir` itself is, and regardless of whether anything
+/// involved exists on disk yet: this never touches the filesystem. A
+/// `..` that *is* cancelled by an earlier component of the same
+/// `relative` value is allowed, since the final destination never
+/// leaves `base_dir` (`"a/../b"` resolves exactly as `"b"` alone
+/// would).
+///
+/// This deliberately does not join first and test
+/// `joined.starts_with(base_dir)` afterwards: [`PathBuf::join`] never
+/// rewrites or removes the components it started from, so that test is
+/// vacuously true for *any* relative second argument — `..`-laden or
+/// not — and rejects nothing at all. This function instead walks
+/// `relative`'s own components and tracks the running depth below
+/// `base_dir` directly, rejecting the moment a `ParentDir` component
+/// would take that depth negative, before it is ever allowed to touch
+/// `base_dir`'s own components.
+///
+/// # What this does not stop
+///
+/// A symlink. If some path inside `base_dir`'s own subtree is a symlink
+/// pointing outside it, a `relative` value that reaches its target
+/// through that symlink — no `..` involved at all, for example
+/// `"linked/x.yaml"` where `base_dir/linked` is a symlink to `/etc` — is
+/// still accepted by this function: lexically, `"linked/x.yaml"` never
+/// leaves `base_dir`. Telling the two cases apart requires resolving
+/// the real filesystem path (`Path::canonicalize`), which requires the
+/// target to already exist; that existence requirement is a behavior
+/// change this function does not make on its own — see
+/// [`resolve_manifest_path`]'s callers, none of which requires an
+/// `install.paths` entry to exist at recipe-resolution time today.
+fn join_confined(base_dir: &Path, relative: &Path) -> Option<PathBuf> {
+    let mut resolved = base_dir.to_path_buf();
+    let mut depth: usize = 0;
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => {
+                resolved.push(part);
+                depth += 1;
+            }
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth = depth.checked_sub(1)?;
+                resolved.pop();
+            }
+            // `relative` is only ever passed here already known
+            // non-absolute (both callers of this function branch on
+            // `path.is_absolute()` first), and on this project's sole
+            // build target (`x86_64-unknown-linux-gnu`) a non-absolute
+            // path's own `components()` never yields `RootDir`/
+            // `Prefix`. Handled as an escape rather than reached by a
+            // panic, in case that ever stops holding.
+            Component::RootDir | Component::Prefix(_) => return None,
+        }
+    }
+    Some(resolved)
 }
 
 fn resolve_readiness(
@@ -726,4 +857,380 @@ fn is_pinned_semver(version: &str) -> bool {
         && segments
             .iter()
             .all(|segment| !segment.is_empty() && segment.bytes().all(|b| b.is_ascii_digit()))
+}
+
+// ---------------------------------------------------------------------
+// Tests: base-directory resolution and traversal confinement (Task
+// 2.10). Only reachable here, as unit tests inside this crate -- every
+// function under test (`join_confined`, `resolve_manifest_path`,
+// `resolve_manifests`, `resolve_recipe`) is private or `pub(crate)`, so
+// none of it is visible to an integration test under `tests/`, which
+// links against this crate's *public* API only. The public-surface
+// proof (through `load_recipe_overrides`) lives in `tests/load.rs`.
+//
+// None of `join_confined`/`resolve_manifest_path`/`resolve_manifests`
+// ever touches the filesystem (see `join_confined`'s own documentation)
+// -- every path below, including every `base_dir`, is a synthetic,
+// nonexistent `PathBuf`, on purpose: a test that only passed because it
+// happened to point at real files on the machine running it would not
+// actually be proving the no-filesystem-access claim these doc comments
+// make.
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+
+    // -------------------------------------------------------------
+    // `join_confined`: the pure lexical safety join.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn join_confined_resolves_a_plain_relative_path() {
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new("manifests/x.yaml"));
+        assert_eq!(
+            resolved,
+            Some(base.join("manifests/x.yaml")),
+            "a relative path with no `..` at all must resolve, unmodified, under base_dir"
+        );
+    }
+
+    #[test]
+    fn join_confined_ignores_current_dir_components() {
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new("./manifests/./x.yaml"));
+        assert_eq!(
+            resolved,
+            Some(base.join("manifests/x.yaml")),
+            "a `.` component must be a no-op, not literally appended or treated as an escape"
+        );
+    }
+
+    #[test]
+    fn join_confined_allows_a_dotdot_that_is_cancelled_within_the_same_path() {
+        // A `..` that is cancelled by an earlier component of the SAME
+        // relative value must be allowed: the final destination never
+        // leaves base_dir. An implementation that rejects any `..`
+        // whatsoever (an overly strict, but still "safe", mutation)
+        // would fail this test -- proving the confinement is exactly
+        // "never ends up above base_dir", not "never uses `..`".
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new("sibling/../manifests/x.yaml"));
+        assert_eq!(
+            resolved,
+            Some(base.join("manifests/x.yaml")),
+            "a `..` cancelled by a preceding component must resolve exactly as if neither had \
+             been written"
+        );
+    }
+
+    #[test]
+    fn join_confined_rejects_a_single_leading_dotdot() {
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new("../escape.yaml"));
+        assert_eq!(
+            resolved, None,
+            "a `..` with nothing preceding it to cancel must be rejected, not silently resolved \
+             to base_dir's own parent"
+        );
+    }
+
+    #[test]
+    fn join_confined_rejects_the_brief_s_own_traversal_example() {
+        // `.superpowers/sdd/ROADMAP/task-2.10-brief.md`'s own example of
+        // what must not be reachable.
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new("../../../etc/passwd"));
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn join_confined_rejects_a_dotdot_that_outruns_its_own_cancellation() {
+        // The mutation this test exists to kill: an implementation that
+        // lets a `ParentDir` component unconditionally pop from the
+        // accumulated result (rather than refusing once there is
+        // nothing of `relative`'s own to pop) would, after "a" cancels
+        // the first `..`, let the SECOND `..` walk directly into
+        // base_dir's own parent and beyond -- silently, with no error.
+        // One Normal component is not enough cover for two ParentDir
+        // components.
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new("a/../../etc/passwd"));
+        assert_eq!(resolved, None);
+    }
+
+    #[test]
+    fn join_confined_rejects_a_bare_dotdot() {
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new(".."));
+        assert_eq!(
+            resolved, None,
+            "base_dir's own parent directory is definitionally outside base_dir's tree"
+        );
+    }
+
+    #[test]
+    fn join_confined_naive_starts_with_check_would_have_wrongly_accepted_this() {
+        // Documents, with a runnable assertion, exactly the trap
+        // `join_confined`'s own doc comment describes: `PathBuf::join`
+        // never removes or rewrites the components it started from, so
+        // `base.join(relative).starts_with(base)` is true for EVERY
+        // relative `relative`, including this one. If `join_confined`
+        // were reimplemented as that naive join-then-`starts_with`
+        // check, this assertion would fail (the naive check returns
+        // `Some`, never `None`, for any relative path at all) even
+        // though the two prior traversal tests above might still
+        // happen to look reasonable in isolation.
+        let base = Path::new("/recipes/test-webhook");
+        let relative = Path::new("../../../etc/passwd");
+        assert!(
+            base.join(relative).starts_with(base),
+            "sanity check on the trap itself: join-then-starts_with must be vacuously true here"
+        );
+        assert_eq!(
+            join_confined(base, relative),
+            None,
+            "join_confined must reject this despite the naive check above being satisfied"
+        );
+    }
+
+    #[test]
+    fn join_confined_rejects_a_component_that_looks_absolute() {
+        // Defense in depth: both real callers of `join_confined`
+        // (`resolve_manifest_path`) already branch on `path.is_absolute()`
+        // before ever calling this function, so this input never
+        // actually reaches it in production. This pins the fallback
+        // behavior directly against the pure function anyway, in case
+        // that calling discipline is ever violated.
+        let base = Path::new("/recipes/test-webhook");
+        let resolved = join_confined(base, Path::new("/etc/passwd"));
+        assert_eq!(resolved, None);
+    }
+
+    /// Empirically pins the gap [`join_confined`]'s own doc comment
+    /// describes under "What this does not stop", rather than leaving
+    /// it as an unverified claim: a real symlink inside `base_dir`'s
+    /// subtree pointing outside it, named by a `relative` value with no
+    /// `..` in it at all. Unlike every test above, this one needs real
+    /// files on disk -- a symlink is a filesystem fact, not something a
+    /// `PathBuf`'s text alone can express -- so, uniquely in this
+    /// module, it creates some.
+    ///
+    /// If this test ever starts failing because `join_confined` began
+    /// rejecting the escape, that is a real behavior change (canonicalize-based
+    /// checking was added) and this test's own assertions -- not only
+    /// its doc comment -- need updating to match, which is exactly the
+    /// point of pinning the gap with a runnable test rather than prose
+    /// alone.
+    #[test]
+    fn join_confined_does_not_detect_a_symlink_that_points_outside_base_dir() {
+        let root = unique_symlink_test_dir("join-confined-symlink-gap");
+        let base_dir = root.join("recipe");
+        let outside_dir = root.join("outside");
+        std::fs::create_dir_all(&base_dir).expect("create synthetic recipe directory");
+        std::fs::create_dir_all(&outside_dir).expect("create synthetic outside directory");
+
+        // A marker file entirely outside base_dir's own subtree -- the
+        // thing a confinement check exists to keep a relative
+        // install.paths entry from ever reaching.
+        let marker_contents = "TASK-2.10-SYMLINK-ESCAPE-MARKER";
+        std::fs::write(outside_dir.join("secret.yaml"), marker_contents)
+            .expect("write marker file outside base_dir");
+
+        // base_dir/linked -> outside_dir. A relative path through it
+        // carries no `..` component anywhere in its text.
+        std::os::unix::fs::symlink(&outside_dir, base_dir.join("linked"))
+            .expect("create the symlink this test exists to exercise");
+
+        let relative = Path::new("linked/secret.yaml");
+        let resolved = join_confined(&base_dir, relative);
+
+        assert_eq!(
+            resolved,
+            Some(base_dir.join("linked/secret.yaml")),
+            "join_confined accepts this today -- lexically, \"linked/secret.yaml\" never leaves \
+             base_dir; that IS the gap this test pins"
+        );
+        let resolved = resolved.expect("just asserted Some above");
+
+        // Prove this is a real escape, not merely an unresolved `..`
+        // sitting harmlessly in the returned PathBuf: canonicalizing
+        // the path join_confined accepted lands outside base_dir's own
+        // canonical form, and actually reading it returns the marker
+        // content that lives only in outside_dir.
+        let canonical_resolved = resolved
+            .canonicalize()
+            .expect("the symlinked-through path must exist for real");
+        let canonical_base = base_dir
+            .canonicalize()
+            .expect("base_dir must exist for real");
+        assert!(
+            !canonical_resolved.starts_with(&canonical_base),
+            "the path join_confined accepted must genuinely resolve outside base_dir once \
+             symlinks are followed for real, or this test is not demonstrating the gap it \
+             claims to"
+        );
+        let read_back =
+            std::fs::read_to_string(&resolved).expect("read through the symlink for real");
+        assert_eq!(
+            read_back, marker_contents,
+            "the content actually reachable through the accepted path must be outside_dir's \
+             own marker, not something inside base_dir"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A fresh, guaranteed-unique directory under the system temp
+    /// directory, for the one test above that (uniquely in this module)
+    /// needs real files and a real symlink on disk. Mirrors
+    /// `tests/load.rs`'s own `unique_temp_dir` helper shape.
+    fn unique_symlink_test_dir(label: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "admissionlab-recipes-model-test-{}-{label}-{n}",
+            std::process::id()
+        ))
+    }
+
+    // -------------------------------------------------------------
+    // `resolve_manifest_path` / `resolve_manifests`: wiring
+    // `join_confined` (and the built-in `None` case) into a
+    // `RecipeError`.
+    // -------------------------------------------------------------
+
+    #[test]
+    fn resolve_manifest_path_leaves_an_absolute_path_unchanged_even_with_a_base_dir() {
+        let base = Path::new("/recipes/test-webhook");
+        let absolute = PathBuf::from("/opt/somewhere-else/x.yaml");
+        let resolved = resolve_manifest_path("label", Some(base), absolute.clone())
+            .expect("an absolute path must never be rejected");
+        assert_eq!(
+            resolved, absolute,
+            "an absolute install.paths entry must be used exactly as written, never joined onto \
+             base_dir"
+        );
+    }
+
+    #[test]
+    fn resolve_manifest_path_rejects_relative_path_with_no_base_dir() {
+        let error = resolve_manifest_path("label", None, PathBuf::from("manifests/x.yaml"))
+            .expect_err("a relative path with no base_dir (a built-in recipe) must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("install.paths"),
+            "error must name the offending field, got: {message}"
+        );
+        assert!(
+            message.contains("built-in") && message.contains("embedded"),
+            "error must explain that a built-in recipe has no filesystem location, got: \
+             {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_manifest_path_resolves_relative_path_inside_base_dir() {
+        let base = Path::new("/recipes/test-webhook");
+        let resolved =
+            resolve_manifest_path("label", Some(base), PathBuf::from("manifests/x.yaml"))
+                .expect("a relative path that stays inside base_dir must resolve");
+        assert_eq!(resolved, base.join("manifests/x.yaml"));
+    }
+
+    #[test]
+    fn resolve_manifest_path_rejects_traversal_outside_base_dir() {
+        let base = Path::new("/recipes/test-webhook");
+        let error =
+            resolve_manifest_path("label", Some(base), PathBuf::from("../../../etc/passwd"))
+                .expect_err("a relative path escaping base_dir must be rejected");
+        let message = error.to_string();
+        assert!(
+            message.contains("install.paths"),
+            "error must name the offending field, got: {message}"
+        );
+        assert!(
+            message.contains("outside"),
+            "error must explain the path would resolve outside the recipe's own directory, got: \
+             {message}"
+        );
+    }
+
+    #[test]
+    fn resolve_manifests_still_rejects_an_empty_paths_list() {
+        let base = Path::new("/recipes/test-webhook");
+        let error = resolve_manifests(
+            "label",
+            RawManifestsInstall { paths: Vec::new() },
+            Some(base),
+        )
+        .expect_err("an empty install.paths list must still be rejected");
+        assert!(error.to_string().contains("install.paths"));
+    }
+
+    // -------------------------------------------------------------
+    // `resolve_recipe`: base_dir actually threads all the way from the
+    // public(crate) entry point down to `join_confined`, in both
+    // directions (a resolvable relative path, and the built-in `None`
+    // rejection) -- not merely at `resolve_manifests`'s own level.
+    // -------------------------------------------------------------
+
+    fn manifests_recipe(paths: Vec<PathBuf>) -> RawRecipe {
+        RawRecipe {
+            name: "test-webhook".to_owned(),
+            version: "0.1.0".to_owned(),
+            install: RawInstallMethod::Manifests(RawManifestsInstall { paths }),
+            readiness: Vec::new(),
+            normalize_rules: Vec::new(),
+            capabilities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_recipe_resolves_a_relative_manifests_path_against_base_dir() {
+        let base = Path::new("/recipes/test-webhook");
+        let raw = manifests_recipe(vec![PathBuf::from("manifests/x.yaml")]);
+
+        let recipe =
+            resolve_recipe("label", raw, Some(base)).expect("must resolve with a base_dir set");
+
+        let InstallMethod::Manifests(manifests) = &recipe.install else {
+            panic!(
+                "expected a Manifests install method, got {:?}",
+                recipe.install
+            );
+        };
+        assert_eq!(manifests.paths, vec![base.join("manifests/x.yaml")]);
+    }
+
+    #[test]
+    fn resolve_recipe_rejects_a_relative_manifests_path_with_no_base_dir() {
+        // The acceptance criterion this task names explicitly: "a
+        // built-in recipe with a relative path still fails, with an
+        // explanatory error". `load_builtin_recipes` always calls
+        // `resolve_recipe` with `base_dir: None` -- this is that exact
+        // call shape, without needing a real manifests-based entry in
+        // `BUILTIN_RECIPES` (there is none; both built-ins today are
+        // Helm-only) to exercise it.
+        let raw = manifests_recipe(vec![PathBuf::from("manifests/x.yaml")]);
+
+        let error = resolve_recipe("label", raw, None)
+            .expect_err("a relative path with no base_dir must fail");
+        let message = error.to_string();
+        assert!(message.contains("install.paths"));
+        assert!(message.contains("built-in") && message.contains("embedded"));
+    }
+
+    #[test]
+    fn resolve_recipe_rejects_traversal_outside_base_dir() {
+        let base = Path::new("/recipes/test-webhook");
+        let raw = manifests_recipe(vec![PathBuf::from("../../../etc/passwd")]);
+
+        let error = resolve_recipe("label", raw, Some(base))
+            .expect_err("a traversing relative path must fail even once base_dir is set");
+        let message = error.to_string();
+        assert!(message.contains("install.paths"));
+        assert!(message.contains("outside"));
+    }
 }

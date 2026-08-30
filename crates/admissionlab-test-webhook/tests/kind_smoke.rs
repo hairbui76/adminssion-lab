@@ -7,9 +7,10 @@
 //! and loads it into a fresh `kind` cluster by actually running
 //! `scripts/build-test-images.sh` as a real subprocess (proving that
 //! script itself works, not only that its logic *would*); loads
-//! `recipes/test-webhook/recipe.yaml` through Task 2.5's own public
-//! loader (the same `${RECIPE_DIR}` substitution
-//! `tests/recipe_loads.rs` already proves is necessary and sufficient);
+//! `recipes/test-webhook/recipe.yaml` directly, in place, through
+//! `admissionlab_recipes::load_recipe_overrides` (Task 2.10: the
+//! recipe's relative `install.paths` entries resolve against its own
+//! checked-in directory — no test-side path rewriting of any kind);
 //! drives it through the real Task 2.4/2.6 install-and-wait pipeline
 //! (`admissionlab_installer::install_stack`); and — beyond what
 //! `install_stack`'s own success already proves — independently confirms
@@ -185,8 +186,14 @@ async fn install_and_verify(
 ) -> Result<(), String> {
     build_and_load_image(runner, &cluster.spec.name).await?;
 
-    let recipe_dir = write_substituted_recipe().await?;
-    let recipes = load_recipe_overrides(&recipe_dir.dir)
+    // Loaded straight from its real, checked-in location -- no scratch
+    // copy, no path rewriting. `install.paths` inside this file is
+    // written relative (`manifests/00-namespace.yaml` and so on);
+    // `load_recipe_overrides` resolves each entry against this exact
+    // directory, the same directory it found `recipe.yaml` in (Task
+    // 2.10).
+    let recipe_dir = repo_root().join("recipes/test-webhook");
+    let recipes = load_recipe_overrides(&recipe_dir)
         .map_err(|error| format!("failed to load recipes/test-webhook/recipe.yaml: {error}"))?;
     let recipe = recipes
         .into_iter()
@@ -220,8 +227,9 @@ async fn install_and_verify(
         capabilities: recipe.capabilities,
     };
 
+    let (run_paths_root, run_paths) = prepare_run_paths().await?;
     let manifests_installer =
-        ManifestsInstaller::new(Arc::new(TokioProcessRunner::new()), &recipe_dir.paths);
+        ManifestsInstaller::new(Arc::new(TokioProcessRunner::new()), &run_paths);
     let readiness_probe = KubeReadinessProbe::new();
 
     let installed = install_stack(
@@ -240,7 +248,7 @@ async fn install_and_verify(
 
     assert_ca_bundle_populated(cluster, &webhook_configuration_name).await?;
 
-    let _ = tokio::fs::remove_dir_all(&recipe_dir.dir).await;
+    let _ = tokio::fs::remove_dir_all(&run_paths_root).await;
     Ok(())
 }
 
@@ -282,45 +290,25 @@ async fn build_and_load_image(
     Ok(())
 }
 
-/// A substituted copy of `recipes/test-webhook/recipe.yaml` (see
-/// `tests/recipe_loads.rs`'s own module documentation for why the
-/// `${RECIPE_DIR}` placeholder needs substituting at all), plus the
-/// scratch directory it lives in and the `RunPaths` `ManifestsInstaller`
-/// needs.
-struct SubstitutedRecipe {
-    dir: PathBuf,
-    paths: RunPaths,
-}
-
-async fn write_substituted_recipe() -> Result<SubstitutedRecipe, String> {
-    let source_dir = repo_root().join("recipes/test-webhook");
-    let raw = tokio::fs::read_to_string(source_dir.join("recipe.yaml"))
-        .await
-        .map_err(|error| format!("failed to read recipe.yaml: {error}"))?;
-    let absolute_manifests_dir = source_dir
-        .canonicalize()
-        .map_err(|error| format!("failed to canonicalize {}: {error}", source_dir.display()))?
-        .display()
-        .to_string();
-    let substituted = raw.replace("${RECIPE_DIR}", &absolute_manifests_dir);
-
-    let dir = unique_scratch_dir("recipe-override");
-    tokio::fs::create_dir_all(&dir)
-        .await
-        .map_err(|error| format!("failed to create scratch override directory: {error}"))?;
-    tokio::fs::write(dir.join("recipe.yaml"), substituted)
-        .await
-        .map_err(|error| format!("failed to write substituted recipe.yaml: {error}"))?;
-
-    let run_paths_root = unique_scratch_dir("run-paths");
-    let store = ArtifactStore::new(&run_paths_root);
+/// A fresh `RunPaths` scratch workspace for the installer's own
+/// artifacts (in particular `kubectl`'s isolated `--cache-dir` —
+/// `admissionlab_installer::manifests`'s own module documentation
+/// explains why that isolation matters). Unrelated to
+/// `recipes/test-webhook`'s own directory, which is loaded directly, in
+/// place, from the checked-in repository — Task 2.10 removed the
+/// scratch copy of the recipe file this helper used to also produce;
+/// only the installer's own run workspace is left to prepare here.
+/// Returns the scratch root alongside `RunPaths` so the caller can
+/// clean it up once the install finishes.
+async fn prepare_run_paths() -> Result<(PathBuf, RunPaths), String> {
+    let root = unique_scratch_dir("run-paths");
+    let store = ArtifactStore::new(&root);
     let run_id = RunId::generate();
     let paths = store
         .create_run(&run_id)
         .await
         .map_err(|error| format!("failed to prepare a run workspace for the installer: {error}"))?;
-
-    Ok(SubstitutedRecipe { dir, paths })
+    Ok((root, paths))
 }
 
 /// Fetches the named `ValidatingWebhookConfiguration` from `cluster` and

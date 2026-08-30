@@ -1,29 +1,33 @@
 //! Proves `recipes/test-webhook/recipe.yaml` is a real, valid Task 2.5
 //! recipe: loadable through `admissionlab_recipes`' own public loader
-//! (`load_recipe_overrides`), passing its full validation, and resolving
-//! to exactly the fields this task declares. No cluster, no Docker, no
-//! `kind` — this is a pure parsing/validation test, so it runs under the
-//! default `cargo test --workspace` (unlike `tests/kind_smoke.rs`, which
-//! genuinely needs a live cluster and is `#[ignore]`d).
+//! (`load_recipe_overrides`), directly from its real, checked-in
+//! location, with no test-side path rewriting of any kind; passing its
+//! full validation; and resolving to exactly the fields this task
+//! declares. No cluster, no Docker, no `kind` — this is a pure
+//! parsing/validation test, so it runs under the default `cargo test
+//! --workspace` (unlike `tests/kind_smoke.rs`, which genuinely needs a
+//! live cluster and is `#[ignore]`d).
 //!
-//! # The `${RECIPE_DIR}` substitution, and why it exists
+//! # Relative paths, resolved against this recipe's own directory
 //!
-//! `recipe.yaml`'s own comments explain this in full; the short version:
-//! `admissionlab_recipes::model::resolve_manifests` requires every
-//! `install.paths` entry to already be an absolute path (Task 2.5's own
-//! documented, deliberate limitation — no manifests-based recipe existed
-//! yet when that rule was written). [`substituted_recipe_text`] performs
-//! exactly the substitution a real loader must: replacing the
-//! `${RECIPE_DIR}` placeholder with this checkout's own absolute
-//! `recipes/test-webhook` directory, computed via `CARGO_MANIFEST_DIR`
-//! the same way every other checked-in-fixture-referencing test in this
-//! workspace does (`admissionlab-cluster/tests/kind_config.rs`,
-//! `admissionlab-recipes/tests/load.rs`, and others all follow this
-//! exact convention already).
+//! `recipe.yaml`'s own header comment explains this in full (Task
+//! 2.10): `install.paths` is written as plain paths relative to
+//! `recipes/test-webhook/` itself (`manifests/00-namespace.yaml` and so
+//! on), and `admissionlab_recipes::load_recipe_overrides` resolves each
+//! one against the directory the recipe file was actually found in —
+//! this recipe's own directory, when loaded the way this file loads it.
+//! Nothing here substitutes a placeholder or rewrites a copy of the
+//! checked-in file before loading it: this test calls
+//! `load_recipe_overrides` directly on `recipes/test-webhook`, the same
+//! call a real caller (for example the Phase 2 exit gate) makes. Task
+//! 2.7's own version of this file rewrote a placeholder token into a
+//! scratch copy before loading it (see Task 2.10's own report for the
+//! exact name) — that placeholder and the helper that substituted it
+//! are both gone; the token does not appear anywhere in this repository
+//! any more.
 
 use std::path::{Path, PathBuf};
 
-use admissionlab_core::RunId;
 use admissionlab_installer::load_manifest_bundle;
 use admissionlab_recipes::{Capability, InstallMethod, ReadinessCheck, load_recipe_overrides};
 
@@ -35,49 +39,17 @@ fn recipe_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../recipes/test-webhook")
 }
 
-/// A fresh, guaranteed-unique scratch directory under the OS temp dir.
-/// Mirrors `admissionlab-cluster/tests/kind_smoke.rs`'s own
-/// `unique_root` helper.
-fn unique_scratch_dir(label: &str) -> PathBuf {
-    let unique = RunId::generate();
-    std::env::temp_dir().join(format!(
-        "admissionlab-test-webhook-{label}-{}",
-        unique.as_str()
-    ))
-}
-
-/// Reads `recipes/test-webhook/recipe.yaml` and replaces every
-/// `${RECIPE_DIR}` placeholder with `recipe_dir()`'s own absolute path —
-/// see this module's own documentation.
-fn substituted_recipe_text() -> String {
-    let dir = recipe_dir();
-    let raw = std::fs::read_to_string(dir.join("recipe.yaml"))
-        .expect("recipes/test-webhook/recipe.yaml must exist and be readable");
-    let absolute_manifests_dir = dir
-        .canonicalize()
-        .expect("recipes/test-webhook must exist as a real directory")
-        .display()
-        .to_string();
-    raw.replace("${RECIPE_DIR}", &absolute_manifests_dir)
-}
-
-/// Writes `text` as the sole `recipe.yaml` inside a fresh scratch
-/// directory and returns that directory, ready to hand to
-/// `load_recipe_overrides`.
-fn write_override_dir(label: &str, text: &str) -> PathBuf {
-    let dir = unique_scratch_dir(label);
-    std::fs::create_dir_all(&dir).expect("create scratch override directory");
-    std::fs::write(dir.join("recipe.yaml"), text).expect("write substituted recipe.yaml");
-    dir
-}
-
 #[test]
 fn recipe_loads_and_validates_through_the_public_loader() {
-    let override_dir = write_override_dir("loads", &substituted_recipe_text());
+    let dir = recipe_dir();
 
-    let recipes =
-        load_recipe_overrides(&override_dir).expect("recipe.yaml must load and validate cleanly");
-    assert_eq!(recipes.len(), 1, "exactly one recipe.yaml was written");
+    let recipes = load_recipe_overrides(&dir)
+        .expect("recipe.yaml must load and validate cleanly straight from its own directory");
+    assert_eq!(
+        recipes.len(),
+        1,
+        "exactly one recipe.yaml lives in this directory"
+    );
     let recipe = &recipes[0];
 
     assert_eq!(recipe.name, "test-webhook");
@@ -101,6 +73,14 @@ fn recipe_loads_and_validates_through_the_public_loader() {
             path.is_absolute(),
             "every resolved manifest path must be absolute, got {}",
             path.display()
+        );
+        assert!(
+            path.starts_with(&dir),
+            "{} must resolve inside this recipe's own directory ({}) -- the directory \
+             confinement Task 2.10 adds, exercised here against the real checked-in recipe \
+             rather than a synthetic one",
+            path.display(),
+            dir.display()
         );
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
@@ -140,30 +120,6 @@ fn recipe_loads_and_validates_through_the_public_loader() {
         "explicit check for the specific capability a reader might expect, not only emptiness"
     );
     assert!(recipe.normalize_rules.is_empty());
-
-    let _ = std::fs::remove_dir_all(&override_dir);
-}
-
-#[test]
-fn recipe_is_not_directly_loadable_without_the_recipe_dir_substitution() {
-    // The checked-in file, loaded completely unmodified, must fail
-    // loudly -- proving the `${RECIPE_DIR}` placeholder really is
-    // necessary (this test would still pass vacuously if the recipe
-    // schema silently tolerated a relative path, which is exactly the
-    // regression this asserts against) rather than a decorative
-    // convention nothing actually enforces.
-    let dir = recipe_dir();
-    let error = load_recipe_overrides(&dir)
-        .expect_err("recipe.yaml's unsubstituted ${RECIPE_DIR} placeholders must not resolve");
-    let message = error.to_string();
-    assert!(
-        message.contains("install.paths"),
-        "error must name the offending field, got: {message}"
-    );
-    assert!(
-        message.contains("is relative"),
-        "error must explain why (a non-absolute path), got: {message}"
-    );
 }
 
 /// Pins `30-deployment.yaml`'s `spec.replicas` at exactly `1` — see

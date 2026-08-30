@@ -1,7 +1,7 @@
 //! Behavioral tests for `admissionlab-recipes`' loading, parsing, and
 //! validation.
 //!
-//! Three properties are load-bearing here and are each covered by tests
+//! Four properties are load-bearing here and are each covered by tests
 //! below:
 //!
 //! - **No regression-classification logic can enter a recipe.** PRODUCT.md
@@ -22,6 +22,14 @@
 //! - **A local override directory is never consulted unless a caller
 //!   explicitly names one.** No environment variable, home directory, or
 //!   current-working-directory convention is consulted implicitly.
+//! - **A relative `install.paths` entry resolves against the recipe
+//!   file's own directory, and can never escape it.** Task 2.10:
+//!   mirrors `admissionlab_spec::resolve_lab`'s established pattern for
+//!   a lab file's own relative paths, but additionally rejects `..`
+//!   traversal outside the recipe's directory (PRODUCT.md §29.1 —
+//!   everything a recipe causes to be installed is untrusted, unlike a
+//!   lab file a user hand-writes for their own machine). See the
+//!   "Relative manifest paths" section below.
 //!
 //! A final section separately validates `compatibility/recipes.yaml`'s
 //! shape and the specific facts it records (Controller Ruling R28).
@@ -692,10 +700,56 @@ fn empty_manifests_paths_is_rejected() {
     assert!(err.to_string().contains("paths"));
 }
 
+// ---------------------------------------------------------------------
+// Relative manifest paths (Task 2.10): resolved against the recipe
+// file's own directory, and confined to it -- mirroring
+// admissionlab_spec::resolve_lab's established pattern for a lab file's
+// own relative paths, but additionally rejecting traversal outside that
+// directory (PRODUCT.md §29.1: everything a recipe causes to be
+// installed is untrusted). The built-in ("no directory to resolve
+// against at all") side of this is proven separately, as a unit test
+// inside `admissionlab-recipes` itself
+// (`crate::model::tests::resolve_recipe_rejects_a_relative_manifests_path_with_no_base_dir`):
+// every built-in recipe today (`builtin_recipes_load_without_touching_the_filesystem`,
+// above) installs purely via Helm, so there is no way to exercise that
+// rejection through this crate's public API with a real built-in entry.
+// ---------------------------------------------------------------------
+
 #[test]
-fn relative_manifest_path_in_a_recipe_is_rejected() {
+fn relative_manifest_path_in_an_override_recipe_resolves_against_its_own_directory() {
     let dir = write_recipe_dir(
         "relative-manifest-path",
+        "demo.yaml",
+        r#"
+        name: raw-webhook
+        version: "1.0.0"
+        install:
+          type: manifests
+          paths:
+            - manifests/webhook.yaml
+        "#,
+    );
+
+    let recipes = load_recipe_overrides(&dir)
+        .expect("a relative manifest path must resolve against the recipe's own directory");
+    match &recipes[0].install {
+        InstallMethod::Manifests(manifests) => {
+            assert_eq!(
+                manifests.paths,
+                vec![dir.join("manifests/webhook.yaml")],
+                "a relative install.paths entry must resolve against the directory \
+                 load_recipe_overrides found the recipe file in -- mirroring \
+                 admissionlab_spec::resolve_lab's own pattern for a lab file's relative paths"
+            );
+        }
+        InstallMethod::Helm(_) => panic!("expected a Manifests install method"),
+    }
+}
+
+#[test]
+fn manifest_path_traversal_outside_the_recipe_directory_is_rejected() {
+    let dir = write_recipe_dir(
+        "manifest-path-traversal",
         "evil.yaml",
         r#"
         name: evil
@@ -703,13 +757,54 @@ fn relative_manifest_path_in_a_recipe_is_rejected() {
         install:
           type: manifests
           paths:
-            - relative/webhook.yaml
+            - ../../../etc/passwd
         "#,
     );
 
-    let err = load_recipe_overrides(&dir)
-        .expect_err("a relative manifest path in a recipe must be rejected");
-    assert!(err.to_string().contains("relative"));
+    let err = load_recipe_overrides(&dir).expect_err(
+        "a relative manifest path that escapes the recipe's own directory must be rejected",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("install.paths"),
+        "error must name the offending field, got: {message}"
+    );
+    assert!(
+        message.contains("outside"),
+        "error must explain the path would resolve outside the recipe's own directory, got: \
+         {message}"
+    );
+}
+
+#[test]
+fn manifest_path_that_dips_outside_and_returns_is_allowed() {
+    // The counterweight to the rejection test above: a `..` cancelled
+    // by an earlier component of the same path never actually leaves
+    // the recipe's own directory, and must not be rejected -- otherwise
+    // the traversal check would really be "reject any use of `..`", a
+    // stricter and different rule than "must resolve inside the
+    // recipe's own directory tree".
+    let dir = write_recipe_dir(
+        "manifest-path-dip-and-return",
+        "demo.yaml",
+        r#"
+        name: raw-webhook
+        version: "1.0.0"
+        install:
+          type: manifests
+          paths:
+            - sibling/../manifests/webhook.yaml
+        "#,
+    );
+
+    let recipes = load_recipe_overrides(&dir)
+        .expect("a `..` cancelled within the same path must not be rejected as traversal");
+    match &recipes[0].install {
+        InstallMethod::Manifests(manifests) => {
+            assert_eq!(manifests.paths, vec![dir.join("manifests/webhook.yaml")]);
+        }
+        InstallMethod::Helm(_) => panic!("expected a Manifests install method"),
+    }
 }
 
 // ---------------------------------------------------------------------

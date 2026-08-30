@@ -6,32 +6,34 @@
 # actually a vendor's (Kyverno's, Istio's) behavior changing underneath
 # it.
 #
-# Unlike `recipes/kyverno/recipe.yaml` (Task 2.8, a real built-in as of
-# that task) and `recipes/istio/recipe.yaml` (Task 2.9, not yet added),
-# this recipe is *not* embedded as a built-in
-# (`crates/admissionlab-recipes/src/load.rs`'s `BUILTIN_RECIPES`): it
-# installs raw manifests, and `admissionlab-recipes`' own schema requires
-# every `install.paths` entry to already be an absolute path (documented
-# in that crate's `model.rs`, `resolve_manifests`) — an embedded built-in
-# recipe's text has no filesystem location at all to make one absolute
-# against. This is Task 2.5's own documented, deliberate scope
-# limitation ("Revisit once a real manifests-based recipe needs relative
-# paths and can settle this with a concrete use case" — this recipe is
-# that first case), not something this task's own narrow scope
-# (`crates/admissionlab-recipes/*` is not in Task 2.7's file list) is
-# positioned to resolve for every future manifests-based recipe.
+# Unlike `recipes/kyverno/recipe.yaml` (Task 2.8) and
+# `recipes/istio/recipe.yaml` (Task 2.9), this recipe is *not* embedded
+# as a built-in (`crates/admissionlab-recipes/src/load.rs`'s
+# `BUILTIN_RECIPES`): it installs raw manifests, and a built-in recipe's
+# text is `include_str!`-embedded into the compiled binary at build
+# time, with no filesystem location of its own to resolve a relative
+# path against (see that module's own documentation) — so a built-in
+# still requires every `install.paths` entry to already be absolute
+# (`crates/admissionlab-recipes/src/model.rs`, `resolve_manifest_path`).
 #
-# Concretely, this means the four `${RECIPE_DIR}/...` entries below are
-# NOT literal, ready-to-use paths: `${RECIPE_DIR}` is a placeholder a
-# loader must substitute with this file's own directory's real absolute
-# path (`.../recipes/test-webhook`) before parsing — exactly what
-# `crates/admissionlab-test-webhook/tests/recipe_loads.rs` does, the same
-# way, before calling `admissionlab_recipes::load_recipe_overrides` on
-# the substituted copy. Loading this file completely unmodified (for
-# example pointing `load_recipe_overrides` directly at this directory)
-# fails loudly with "is relative" — by design (Global Constraint 15: a
-# recipe with no well-defined absolute path to resolve against must
-# never silently guess one).
+# This recipe is instead always loaded as an on-disk override, through
+# `admissionlab_recipes::load_recipe_overrides`, which resolves a
+# relative `install.paths` entry against the directory the recipe file
+# itself was found in — mirroring `admissionlab_spec::resolve_lab`'s own
+# established pattern for a lab file's relative paths (Task 2.10). So
+# the four `manifests/...` entries below are plain, literal, relative
+# paths: loading this file completely unmodified (for example pointing
+# `load_recipe_overrides` directly at this directory, exactly what
+# `crates/admissionlab-test-webhook/tests/recipe_loads.rs` and
+# `tests/kind_smoke.rs` both do) resolves every one of them against this
+# directory — no placeholder token, no test-side substitution.
+# `resolve_manifest_path` additionally confines a relative path to this
+# recipe's own directory tree (PRODUCT.md §29.1: everything a recipe
+# causes to be installed is an untrusted test workload), so a `../`
+# sequence could not walk one of these entries outside
+# `recipes/test-webhook/` even by accident — see that function's own
+# documentation for exactly what that confinement does and does not
+# stop.
 #
 # No `capabilities:` yet, deliberately: this recipe does not yet claim
 # `admission` (PRODUCT.md §14 / `admissionlab_spec::Capability::Admission`)
@@ -49,10 +51,10 @@ version: 0.1.0
 install:
   type: manifests
   paths:
-    - "${RECIPE_DIR}/manifests/00-namespace.yaml"
-    - "${RECIPE_DIR}/manifests/10-rbac.yaml"
-    - "${RECIPE_DIR}/manifests/20-webhook-configuration.yaml"
-    - "${RECIPE_DIR}/manifests/30-deployment.yaml"
+    - manifests/00-namespace.yaml
+    - manifests/10-rbac.yaml
+    - manifests/20-webhook-configuration.yaml
+    - manifests/30-deployment.yaml
 readiness:
   # Gates on the Deployment actually being Available (Task 2.4) --not
   # merely applied -- and separately on the ValidatingWebhookConfiguration
