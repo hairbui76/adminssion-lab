@@ -58,6 +58,34 @@ serde = { workspace = true }
 # comment on this dependency for the version-pin reasoning.
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+# `readiness.rs` (Task 2.4) reads `Deployment`/`DaemonSet`/`Job`/webhook
+# objects through these generated types, and drives the Kubernetes API
+# through `kube::Client`/`Api<K>`. See the root `Cargo.toml`'s comments on
+# both entries for why each is pinned centrally (version feature choice)
+# there rather than here, and why no separate `[dev-dependencies]` entry
+# is needed for either: this crate's own non-test code already needs both,
+# so its tests inherit the same, already-resolved dependency -- there is
+# no "tests only" gap for either to fill.
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
+# `time`: `readiness.rs`'s `poll_readiness` calls `tokio::time::sleep`
+# itself, in production (not only test) code, to wait out each capped
+# backoff interval between poll attempts -- so this feature belongs in
+# `[dependencies]`, not only `[dev-dependencies]`, for the same v2-resolver
+# reason `admissionlab-core`'s own `tokio` entry documents (a plain
+# `cargo build -p admissionlab-installer --lib` would otherwise fail to
+# compile even though `cargo test` would not catch it). No `rt` feature
+# here: nothing in this crate's own production code spawns a task --
+# `[dev-dependencies]` below still needs `rt` for `#[tokio::test]` itself.
+tokio = { workspace = true, features = ["time"] }
+# `readiness.rs`'s `poll_readiness` logs a transient fetch error (a
+# retried, not fatal, poll attempt) at `debug` level, so a `RUST_LOG`-
+# enabled run can distinguish "never observed, no attempts ever errored"
+# from "every attempt errored" -- PRODUCT.md §33 diagnosability, without
+# changing `ReadinessEvidence`'s own (canonical, fixed) shape. Already a
+# workspace dependency used by `admissionlab-core`/`admissionlab-cli`; no
+# new supply-chain surface.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # `tests/helm_unit.rs` drives `ComponentInstaller::install` (an `async

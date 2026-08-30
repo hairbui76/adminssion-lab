@@ -31,24 +31,33 @@
 //!   [`admissionlab_spec::ManifestInstallSpec`]), and separately exposes
 //!   [`manifests::load_manifest_bundle`] for parsing and hashing a
 //!   component's manifest files with no cluster interaction at all.
+//! - [`readiness`] implements [`readiness::ReadinessProbe`] (Task 2.4):
+//!   deciding when an installed component is actually ready, given an
+//!   [`admissionlab_spec::ReadinessCheck`], by polling the cluster's own
+//!   Kubernetes API with a capped exponential backoff and an absolute
+//!   deadline.
 //!
-//! Not yet implemented here: readiness probing (Task 2.4) and stack
-//! installation orchestration (Task 2.6).
+//! Not yet implemented here: stack installation orchestration (Task
+//! 2.6), which drives [`ComponentInstaller::install`] and
+//! [`readiness::ReadinessProbe::wait`] together over a component's own
+//! readiness checks.
 
 use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime};
 
 use admissionlab_core::{ClusterHandle, CommandContext, Diagnostic, ProcessError};
-use admissionlab_spec::ResolvedComponent;
+use admissionlab_spec::{ReadinessCheck, ResolvedComponent};
 use async_trait::async_trait;
 use thiserror::Error;
 
 pub mod helm;
 pub mod manifests;
+pub mod readiness;
 
 pub use helm::HelmInstaller;
 pub use manifests::{ManifestBundle, ManifestsInstaller, load_manifest_bundle};
+pub use readiness::{KubeReadinessProbe, ReadinessEvidence, ReadinessProbe};
 
 /// The contract every component install backend implements: given a
 /// running cluster and a fully resolved component, install it and
@@ -255,5 +264,33 @@ pub enum InstallError {
         /// discarded even though this variant's own message already
         /// explains the cause in plain language.
         stderr: Vec<u8>,
+    },
+    /// [`readiness::ReadinessProbe::wait`] could not even attempt
+    /// `check` — not "not yet ready" (that outcome is data, reported as
+    /// `Ok(ReadinessEvidence { satisfied: false, .. })`, never as an
+    /// error; see [`readiness::poll_readiness`]'s documentation) but
+    /// unable to observe the cluster at all. Both of this variant's
+    /// causes are permanent, discovered once, before any poll attempt:
+    /// the Kubernetes client could not be built from the cluster's own
+    /// kubeconfig ([`readiness`]'s `client_for`), or (for
+    /// [`admissionlab_spec::ReadinessCheck::CustomResourceCondition`])
+    /// its `api_version` could not be parsed into a group/version.
+    /// Retrying either would not help, which is why they short-circuit
+    /// here rather than consuming the deadline retrying something that
+    /// can never succeed.
+    #[error("cannot wait for {check:?} to become ready: {reason}")]
+    ReadinessUnavailable {
+        /// The readiness check that could not even be attempted. Boxed
+        /// (mirroring `CommandFailed::context`, `ManifestExceedsAnnotationLimit::context`
+        /// above): [`ReadinessCheck::CustomResourceCondition`] carries
+        /// six `String`/`Option<String>` fields, large enough that
+        /// clippy's `result_large_err` flags every `Result<_,
+        /// InstallError>`-returning function in this crate (not only
+        /// this variant's own constructors) once it is inlined directly.
+        check: Box<ReadinessCheck>,
+        /// A human-readable explanation of what went wrong, taken from
+        /// the underlying `kube`/kubeconfig-parsing failure's own
+        /// `Display`.
+        reason: String,
     },
 }

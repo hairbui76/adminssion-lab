@@ -15,6 +15,48 @@ assert_cmd = "2.2.2"
 async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive"] }
 globset = "0.4.20"
+# `admissionlab-installer`'s readiness probes (Task 2.4) read `Deployment`/
+# `DaemonSet`/`Job`/webhook-configuration objects through `k8s-openapi`'s
+# generated types. `k8s-openapi` requires *exactly one* `v1_*` Kubernetes
+# version feature to be enabled across the whole compiled graph -- zero
+# panics its own build script (`build.rs`), two also panics it -- and its
+# own documented convention is "library crates must not enable a version
+# feature; leave that to the final binary crate" (verified against
+# `k8s-openapi-0.28.0/build.rs`'s panic text). That convention assumes a
+# final binary already depends (transitively) on the library that needs
+# it; nothing in this workspace depends on `admissionlab-installer` yet
+# (`admissionlab-cli` does not -- confirmed via `cargo metadata --no-deps`),
+# so there is no binary crate to anchor the choice on. Verified empirically
+# (not assumed): putting `k8s-openapi` in `admissionlab-installer`'s own
+# `[dependencies]` with no feature, and only a `[dev-dependencies]` entry
+# enabling `v1_36`, makes that crate's own `cargo test` pass but makes a
+# plain `cargo build --workspace` fail outright (zero `v1_*` features reach
+# the non-dev dependency graph at all, since nothing else in the workspace
+# requests one either) -- see Task 2.4's report for the exact failure.
+# Pinning the version *and* feature once, here, and having every crate
+# that needs `k8s-openapi` inherit it via `{ workspace = true }` (as
+# `admissionlab-installer` now does) sidesteps that gap: it is a single,
+# workspace-wide source of truth a later crate can adopt without risking
+# ever picking a *different* feature and re-triggering the "two features
+# enabled" panic -- the actual failure mode the "library must not enable"
+# convention exists to prevent. Bump this (and re-verify `cargo build
+# --workspace`) deliberately, not incidentally, if a future task needs a
+# newer Kubernetes version's generated types.
+k8s-openapi = { version = "0.28.0", features = ["v1_36"] }
+# `admissionlab-installer`'s readiness probes (Task 2.4) talk to each
+# cluster's own kube-apiserver directly via its isolated kubeconfig (never
+# the operator's ambient `~/.kube/config` -- see `readiness.rs`'s
+# `client_for`, which mirrors `manifests.rs`'s `kubectl_command` chokepoint
+# discipline). Default features (`client`, `rustls-tls`, `ring`) are kept:
+# this project already requires a working C toolchain to build (`ring`
+# compiles C via `cc-rs`, which is exactly why `CC=/usr/bin/cc` is
+# load-bearing on this machine -- see `research-kube-api.md` §7), so there
+# is no simpler TLS backend to fall back to, and every `kubectl`/`helm`
+# TLS connection this project already makes needs a real CA-verified HTTPS
+# client regardless. No `runtime` feature: Task 2.4 hand-rolls a capped
+# poll loop rather than using `kube_runtime::wait::await_condition` (see
+# that task's report for why), so `kube_runtime` is never pulled in.
+kube = { version = "4.2.0" }
 # Safe, non-`unsafe` access to POSIX `statvfs` (`admissionlab-core`'s
 # doctor disk-space check). Unix-only crate: every consumer pulls it in
 # through a `[target.'cfg(unix)'.dependencies]` table rather than an
