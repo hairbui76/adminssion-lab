@@ -63,12 +63,18 @@ version = "0.1.0"
 dependencies = [
  "admissionlab-core",
  "admissionlab-spec",
+ "async-trait",
  "globset",
+ "http",
+ "k8s-openapi",
+ "kube",
  "serde",
  "serde_json",
  "serde_norway",
  "sha2",
  "thiserror",
+ "tokio",
+ "tower-test",
 ]
 
 [[package]]

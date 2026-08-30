@@ -13,7 +13,13 @@ workspace = true
 # `admissionlab_core::ids` ahead of this task -- see that module's own
 # documentation) and `IdParseError`, the failure mode `identity.rs`
 # reports when a computed candidate string still fails to parse.
+# `resources.rs` (Task 3.2) additionally takes `&admissionlab_core::ClusterHandle`
+# in `ResourceResolver::resolve` -- an existing type from this same
+# dependency, not a new edge.
 admissionlab-core = { workspace = true }
+# `resources.rs` (Task 3.2) implements `ResourceResolver::resolve` with
+# `async fn`.
+async-trait = { workspace = true }
 # `discover_fixtures` (this crate's own entry point) takes
 # `&admissionlab_spec::ResolvedFixtureSelection` -- the compiled glob
 # patterns and match root `resolve_lab` already produced (Task 1.10/2.1).
@@ -68,3 +74,65 @@ serde_norway = { workspace = true }
 # dependency for the version-pin reasoning.
 sha2 = { workspace = true }
 thiserror = { workspace = true }
+# `resources.rs` (Task 3.2) resolves a fixture's `apiVersion`/`kind`
+# against a live cluster via `kube::discovery::Discovery` -- the same
+# crate `admissionlab_installer::readiness` already depends on for its
+# own dynamic Kubernetes API access (see that crate's `Cargo.toml`
+# comment on this entry). Default features (`client`, `rustls-tls`,
+# `ring`) are kept for the same reason: no simpler TLS backend exists to
+# fall back to on this workspace's toolchain.
+kube = { workspace = true }
+# This crate's own code never names a `k8s-openapi` generated type
+# directly -- only `kube::core`/`kube::discovery`'s own dynamic types
+# (`ApiResource`, `GroupVersion`, `Discovery` itself). `k8s-openapi` is
+# still needed here regardless, and in `[dependencies]` (not only
+# `[dev-dependencies]`): `kube`'s own `client` feature unconditionally
+# uses `k8s_openapi::apimachinery::pkg::apis::meta::v1` types in the
+# `Client::list_api_groups`/`list_api_group_resources`/
+# `list_core_api_versions`/`list_core_api_resources` methods
+# `Discovery::run()` calls (confirmed by reading
+# `kube-client-4.2.0/src/client/mod.rs` directly) -- and `k8s-openapi`'s
+# own build script panics unless *some* crate in the actual build graph
+# enables exactly one `v1_*` feature (see the root `Cargo.toml`'s own
+# comment on this entry). `cargo build -p admissionlab-fixtures` builds
+# only this crate's own dependency graph, which does not include
+# `admissionlab-installer` (the workspace member that otherwise supplies
+# this feature) at all, so without this entry a standalone `-p` build of
+# this crate panics in `k8s-openapi`'s build script even though
+# `cargo build --workspace` would not have caught it -- verified
+# empirically, mirroring `admissionlab-installer`'s own documented
+# history with the identical failure mode.
+k8s-openapi = { workspace = true }
+# `resources.rs`'s `KubeResourceResolver` caches one `kube::discovery::Discovery`
+# per cluster behind a `tokio::sync::Mutex` (Step 3: "cache discovery per
+# cluster"). `std::sync::Mutex` is deliberately not used here: holding a
+# guard across the `.await` points `resolve`'s cache-miss path needs
+# (building a client, running discovery) would either force the lock to
+# be dropped and reacquired around every `.await` (this module chooses
+# not to) or hold a non-async-aware guard across `.await`, which
+# `async-trait`'s `Send`-future requirement rejects outright for a
+# `std::sync::MutexGuard`. Only the `sync` feature is needed in
+# production code; `[dev-dependencies]` below adds `rt`/`macros` for
+# `#[tokio::test]` itself, mirroring `admissionlab-installer`'s own
+# `tokio` split (see that crate's `Cargo.toml` comment for the
+# v2-resolver reasoning this repeats).
+tokio = { workspace = true, features = ["sync"] }
+
+[dev-dependencies]
+# `src/resources.rs`'s internal `tests` module drives `kube::discovery::Discovery::run`
+# against a mocked Kubernetes API -- fake discovery data, never a real
+# cluster (Task 3.2 brief Step 1) -- the same `tower_test::mock`
+# technique `admissionlab-installer/src/readiness.rs`'s own internal
+# `tests` module already uses for the identical `kube`-interaction
+# shape; see that module's documentation for why `Client::new(mock_service,
+# ns)` is a real, offline, non-network client for this purpose. Pinned
+# to the same version for the same reason (no new version added to the
+# resolved graph, only promoted to directly usable here).
+tower-test = "0.4.0"
+# `http::{Request, Response}` -- see `admissionlab-installer`'s
+# `Cargo.toml` comment on this entry; identical reasoning, identical
+# pin.
+http = "1.5.0"
+# `#[tokio::test]` itself, for both `src/resources.rs`'s internal mock
+# tests and `tests/resources.rs`'s external ones.
+tokio = { workspace = true, features = ["rt", "macros"] }

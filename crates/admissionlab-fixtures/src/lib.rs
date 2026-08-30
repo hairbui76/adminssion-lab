@@ -4,10 +4,10 @@
 //! This crate finds the Kubernetes manifest documents an
 //! `admissionlab.yaml` configuration's `fixtures.include` globs select,
 //! gives each one a [`admissionlab_core::FixtureId`] that is stable
-//! across machines, and hashes its source content for provenance. It
-//! does not itself replay a fixture through a cluster or resolve which
-//! Kubernetes API resource it targets -- those are later tasks' jobs
-//! (Task 3.2 and onward).
+//! across machines, hashes its source content for provenance, and
+//! resolves its `apiVersion`/`kind` to a real Kubernetes API resource on
+//! a specific cluster. It does not itself replay a fixture through a
+//! cluster -- that is a later task's job.
 //!
 //! - [`discover`] implements Task 3.1: [`discover::discover_fixtures`]
 //!   walks a [`admissionlab_spec::ResolvedFixtureSelection`]'s root,
@@ -22,6 +22,15 @@
 //!   document's path and position, into a [`admissionlab_core::FixtureId`].
 //! - [`hash`] computes the SHA-256 content hash [`discover::FixtureSource::sha256`]
 //!   carries.
+//! - [`resources`] implements Task 3.2: [`resources::ResourceResolver::resolve`]
+//!   turns a [`discover::FixtureSource::object`]'s `apiVersion`/`kind`
+//!   into a [`resources::ResolvedResource`] against a real cluster's own
+//!   discovery, caching one discovery snapshot per cluster. See that
+//!   module's documentation for the caching/invalidation design and for
+//!   why this module is named `resources`, not `discovery` (controller
+//!   supplement §1, Task 3.2: [`discover`] already owns that name for a
+//!   different job -- finding fixture *files* on disk, not Kubernetes
+//!   API *resources*).
 //!
 //! # Dependency direction (controller supplement §2, Task 3.1)
 //!
@@ -41,8 +50,10 @@
 pub mod discover;
 pub mod hash;
 mod identity;
+pub mod resources;
 
 pub use discover::{FixtureSource, discover_fixtures};
+pub use resources::{KubeResourceResolver, ResolvedResource, ResourceResolver};
 
 use std::path::PathBuf;
 
@@ -186,5 +197,53 @@ pub enum FixtureError {
         second_path: PathBuf,
         /// That document's zero-based position within `second_path`.
         second_document_index: usize,
+    },
+    /// [`resources::ResourceResolver::resolve`] (Task 3.2) could not
+    /// even query `cluster`'s discovered API surface: its kubeconfig
+    /// could not be turned into a usable `kube::Client`, or the
+    /// discovery request(s) themselves failed. Unlike every variant
+    /// above, this is not about one fixture document at all -- it
+    /// carries no `path`/`document_index`, only which cluster could not
+    /// be queried.
+    #[error("could not discover API resources on cluster {cluster:?}: {reason}")]
+    ResourceDiscoveryUnavailable {
+        /// The cluster's own name ([`admissionlab_core::cluster::ClusterSpec::name`]),
+        /// not its kubeconfig path -- avoids putting a local filesystem
+        /// path into an error a user might see surfaced in a report.
+        cluster: String,
+        /// A human-readable explanation, taken from the underlying
+        /// `kube`/kubeconfig-parsing failure's own `Display`.
+        reason: String,
+    },
+    /// [`resources::ResourceResolver::resolve`] (Task 3.2) queried
+    /// `cluster`'s discovered API surface, and it has no resource
+    /// matching `api_version`/`kind`.
+    ///
+    /// This deliberately does **not** claim the resource is definitely
+    /// unsupported: two causes are indistinguishable at this point --
+    /// the resource genuinely does not exist on `cluster`, or its CRD
+    /// (for example one Kyverno or Istio installs) was created *after*
+    /// this resolver's cache for `cluster` was last populated, and the
+    /// cache has not been invalidated since
+    /// ([`resources::KubeResourceResolver::invalidate`]; see that type's
+    /// documentation for who is meant to call it and why nothing does
+    /// yet). Global Constraint 15: this crate never guesses which of the
+    /// two it is.
+    #[error(
+        "cluster {cluster:?} has no API resource for apiVersion {api_version:?} kind {kind:?}; \
+         this may mean the resource genuinely does not exist on this cluster, or that its CRD \
+         was installed after discovery was last cached for this cluster and the cache has not \
+         been invalidated since"
+    )]
+    UnsupportedResource {
+        /// The cluster whose discovery has no match: its own name, not
+        /// its kubeconfig path, for the same reason
+        /// [`FixtureError::ResourceDiscoveryUnavailable`]'s own
+        /// `cluster` field is.
+        cluster: String,
+        /// The requested `apiVersion`, verbatim.
+        api_version: String,
+        /// The requested `kind`, verbatim.
+        kind: String,
     },
 }
