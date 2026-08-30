@@ -83,11 +83,15 @@
 //! (`Status::failure(..).with_code(..)`) -- confirmed live against a
 //! real `kind` cluster: a deprecated CRD version's dry-run CREATE
 //! returned exactly one `Warning: 299 - "<message>"` header, captured
-//! verbatim by this same `Client::send`-based approach (see this task's
-//! report for the transcript). [`DryRunCreateResponse::warnings`] holds
-//! each header's raw value text unmodified -- no RFC 7234 unwrapping --
-//! matching `admissionlab_admission::outcome::AdmissionOutcome::warnings`'s
-//! own "verbatim" documentation.
+//! by this same `Client::send`-based approach (see this task's report
+//! for the transcript). [`DryRunCreateResponse::warnings`] holds each
+//! header's raw value text, decoded with [`String::from_utf8_lossy`]
+//! rather than [`http::HeaderValue::to_str`] -- see that field's own
+//! documentation for why this distinction matters (found in review: an
+//! earlier version used `to_str`, which silently dropped any header
+//! that was not valid UTF-8, making an empty `Vec` ambiguous between
+//! "observed zero" and "one arrived malformed and was discarded"). No
+//! RFC 7234 `warn-code`/`warn-agent` unwrapping either way.
 
 use std::time::{Duration, Instant, SystemTime};
 
@@ -131,11 +135,20 @@ pub struct DryRunCreateResponse {
     /// module's documentation for why a rejection is not itself a
     /// [`FixtureError`].
     pub result: Result<serde_json::Value, Status>,
-    /// `Warning` HTTP response header values, verbatim (no RFC 7234
-    /// unwrapping) and in the order the API server sent them. Empty
-    /// when the response carried none -- this module always attempts
-    /// to read them (see this module's documentation), so an empty
-    /// `Vec` here means "observed zero", not "not captured".
+    /// `Warning` HTTP response header values, in the order the API
+    /// server sent them, decoded with [`String::from_utf8_lossy`] --
+    /// verbatim for a well-formed (UTF-8) header value, with U+FFFD
+    /// substituted only for a byte sequence that was not valid UTF-8
+    /// (RFC 7234 `warning-value` technically permits arbitrary
+    /// `obs-text`, though a real Kubernetes apiserver has not been
+    /// observed to send one). No RFC 7234 `warn-code`/`warn-agent`
+    /// unwrapping either way. Every header this response carried is
+    /// represented by exactly one entry here -- none is ever dropped,
+    /// so an empty `Vec` here means "observed zero", not "not
+    /// captured" or "one was malformed and silently discarded" (found
+    /// in review: an earlier version used `HeaderValue::to_str`, which
+    /// returns `None` -- and was then filtered out -- for exactly the
+    /// non-UTF-8 case this lossy decode now keeps).
     pub warnings: Vec<String>,
     /// Wall-clock time from just before the request was sent to just
     /// after its response finished arriving. Measured with
@@ -248,7 +261,7 @@ pub async fn dry_run_create_with_client(
         .headers()
         .get_all(WARNING)
         .iter()
-        .filter_map(|value| value.to_str().ok().map(str::to_string))
+        .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
         .collect();
 
     let status_code = response.status();

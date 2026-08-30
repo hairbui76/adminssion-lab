@@ -10,6 +10,7 @@ dependencies = [
  "admissionlab-fixtures",
  "async-trait",
  "http",
+ "http-body-util",
  "json-patch",
  "k8s-openapi",
  "kube",

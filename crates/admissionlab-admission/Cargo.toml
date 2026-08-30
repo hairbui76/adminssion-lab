@@ -74,6 +74,14 @@ thiserror = { workspace = true }
 # module's own documentation).
 tokio = { workspace = true, features = ["rt", "macros"] }
 tower-test = "0.4.0"
+# `tests/execute_unit.rs`'s body-integrity test reads the request body
+# the mock actually received (`BodyExt::collect`) to assert it is
+# exactly the fixture object with nothing added -- the same call
+# `admissionlab-fixtures/src/execute.rs`'s own production code makes on
+# the response side. Already resolved transitively at this exact
+# version (a promotion, not a new dependency); see the root
+# `Cargo.toml`'s own comment on this entry.
+http-body-util = { workspace = true }
 # `http::{Request, Response}` -- what `tower_test::mock::pair` and
 # `kube::Client::new` are generic over, and what
 # `tests/execute_unit.rs` asserts the mock-received request's

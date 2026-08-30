@@ -15,7 +15,8 @@ use std::pin::pin;
 use admissionlab_admission::{AdmissionDecision, execute_create_with_client};
 use admissionlab_core::FixtureId;
 use admissionlab_fixtures::{FixtureSource, ResolvedResource};
-use http::{Request, Response};
+use http::{HeaderValue, Request, Response};
+use http_body_util::BodyExt;
 use kube::client::Body;
 use kube::core::{ApiResource, GroupVersion};
 use serde_json::json;
@@ -319,6 +320,177 @@ async fn no_warning_header_is_reported_as_an_empty_list() {
         .expect("mocked dry-run CREATE must succeed");
 
     assert!(response.warnings.is_empty());
+
+    responder.await.expect("mock responder task must not panic");
+}
+
+#[tokio::test]
+async fn request_body_is_exactly_the_fixture_object_with_nothing_added() {
+    // Task 3.4 brief Step 2 / controller supplement §3: anything added
+    // to the object changes what the webhooks under test actually see,
+    // so Admission Lab would end up comparing behavior on an object the
+    // user never wrote. Fails if a correlation label, annotation, or
+    // any other field were ever injected into the request body, or if
+    // any field of the fixture's own object were dropped or altered.
+    let (mock_service, handle) = mock::pair::<Request<Body>, Response<Body>>();
+    let client = kube::Client::new(mock_service, "default");
+
+    let fixture_object = json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": "demo",
+            "namespace": "kyverno-test",
+            "labels": {"app": "demo"},
+        },
+        "data": {"key": "value"},
+    });
+    let fixture = fixture_with_object(fixture_object.clone());
+    let resource = configmap_resource();
+
+    let responder = tokio::spawn(async move {
+        let mut handle = pin!(handle);
+        let (request, send) = handle.next_request().await.expect("one CREATE request");
+
+        let body_bytes = request
+            .into_body()
+            .collect()
+            .await
+            .expect("mock must be able to read the request body")
+            .to_bytes();
+        let transmitted_object: serde_json::Value =
+            serde_json::from_slice(&body_bytes).expect("request body must be valid JSON");
+        assert_eq!(
+            transmitted_object, fixture_object,
+            "the transmitted object must equal the fixture's own object exactly -- same \
+             keys, no extras, nothing missing or altered"
+        );
+
+        send.send_response(
+            Response::builder()
+                .status(201)
+                .body(Body::from(body_bytes))
+                .expect("build 201 response"),
+        );
+    });
+
+    let response = execute_create_with_client(client, "test-cluster", &fixture, &resource)
+        .await
+        .expect("mocked dry-run CREATE must succeed");
+    assert_eq!(response.decision, AdmissionDecision::Accepted);
+
+    responder.await.expect("mock responder task must not panic");
+}
+
+#[tokio::test]
+async fn multiple_warning_headers_are_all_collected() {
+    // Fails if `get_all` were replaced with something that only reads
+    // the first `Warning` header, or if collection silently truncated
+    // after one.
+    let (mock_service, handle) = mock::pair::<Request<Body>, Response<Body>>();
+    let client = kube::Client::new(mock_service, "default");
+
+    let fixture = fixture_with_object(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "demo", "namespace": "default"},
+    }));
+    let resource = configmap_resource();
+
+    let responder = tokio::spawn(async move {
+        let mut handle = pin!(handle);
+        let (_request, send) = handle.next_request().await.expect("one CREATE request");
+        send.send_response(
+            Response::builder()
+                .status(201)
+                .header(http::header::WARNING, "299 - \"first warning\"")
+                .header(http::header::WARNING, "299 - \"second warning\"")
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "apiVersion": "v1",
+                        "kind": "ConfigMap",
+                        "metadata": {"name": "demo", "namespace": "default"},
+                    }))
+                    .expect("serialize admitted object"),
+                ))
+                .expect("build 201 response with two Warning headers"),
+        );
+    });
+
+    let response = execute_create_with_client(client, "test-cluster", &fixture, &resource)
+        .await
+        .expect("mocked dry-run CREATE must succeed");
+
+    assert_eq!(
+        response.warnings,
+        vec![
+            "299 - \"first warning\"".to_string(),
+            "299 - \"second warning\"".to_string(),
+        ]
+    );
+
+    responder.await.expect("mock responder task must not panic");
+}
+
+#[tokio::test]
+async fn a_malformed_warning_header_is_lossily_decoded_not_dropped() {
+    // Pins the review finding's fix: an earlier implementation used
+    // `HeaderValue::to_str`, which returns `None` for a header value
+    // that is not valid UTF-8 and was then filtered out entirely --
+    // silently discarding it and making an empty `Vec` ambiguous
+    // between "observed zero" and "one arrived malformed and was
+    // dropped". This must neither panic nor vanish: the malformed
+    // bytes are lossily decoded (an invalid sequence becomes U+FFFD)
+    // into one real entry.
+    let (mock_service, handle) = mock::pair::<Request<Body>, Response<Body>>();
+    let client = kube::Client::new(mock_service, "default");
+
+    let fixture = fixture_with_object(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "demo", "namespace": "default"},
+    }));
+    let resource = configmap_resource();
+
+    let responder = tokio::spawn(async move {
+        let mut handle = pin!(handle);
+        let (_request, send) = handle.next_request().await.expect("one CREATE request");
+        // Byte 0xFF is legal `obs-text` in an HTTP header value
+        // (`http::HeaderValue` accepts it) but is not valid UTF-8 on
+        // its own.
+        let malformed = HeaderValue::from_bytes(b"299 - \xffmalformed")
+            .expect("HeaderValue permits arbitrary obs-text bytes");
+        send.send_response(
+            Response::builder()
+                .status(201)
+                .header(http::header::WARNING, malformed)
+                .body(Body::from(
+                    serde_json::to_vec(&json!({
+                        "apiVersion": "v1",
+                        "kind": "ConfigMap",
+                        "metadata": {"name": "demo", "namespace": "default"},
+                    }))
+                    .expect("serialize admitted object"),
+                ))
+                .expect("build 201 response with a malformed Warning header"),
+        );
+    });
+
+    let response = execute_create_with_client(client, "test-cluster", &fixture, &resource)
+        .await
+        .expect("mocked dry-run CREATE must succeed");
+
+    assert_eq!(
+        response.warnings.len(),
+        1,
+        "a malformed header must still produce exactly one entry, not zero: got {:?}",
+        response.warnings
+    );
+    assert!(
+        response.warnings[0].contains('\u{FFFD}'),
+        "the invalid byte must be lossily substituted, not silently stripped: got {:?}",
+        response.warnings[0]
+    );
 
     responder.await.expect("mock responder task must not panic");
 }
