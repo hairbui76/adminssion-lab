@@ -33,15 +33,25 @@
 //!   a rebuild, on purpose, not something a binary can pick up by itself
 //!   at runtime.
 //!
-//! [`BUILTIN_RECIPES`] is empty today: no recipe ships with Task 2.5 —
-//! Tasks 2.8/2.9 own the actual Kyverno/Istio recipe content (this
-//! crate's own `lib.rs` module documentation). Adding a real one later
-//! is a one-line addition to that array plus the new
-//! `recipes/<name>.yaml` file it `include_str!`s — the loading mechanism
-//! itself does not change. [`load_builtin_recipes`] is still fully
-//! exercised end-to-end today (see `tests/load.rs`): it parses and
-//! resolves whatever [`BUILTIN_RECIPES`] holds, which today is nothing,
-//! proving the mechanism itself is correct independent of content.
+//! [`BUILTIN_RECIPES`] carried nothing at all through Task 2.5-2.7 (this
+//! crate's own `lib.rs` module documentation). Task 2.8 adds the first
+//! real entry, the certified Kyverno recipe
+//! (`recipes/kyverno/recipe.yaml`) — Task 2.9's Istio recipe is not yet
+//! implemented. Kyverno installs purely via Helm (no `install.paths` at
+//! all), so it never hits `model.rs`'s private `resolve_manifests`
+//! helper's relative-path rejection the way a manifests-based recipe
+//! embedded as a built-in would — `recipes/test-webhook/recipe.yaml`'s
+//! own header comment covers why a manifests-based built-in is a
+//! harder, still-open problem this recipe does not need to solve.
+//! Adding a further real entry is a one-line addition to
+//! [`BUILTIN_RECIPES`] plus the new `recipes/<name>/recipe.yaml` file it
+//! `include_str!`s — the loading mechanism itself does not change.
+//! [`load_builtin_recipes`] was already fully exercised end-to-end
+//! before this task (see `tests/load.rs`): it parsed and resolved
+//! whatever [`BUILTIN_RECIPES`] held, which before Task 2.8 was nothing,
+//! proving the mechanism itself is correct independent of content —
+//! `tests/kyverno_recipe.rs` is what now additionally proves real
+//! content installs and behaves correctly against a live cluster.
 //!
 //! # A local override directory is never consulted implicitly
 //!
@@ -80,12 +90,18 @@ use crate::model::{RawRecipe, Recipe, RecipeError, resolve_recipe};
 ///
 /// Each entry is `(label, yaml)`: `label` is a diagnostic name only
 /// (used in [`RecipeError`] messages), never a filesystem path — these
-/// bytes are compiled in, not read at runtime, so there is no path to
-/// name. Empty today; see this module's own documentation for why, and
-/// for exactly what a future task adds here.
+/// bytes are compiled in, not read at runtime, so there is no path a
+/// running binary could re-read even if it wanted to. It is written to
+/// *look like* the source file's real repository-relative path purely
+/// because that is the clearest possible diagnostic, not because
+/// anything here treats it as one. See this module's own documentation
+/// for what a future recipe adds here.
 const BUILTIN_RECIPES: &[(&str, &str)] = &[
-    // Task 2.8: ("kyverno.yaml", include_str!("../../../recipes/kyverno.yaml")),
-    // Task 2.9: ("istio.yaml", include_str!("../../../recipes/istio.yaml")),
+    (
+        "recipes/kyverno/recipe.yaml",
+        include_str!("../../../recipes/kyverno/recipe.yaml"),
+    ),
+    // Task 2.9: ("recipes/istio/recipe.yaml", include_str!("../../../recipes/istio/recipe.yaml")),
 ];
 
 /// Loads every built-in recipe embedded into this binary (see this

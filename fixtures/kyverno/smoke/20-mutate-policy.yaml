@@ -1,0 +1,47 @@
+# Mutating scenario, half 1 of 2 (policy). Adds
+# app.kubernetes.io/managed-by=admissionlab to every Pod created in
+# admissionlab-kyverno-smoke-mutate. Deterministic: always the same
+# fixed literal value, never derived from context, another object, or a
+# variable lookup.
+#
+# `spec.rules[].mutate.patchStrategicMerge` -- verified present in the
+# real `clusterpolicies.kyverno.io` v1 CRD schema pulled from chart
+# 3.9.0, not assumed from memory -- see
+# .superpowers/sdd/ROADMAP/research-kyverno.md §4. Proving this actually
+# mutates (not merely "the apply didn't error", which a no-op policy
+# would also satisfy) needs reading the created object back and checking
+# the label is actually present with this exact value --
+# `crates/admissionlab-recipes/tests/kyverno_recipe.rs` does exactly
+# that against 21-mutate-input-pod.yaml.
+#
+# `background: false`: see 10-validate-policy.yaml's own comment -- same
+# reasoning, this policy only needs to act on incoming admission
+# requests.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: admissionlab-add-managed-by-label
+  annotations:
+    policies.kyverno.io/title: Add Managed-By Label
+    policies.kyverno.io/category: Admission Lab Smoke Test
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Admission Lab smoke-test fixture. Adds
+      app.kubernetes.io/managed-by=admissionlab to every Pod created in
+      admissionlab-kyverno-smoke-mutate.
+spec:
+  background: false
+  rules:
+    - name: add-managed-by-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - admissionlab-kyverno-smoke-mutate
+      mutate:
+        patchStrategicMerge:
+          metadata:
+            labels:
+              app.kubernetes.io/managed-by: admissionlab

@@ -1,0 +1,82 @@
+# Kyverno certified install recipe (Task 2.8). See README.md in this
+# same directory for the full pin rationale, the Kubernetes
+# certification story, and the readiness/race-condition notes this file
+# only summarizes.
+#
+# Chart pin: kyverno/kyverno 3.9.0 (appVersion v1.19.0), from
+# https://kyverno.github.io/kyverno/. 3.9.0 is a strict superset of
+# 3.8.2's changes (identical CRD set, identical defaults) plus a real
+# CVE fix (CVE-2026-32280) -- see README.md for the full comparison and
+# for the one caution that applies to picking either candidate equally:
+# this chart line is the last one supporting the legacy `ClusterPolicy`/
+# `Policy` API this recipe's fixtures use before the next chart minor
+# removes it.
+#
+# Kubernetes certification: `compatibility/recipes.yaml`'s own `kyverno`
+# entry -- not this file -- is the source of truth for which Kubernetes
+# patch version(s) this recipe is certified against, and it is
+# DELIBERATELY narrower than Admission Lab's own Tier-1 primary
+# (1.36.4): Kyverno's docs for this chart/appVersion line state
+# "Kubernetes Versions Supported: v1.33 - v1.35". See README.md.
+# `crates/admissionlab-recipes/tests/kyverno_recipe.rs` reads that
+# `certified` list at test time rather than hardcoding a version copied
+# from it, so this recipe and that test cannot silently drift apart.
+#
+# No `setValues`/`valuesFiles`: this crate's recipe schema does not
+# support either field yet -- see `RawHelmInstall`'s own documentation
+# in `crates/admissionlab-recipes/src/model.rs` for why. This recipe
+# therefore installs the chart entirely at its default values,
+# including its three Deployments that sit outside the admission path
+# (background/cleanup/reports controllers -- see README.md). Readiness
+# below deliberately does not gate on any of them.
+name: kyverno
+version: "3.9.0"
+install:
+  type: helm
+  # "kyverno/kyverno": <repo_name>/<chart_name>, exactly matching helm's
+  # own required argv form for installing from a named repository
+  # (`helm upgrade --install <release> <repo_name>/<chart_name>` --
+  # confirmed empirically: a bare "kyverno" here fails at install time
+  # with "Error: non-absolute URLs should be in form of
+  # repo_name/path_to_chart"). Matches the same convention
+  # `crates/admissionlab-recipes/tests/load.rs`'s own
+  # `istio/istiod` example recipe and
+  # `crates/admissionlab-installer/tests/helm_unit.rs`'s
+  # `"ingress-nginx/ingress-nginx"` fixture already use. The first
+  # "kyverno" is this recipe's own `repo_name` default (recipe name,
+  # unset below); the second is the chart's own name within that repo.
+  chart: kyverno/kyverno
+  repo: https://kyverno.github.io/kyverno/
+  version: "3.9.0"
+  # Equal to the recipe-name default `resolve_helm` (model.rs) would
+  # already produce; written explicitly so a reader can see exactly
+  # which namespace Kyverno lands in without tracing that default.
+  namespace: kyverno
+readiness:
+  # kyverno-admission-controller is the only one of the chart's four
+  # Deployments that owns any resource-facing webhook -- see README.md
+  # for why the other three (background/cleanup/reports controllers)
+  # are deliberately not gated on here.
+  - type: deploymentAvailable
+    namespace: kyverno
+    name: kyverno-admission-controller
+  # Both resource-facing webhook configurations are created by
+  # kyverno-admission-controller at RUNTIME -- never rendered by the
+  # chart itself -- gated by a fast internal self-check, not by any
+  # ClusterPolicy existing. See README.md.
+  #
+  # This confirms only that the two objects exist; each starts with an
+  # empty `webhooks: []` list, so existence is NOT proof that any
+  # specific policy's rule has already been folded into it. A caller
+  # that applies its own ClusterPolicy after this recipe installs must
+  # separately wait for that policy's own `Ready` condition (a
+  # `customResourceCondition` check against `kyverno.io/v1`/
+  # `ClusterPolicy`) before treating it as enforced -- see
+  # `crates/admissionlab-recipes/tests/kyverno_recipe.rs` for exactly
+  # that pattern, and README.md for why.
+  - type: webhookConfigurationPresent
+    name: kyverno-resource-validating-webhook-cfg
+  - type: webhookConfigurationPresent
+    name: kyverno-resource-mutating-webhook-cfg
+capabilities:
+  - admission

@@ -97,10 +97,14 @@ version = "0.1.0"
 name = "admissionlab-recipes"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-cluster",
+ "admissionlab-core",
+ "admissionlab-installer",
  "admissionlab-spec",
  "serde",
  "serde_norway",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

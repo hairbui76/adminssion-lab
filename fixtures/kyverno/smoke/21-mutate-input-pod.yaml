@@ -1,0 +1,15 @@
+# Mutating scenario, half 2 of 2: carries no
+# app.kubernetes.io/managed-by label before admission.
+# 20-mutate-policy.yaml must add it during admission -- the created
+# object (not this file) is what
+# `crates/admissionlab-recipes/tests/kyverno_recipe.rs` reads back and
+# asserts the label on.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: admissionlab-smoke-mutate-input
+  namespace: admissionlab-kyverno-smoke-mutate
+spec:
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10

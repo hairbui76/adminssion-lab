@@ -1,0 +1,26 @@
+# Two dedicated namespaces, one per scenario below -- kept separate
+# (rather than sharing one) so the validate and mutate ClusterPolicies
+# can each be scoped to `match.any[].resources.namespaces` containing
+# only its own scenario's namespace and never see the other scenario's
+# Pods at all. That makes each scenario fully self-contained: the
+# validate scenario's fixtures do not need to also satisfy the mutate
+# policy (or vice versa), and neither scenario's outcome depends on
+# ordering between the two ClusterPolicies. Kyverno enforces cluster-wide
+# by default (its own `kyverno` ConfigMap only excludes `kube-system` and
+# its own `kyverno` namespace -- see recipes/kyverno/README.md), so no
+# opt-in namespace label is needed here for either namespace to be seen.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-kyverno-smoke-validate
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: kyverno-smoke
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-kyverno-smoke-mutate
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: kyverno-smoke

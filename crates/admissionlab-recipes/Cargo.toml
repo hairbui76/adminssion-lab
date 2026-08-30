@@ -42,3 +42,28 @@ serde_norway = { workspace = true }
 # validation) mirror `admissionlab_spec::SpecError`'s own shape and use
 # the same `#[derive(Error)]` convention.
 thiserror = { workspace = true }
+
+[dev-dependencies]
+# `tests/kyverno_recipe.rs` (Task 2.8, `#[ignore]`d -- needs Docker and
+# `kind`) drives this crate's now-built-in Kyverno recipe through the
+# real Task 2.4/2.6 install-and-wait pipeline against a real cluster,
+# mirroring `admissionlab-test-webhook`'s own `tests/kind_smoke.rs`
+# (which dev-depends on this exact same crate set, from the other
+# direction of this edge). None of these three crates depends back on
+# `admissionlab-recipes`, dev or otherwise (verified via `cargo metadata
+# --no-deps`), so this introduces no cycle.
+admissionlab-cluster = { workspace = true }
+admissionlab-core = { workspace = true }
+admissionlab-installer = { workspace = true }
+# `tests/kyverno_recipe.rs` builds a `ResolvedComponent` directly (not
+# re-exported from this crate's own root -- see `lib.rs`) to hand to
+# `admissionlab_installer::install_stack`.
+admissionlab-spec = { workspace = true }
+# `tests/kyverno_recipe.rs` is `#[tokio::test]`-based, the same feature
+# set `admissionlab-cluster`'s own `tests/kind_smoke.rs` uses for the
+# same reason (see that crate's `Cargo.toml` comment): `macros` for
+# `#[tokio::test]` itself, `rt` for the runtime it runs on --
+# `rt-multi-thread` is not needed since this test's only concurrency is
+# real child processes (`kind`, `helm`, `kubectl`) progressing
+# independently at the OS level, not multiple executor threads.
+tokio = { workspace = true, features = ["rt", "macros"] }

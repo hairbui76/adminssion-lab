@@ -12,9 +12,13 @@
 //!   -- and a fully valid recipe using only what PRODUCT.md §14 allows
 //!   must still load, so the rejection tests are not vacuously passing a
 //!   validator that rejects everything.
-//! - **Built-in recipes are embedded, not read from disk at runtime.** No
-//!   recipe ships with Task 2.5 (Tasks 2.8/2.9 add the first ones), but
-//!   the loading mechanism itself is exercised end-to-end regardless.
+//! - **Built-in recipes are embedded, not read from disk at runtime.**
+//!   No recipe shipped through Task 2.7; Task 2.8 adds the first one
+//!   (`kyverno`, wired into `BUILTIN_RECIPES`) — the tests below prove
+//!   both that the loading mechanism itself works and that this one
+//!   real entry resolves correctly, end to end. A real, live-cluster
+//!   install of it is proven separately, in `tests/kyverno_recipe.rs`
+//!   (`#[ignore]`d — needs Docker and `kind`).
 //! - **A local override directory is never consulted unless a caller
 //!   explicitly names one.** No environment variable, home directory, or
 //!   current-working-directory convention is consulted implicitly.
@@ -29,9 +33,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use admissionlab_recipes::{
     Capability, InstallMethod, ReadinessCheck, RecipeError, RecipeNormalizeRule,
-    load_builtin_recipes, load_recipe_overrides, load_recipes,
+    load_builtin_recipes, load_recipe_compatibility, load_recipe_overrides, load_recipes,
 };
-use serde::Deserialize;
 
 // ---------------------------------------------------------------------
 // Test support
@@ -715,15 +718,18 @@ fn relative_manifest_path_in_a_recipe_is_rejected() {
 
 #[test]
 fn builtin_recipes_load_without_touching_the_filesystem() {
-    // No recipe ships yet -- Tasks 2.8/2.9 add the first ones -- so this
-    // proves the *mechanism* works end-to-end (parses its own embedded
-    // registry, even though that registry is empty today), not that the
-    // result is non-empty.
+    // Task 2.8 adds the first real built-in recipe (kyverno) -- this
+    // proves load_builtin_recipes resolves it purely from its embedded
+    // include_str! text: succeeding here needs no filesystem setup at
+    // all (no directory created, no current directory changed), unlike
+    // every override-directory test below.
     let recipes = load_builtin_recipes().expect("loading the embedded built-in set must not fail");
-    assert!(
-        recipes.is_empty(),
-        "no built-in recipe ships with Task 2.5; got {recipes:?}"
+    assert_eq!(
+        recipes.len(),
+        1,
+        "expected exactly the kyverno recipe as of Task 2.8; got {recipes:?}"
     );
+    assert_eq!(recipes[0].name, "kyverno");
 }
 
 // ---------------------------------------------------------------------
@@ -750,11 +756,16 @@ fn override_directory_is_never_consulted_via_the_current_working_directory() {
 
     let _guard = CwdGuard::change_to(&root);
     let recipes = load_recipes(None).expect("load_recipes(None) must succeed");
-    assert!(
-        recipes.is_empty(),
+    // Exactly the built-in set (the kyverno recipe, as of Task 2.8) --
+    // never "demo-webhook", the name every seeded current-directory
+    // candidate above declares.
+    assert_eq!(
+        recipes.len(),
+        1,
         "load_recipes(None) must never discover a recipe via the current working directory; \
          got {recipes:?}"
     );
+    assert_eq!(recipes[0].name, "kyverno");
 }
 
 #[test]
@@ -763,8 +774,16 @@ fn explicit_override_directory_is_loaded() {
 
     let recipes =
         load_recipes(Some(&dir)).expect("an explicitly named override directory must load");
-    assert_eq!(recipes.len(), 1);
-    assert_eq!(recipes[0].name, "demo-webhook");
+    // The built-in kyverno recipe, plus this override -- a distinct
+    // name, so it is added alongside rather than replacing anything;
+    // see `two_distinct_override_recipes_both_load_sorted_by_name`
+    // below for the multi-override case and `crate::load`'s own
+    // `override_replaces_a_builtin_of_the_same_name` unit test for the
+    // "replaces" half of this behavior, which needs a same-named
+    // built-in this integration test does not have.
+    assert_eq!(recipes.len(), 2);
+    let names: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["demo-webhook", "kyverno"], "sorted by name");
 }
 
 #[test]
@@ -783,7 +802,9 @@ fn two_distinct_override_recipes_both_load_sorted_by_name() {
 
     let recipes = load_recipes(Some(&dir)).expect("two distinct override recipes must load");
     let names: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, vec!["another-webhook", "demo-webhook"]);
+    // Both overrides, plus the built-in kyverno recipe (Task 2.8) --
+    // all three sorted by name together.
+    assert_eq!(names, vec!["another-webhook", "demo-webhook", "kyverno"]);
 }
 
 #[test]
@@ -818,51 +839,23 @@ fn non_yaml_files_in_the_override_directory_are_ignored() {
 
 // ---------------------------------------------------------------------
 // compatibility/recipes.yaml: shape and facts (Controller Ruling R28)
+//
+// Task 2.8 promoted the struct these tests used to parse this file
+// (formerly private to this test file) into a real, `pub`
+// `admissionlab_recipes::compat` API — `load_recipe_compatibility`,
+// `RecipeCompatibilityMatrix`, and friends. `crates/admissionlab-recipes/tests/kyverno_recipe.rs`
+// is now this file's real, non-test consumer: it reads the `kyverno`
+// entry's `certified` list at test time to decide which Kubernetes
+// version to install and certify against, rather than hardcoding a copy
+// of it. The tests below still independently assert this file's shape
+// and content -- unchanged from before Task 2.8 -- just through the
+// promoted API instead of a private duplicate of it.
 // ---------------------------------------------------------------------
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CompatMatrix {
-    recipes: Vec<CompatRecipe>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompatRecipe {
-    name: String,
-    version: String,
-    kubernetes: CompatKubernetes,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CompatKubernetes {
-    #[serde(default)]
-    documented_range: Option<CompatRange>,
-    certified: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CompatRange {
-    min: String,
-    max: String,
-}
-
-fn compatibility_recipes_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../compatibility/recipes.yaml")
-}
-
-fn load_compatibility_recipes() -> CompatMatrix {
-    let text = std::fs::read_to_string(compatibility_recipes_path())
-        .expect("compatibility/recipes.yaml must exist and be readable");
-    serde_norway::from_str(&text)
-        .expect("compatibility/recipes.yaml must parse against the recipe-compatibility shape")
-}
 
 #[test]
 fn compatibility_recipes_yaml_has_the_expected_shape() {
-    let matrix = load_compatibility_recipes();
+    let matrix = load_recipe_compatibility()
+        .expect("compatibility/recipes.yaml must parse against the recipe-compatibility shape");
     assert!(!matrix.recipes.is_empty());
     for recipe in &matrix.recipes {
         assert!(!recipe.name.trim().is_empty());
@@ -877,12 +870,8 @@ fn compatibility_recipes_yaml_has_the_expected_shape() {
 
 #[test]
 fn kyverno_certified_kubernetes_excludes_the_tier_1_primary() {
-    let matrix = load_compatibility_recipes();
-    let kyverno = matrix
-        .recipes
-        .iter()
-        .find(|r| r.name == "kyverno")
-        .expect("a kyverno entry must exist");
+    let matrix = load_recipe_compatibility().expect("compatibility/recipes.yaml must parse");
+    let kyverno = matrix.entry("kyverno").expect("a kyverno entry must exist");
 
     assert_eq!(kyverno.version, "3.9.0");
     assert_eq!(kyverno.kubernetes.certified, vec!["1.35.8".to_string()]);
@@ -902,12 +891,8 @@ fn kyverno_certified_kubernetes_excludes_the_tier_1_primary() {
 
 #[test]
 fn istio_certified_kubernetes_matches_the_full_supported_matrix() {
-    let matrix = load_compatibility_recipes();
-    let istio = matrix
-        .recipes
-        .iter()
-        .find(|r| r.name == "istio")
-        .expect("an istio entry must exist");
+    let matrix = load_recipe_compatibility().expect("compatibility/recipes.yaml must parse");
+    let istio = matrix.entry("istio").expect("an istio entry must exist");
 
     assert_eq!(istio.version, "1.30.4");
     assert!(

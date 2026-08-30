@@ -2,9 +2,10 @@
 //! Vendor-neutral recipe metadata: curated, convenience installation
 //! metadata for a known admission-stack component (Kyverno, Istio, and
 //! so on) — pinned versions, readiness checks, harmless response
-//! normalization rules, capability metadata, and (via
-//! `compatibility/recipes.yaml`, not this crate — see that file's own
-//! header comments) compatibility-test metadata. See PRODUCT.md §14
+//! normalization rules, capability metadata, and (recorded in
+//! `compatibility/recipes.yaml`, read through this crate's own
+//! [`compat`] module — see that file's own header comments for what it
+//! records and why) compatibility-test metadata. See PRODUCT.md §14
 //! ("Recipe Model").
 //!
 //! # A recipe never contains regression-classification logic
@@ -64,20 +65,25 @@
 //! directory. See [`load`]'s module documentation for both design
 //! decisions and why each is deliberate.
 //!
-//! Not yet implemented here: stack installation orchestration (Task 2.6)
-//! that actually drives a resolved [`Recipe`]'s
-//! [`Recipe::install`]/[`Recipe::readiness`] through
-//! `admissionlab-installer`, and the Kyverno/Istio recipe content
-//! themselves (Tasks 2.8/2.9) — this crate builds the model and the
-//! loading mechanism only.
+//! Stack installation orchestration (Task 2.6) that actually drives a
+//! resolved [`Recipe`]'s [`Recipe::install`]/[`Recipe::readiness`] lives
+//! in `admissionlab-installer`, not here. The certified Kyverno recipe
+//! (Task 2.8) is this crate's first real built-in content — see
+//! [`load`]'s own `BUILTIN_RECIPES`; Istio's (Task 2.9) is not yet
+//! implemented.
 
 mod capability;
+pub mod compat;
 pub mod load;
 pub mod model;
 
 pub use admissionlab_spec::component::HelmInstallSpec;
 pub use admissionlab_spec::{
     Capability, InstallMethod, ManifestInstallSpec, ReadinessCheck, RecipeNormalizeRule,
+};
+pub use compat::{
+    DocumentedKubernetesRange, KubernetesCompatibility, RecipeCompatibilityEntry,
+    RecipeCompatibilityError, RecipeCompatibilityMatrix, load_recipe_compatibility,
 };
 pub use load::{load_builtin_recipes, load_recipe_overrides, load_recipes};
 pub use model::{Recipe, RecipeError};

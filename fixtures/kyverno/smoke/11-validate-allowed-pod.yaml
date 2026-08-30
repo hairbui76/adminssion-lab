@@ -1,0 +1,18 @@
+# Validating scenario, half 2 of 2, conforming case: carries the
+# required admissionlab.io/team label, so 10-validate-policy.yaml must
+# admit it. This is the counterweight to 12-validate-denied-pod.yaml: a
+# policy that (by accident) denies every Pod regardless of its labels
+# would still make the denied-pod test below pass, for the wrong reason
+# -- this fixture is what catches that failure mode, by requiring the
+# apply to succeed.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: admissionlab-smoke-validate-allowed
+  namespace: admissionlab-kyverno-smoke-validate
+  labels:
+    admissionlab.io/team: platform
+spec:
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10

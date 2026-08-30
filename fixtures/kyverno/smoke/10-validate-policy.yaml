@@ -1,0 +1,58 @@
+# Validating scenario, half 1 of 2 (policy). Denies any Pod created in
+# admissionlab-kyverno-smoke-validate that does not carry the
+# admissionlab.io/team label. Deterministic: the outcome depends only on
+# the incoming object's own metadata, never on cluster state, another
+# object, or a context/variable lookup.
+#
+# `spec.rules[].validate.failureAction: Enforce` (NOT the deprecated
+# spec-level `validationFailureAction`, whose schema default is `Audit`
+# and which never blocks a request -- it only records a policy report)
+# is what makes this policy actually block admission rather than merely
+# observe it. Verified directly against the real `clusterpolicies.kyverno.io`
+# v1 CRD schema pulled from chart 3.9.0 (`spec.rules[].validate.failureAction`,
+# enum `[Audit, Enforce]`, no default -- must be set explicitly to get
+# enforcement), not assumed from memory -- see
+# .superpowers/sdd/ROADMAP/research-kyverno.md §4 for the exact commands.
+# `crates/admissionlab-recipes/tests/kyverno_recipe.rs` proves this
+# actually blocks (not merely "the apply didn't error") by applying both
+# a conforming and a violating Pod and asserting both outcomes -- a test
+# that only checked the violating case could not tell Enforce from Audit.
+#
+# `background: false`: this policy only needs to evaluate incoming
+# admission requests, never existing resources (recipes/kyverno/recipe.yaml
+# does not gate readiness on, and this fixture pack does not depend on,
+# the background-controller Deployment at all).
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: admissionlab-require-team-label
+  annotations:
+    policies.kyverno.io/title: Require Team Label
+    policies.kyverno.io/category: Admission Lab Smoke Test
+    policies.kyverno.io/subject: Pod
+    policies.kyverno.io/description: >-
+      Admission Lab smoke-test fixture. Denies any Pod in
+      admissionlab-kyverno-smoke-validate that does not carry the
+      admissionlab.io/team label.
+spec:
+  background: false
+  rules:
+    - name: require-admissionlab-team-label
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - admissionlab-kyverno-smoke-validate
+      validate:
+        failureAction: Enforce
+        message: "admissionlab.io/team label is required on all Pods in this namespace."
+        pattern:
+          metadata:
+            labels:
+              # Kyverno's overlay wildcard for "present and at least one
+              # character" -- a standard, documented pattern-validation
+              # idiom (kyverno.io/docs/writing-policies/validate/), not
+              # novel to this fixture.
+              admissionlab.io/team: "?*"

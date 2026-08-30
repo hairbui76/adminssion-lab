@@ -1,0 +1,16 @@
+# Validating scenario, violating case: carries no admissionlab.io/team
+# label at all, so 10-validate-policy.yaml must reject the CREATE
+# request outright -- `kubectl apply` must exit non-zero, and the
+# rejection must be attributable to admissionlab-require-team-label by
+# name (not merely "some error happened"). See
+# `crates/admissionlab-recipes/tests/kyverno_recipe.rs` for both
+# assertions.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: admissionlab-smoke-validate-denied
+  namespace: admissionlab-kyverno-smoke-validate
+spec:
+  containers:
+    - name: pause
+      image: registry.k8s.io/pause:3.10
