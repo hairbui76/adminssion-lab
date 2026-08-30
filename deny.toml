@@ -15,6 +15,32 @@ allow = [
     "ISC",
     "Unicode-3.0",
     "Zlib",
+    # Controller Ruling R31 (Task 2.4). Covers exactly one crate in the
+    # graph: `webpki-root-certs`, pulled in transitively via
+    # `kube -> kube-client -> rustls-platform-verifier -> webpki-root-certs`
+    # (`admissionlab-installer`'s readiness probes depend on `kube`, whose
+    # default `rustls-tls` feature unconditionally enables
+    # `rustls-platform-verifier`, which bundles this crate as its fallback
+    # trust store). The crate is not source code: it is Mozilla's trusted
+    # CA roots in X.509 form, drawn from the Common CA Database -- a
+    # dataset, which is exactly what the Community Data License Agreement
+    # exists for. Read directly (not from memory) before adding this
+    # exception: CDLA-Permissive-2.0 grants use, modification, and sharing
+    # (§1.1); its *only* condition is §2.1 -- "A Data Recipient may share
+    # Data, with or without modifications, so long as the Data Recipient
+    # makes available the text of this agreement with the shared Data."
+    # (§3.1's disclaimer of restrictions governs *Results* -- computational
+    # outputs derived from the data -- not the Data itself; do not read it
+    # as blanket permissiveness for the dataset). Net: permissive with a
+    # single notice-retention obligation, materially the same shape as
+    # Apache-2.0's own §4 -- compatible with this project's Apache-2.0
+    # licensing, and satisfiable by shipping the license text alongside
+    # the data. That obligation is a real, tracked requirement, not a
+    # nicety: Task 9.9 (packaging, checksums, SBOM, release provenance)
+    # must include this (and every other bundled dependency's) license
+    # text in release artifacts, satisfying §2.1 rather than leaving it to
+    # be discovered at release time.
+    "CDLA-Permissive-2.0",
 ]
 
 [bans]
