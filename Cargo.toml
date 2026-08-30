@@ -10,6 +10,18 @@ repository = "https://github.com/hairbui76/adminssion-lab"
 [workspace.dependencies]
 admissionlab-cluster = { path = "crates/admissionlab-cluster" }
 admissionlab-core = { path = "crates/admissionlab-core" }
+# `admissionlab-admission`'s `execute.rs` (Task 3.4) is the first
+# cross-crate consumer of this crate: `AdmissionExecutor::execute_create`
+# takes `&admissionlab_fixtures::FixtureSource` and
+# `&admissionlab_fixtures::resources::ResolvedResource` and calls
+# `admissionlab_fixtures::execute::dry_run_create` to do the actual
+# server-side dry-run CREATE. This is the `admission -> fixtures` edge
+# Controller supplement §2 (Task 3.4) names: combined with the existing
+# `fixtures -> core` edge, that gives `admission -> fixtures -> core`,
+# which is fine (no cycle) -- what must never happen is `core ->
+# admission`, which `admissionlab-core/src/run.rs`'s own module
+# documentation already covers.
+admissionlab-fixtures = { path = "crates/admissionlab-fixtures" }
 # `admissionlab-test-webhook`'s `tests/kind_smoke.rs` (Task 2.7) is the
 # first cross-crate consumer of this crate — drives a resolved recipe's
 # component through the real Task 2.6 install-and-wait pipeline.

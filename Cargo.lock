@@ -7,9 +7,17 @@ name = "admissionlab-admission"
 version = "0.1.0"
 dependencies = [
  "admissionlab-core",
+ "admissionlab-fixtures",
+ "async-trait",
+ "http",
  "json-patch",
+ "k8s-openapi",
+ "kube",
  "serde",
  "serde_json",
+ "thiserror",
+ "tokio",
+ "tower-test",
 ]
 
 [[package]]
@@ -72,6 +80,7 @@ dependencies = [
  "async-trait",
  "globset",
  "http",
+ "http-body-util",
  "k8s-openapi",
  "kube",
  "serde",

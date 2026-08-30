@@ -241,7 +241,13 @@ impl ResourceResolver for KubeResourceResolver {
 /// dependency edge: `admissionlab-installer` is a sibling crate here,
 /// not something this crate otherwise needs, and adding that edge for
 /// four lines is not worth the extra dependency-graph surface.
-async fn client_for(cluster: &ClusterHandle) -> Result<Client, kube::Error> {
+///
+/// `pub(crate)`, not private: [`crate::execute::dry_run_create`] (Task
+/// 3.4) needs the identical client-construction step and reuses this
+/// function rather than a third copy -- unlike the
+/// `admissionlab-installer` case above, this reuse stays inside one
+/// crate, so there is no cross-crate dependency-edge cost to weigh.
+pub(crate) async fn client_for(cluster: &ClusterHandle) -> Result<Client, kube::Error> {
     let kubeconfig = Kubeconfig::read_from(&cluster.kubeconfig)?;
     let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default()).await?;
     Client::try_from(config)

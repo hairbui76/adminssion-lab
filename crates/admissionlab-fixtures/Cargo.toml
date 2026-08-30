@@ -117,6 +117,26 @@ k8s-openapi = { workspace = true }
 # `tokio` split (see that crate's `Cargo.toml` comment for the
 # v2-resolver reasoning this repeats).
 tokio = { workspace = true, features = ["sync"] }
+# `execute.rs` (Task 3.4) reads `Warning` HTTP response headers off the
+# raw `http::Response` `kube::Client::send` returns -- `Api::create`/
+# `Client::request` throw the response (and its headers) away as soon as
+# they have a deserialized body, so this module builds the request and
+# calls `Client::send` directly instead (see that module's own
+# documentation, and `research-kube-api.md` §6). Pinned to the exact
+# version `kube-client` itself already resolves in `Cargo.lock`
+# (1.5.0) -- a promotion of an already-fetched transitive dependency to
+# a direct one, not a new one, mirroring `admissionlab-test-webhook`'s
+# own reasoning for its `hyper`/`bytes` entries in the root `Cargo.toml`.
+# In `[dependencies]`, not only `[dev-dependencies]`: unlike
+# `admissionlab-installer`'s identical-version dev-only entry, this
+# crate's own non-test code needs it now.
+http = "1.5.0"
+# `execute.rs` collects the raw `http::Response<kube::client::Body>`'s
+# body via `BodyExt::collect` (the same call `kube-client`'s own private
+# `handle_api_errors` makes internally, and the same crate the root
+# `Cargo.toml`'s own `admissionlab-test-webhook` entry already resolves
+# at this exact version -- a promotion, not a new dependency).
+http-body-util = { workspace = true }
 
 [dev-dependencies]
 # `src/resources.rs`'s internal `tests` module drives `kube::discovery::Discovery::run`
@@ -129,10 +149,6 @@ tokio = { workspace = true, features = ["sync"] }
 # to the same version for the same reason (no new version added to the
 # resolved graph, only promoted to directly usable here).
 tower-test = "0.4.0"
-# `http::{Request, Response}` -- see `admissionlab-installer`'s
-# `Cargo.toml` comment on this entry; identical reasoning, identical
-# pin.
-http = "1.5.0"
 # `#[tokio::test]` itself, for both `src/resources.rs`'s internal mock
 # tests and `tests/resources.rs`'s external ones.
 tokio = { workspace = true, features = ["rt", "macros"] }

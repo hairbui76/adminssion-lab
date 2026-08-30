@@ -20,12 +20,65 @@ workspace = true
 # close a cycle Cargo would reject outright once `admission -> fixtures
 # -> core` also exists.
 admissionlab-core = { workspace = true }
+# `execute.rs` (Task 3.4): `AdmissionExecutor::execute_create` takes
+# `&admissionlab_fixtures::FixtureSource` and
+# `&admissionlab_fixtures::resources::ResolvedResource`, and
+# `KubeAdmissionExecutor` calls `admissionlab_fixtures::execute::dry_run_create`
+# to perform the actual server-side dry-run CREATE. See the root
+# `Cargo.toml`'s own comment on this entry for the dependency-direction
+# reasoning (controller supplement §2).
+admissionlab-fixtures = { workspace = true }
+# `execute.rs`'s `AdmissionExecutor` trait and `KubeAdmissionExecutor`'s
+# `impl` of it are both `async fn`.
+async-trait = { workspace = true }
 # `WebhookInvocation::patch` (Task 3.3) is `Option<Vec<json_patch::PatchOperation>>`
 # -- see the root `Cargo.toml`'s own comment on this entry for why.
 json-patch = { workspace = true }
+# `execute.rs` (Task 3.4) classifies the `kube::core::Status` object
+# `admissionlab_fixtures::execute::dry_run_create` returns for a
+# non-2xx dry-run CREATE response into this crate's own
+# `AdmissionDecision::Rejected` -- naming `kube::core::Status` directly,
+# not only through `admissionlab-fixtures`'s own re-exports, since that
+# crate does not re-export it (it is `kube-core`'s own canonical
+# Kubernetes error-response type, not something worth wrapping a second
+# time). Already resolved transitively through `admissionlab-fixtures`
+# at this exact version -- a promotion, not a new dependency. Default
+# features (`client`, `rustls-tls`, `ring`) are kept, matching every
+# other crate in this workspace naming `kube` directly: no simpler TLS
+# backend exists to fall back to on this workspace's toolchain.
+kube = { workspace = true }
+# `kube`'s `client` feature needs `k8s-openapi` generated types built
+# somewhere in the same dependency graph, with exactly one `v1_*`
+# feature enabled -- see the root `Cargo.toml`'s own comment on this
+# entry, and `admissionlab-fixtures`/`admissionlab-installer`'s
+# `Cargo.toml`s for the identical reasoning. This crate's own code never
+# names a `k8s-openapi` type directly, but a standalone `cargo build -p
+# admissionlab-admission` needs this entry regardless, for the same
+# "verified empirically, not assumed" reason those two crates' own
+# comments document.
+k8s-openapi = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # `AdmissionOutcome::final_object` and every `WebhookOutcome`/`AdmissionDecision`
 # JSON-text assertion in `tests/model.rs` (Task 3.3) name
 # `serde_json::Value`/`serde_json::to_string` directly, not only through
 # `serde`'s generic (de)serialize traits.
 serde_json = { workspace = true }
+# `execute.rs`'s `FixtureExecutionError` (Task 3.4).
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# `tests/execute_unit.rs` drives `KubeAdmissionExecutor::execute_create`
+# (an `async fn`) against a `tower_test::mock`-backed `kube::Client`, the
+# same technique `admissionlab-installer/src/readiness.rs` and
+# `admissionlab-fixtures/src/resources.rs` already use (see either
+# module's own documentation).
+tokio = { workspace = true, features = ["rt", "macros"] }
+tower-test = "0.4.0"
+# `http::{Request, Response}` -- what `tower_test::mock::pair` and
+# `kube::Client::new` are generic over, and what
+# `tests/execute_unit.rs` asserts the mock-received request's
+# method/path/query against. Already a `[dependencies]` entry above
+# (Task 3.4's own production code needs it too); named again here only
+# because `[dev-dependencies]` does not inherit `[dependencies]`
+# entries automatically -- no new version added to the resolved graph.
+http = "1.5.0"

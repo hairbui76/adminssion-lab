@@ -31,6 +31,19 @@
 //!   supplement §1, Task 3.2: [`discover`] already owns that name for a
 //!   different job -- finding fixture *files* on disk, not Kubernetes
 //!   API *resources*).
+//! - [`execute`] implements Task 3.4's low-level half:
+//!   [`execute::dry_run_create`] actually issues one server-side
+//!   dry-run CREATE for a [`discover::FixtureSource`] against its
+//!   [`resources::ResolvedResource`] and returns the raw HTTP-level
+//!   outcome (the admitted/mutated object, or the `Status` the API
+//!   server rejected it with), plus captured `Warning` headers and
+//!   timing. It does not decide what that outcome *means* for
+//!   admission-lab's own reporting vocabulary (`Accepted` /
+//!   `Rejected` / `UnsupportedDryRun`) -- that classification is
+//!   `admissionlab_admission::execute::AdmissionExecutor`'s job, kept
+//!   out of this crate so this crate never needs to depend on
+//!   `admissionlab-admission` (see this module's own documentation and
+//!   this file's "Dependency direction" section below).
 //!
 //! # Dependency direction (controller supplement §2, Task 3.1)
 //!
@@ -48,11 +61,13 @@
 //! `core -> fixtures` edge.
 
 pub mod discover;
+pub mod execute;
 pub mod hash;
 mod identity;
 pub mod resources;
 
 pub use discover::{FixtureSource, discover_fixtures};
+pub use execute::{DryRunCreateResponse, dry_run_create, dry_run_create_with_client};
 pub use resources::{KubeResourceResolver, ResolvedResource, ResourceResolver};
 
 use std::path::PathBuf;
@@ -245,5 +260,31 @@ pub enum FixtureError {
         api_version: String,
         /// The requested `kind`, verbatim.
         kind: String,
+    },
+    /// [`execute::dry_run_create`] (Task 3.4) could not carry out a
+    /// server-side dry-run CREATE at all: `cluster`'s kubeconfig could
+    /// not be turned into a usable client, the request itself could
+    /// not be built or serialized, the request/response exchange
+    /// failed at the transport level (network, TLS, an apiserver that
+    /// closed the connection), or a *successful* (2xx) response body
+    /// did not decode as JSON at all -- something no real
+    /// kube-apiserver produces, so treated as this same capability
+    /// failure rather than invented as some other observation.
+    ///
+    /// This is never itself an admission decision about the fixture --
+    /// a real HTTP response the API server sent, successful or not, is
+    /// `admissionlab_admission::execute::AdmissionExecutor`'s job to
+    /// classify (`Rejected` for an ordinary denial). This variant means
+    /// the run could not get far enough to observe *any* decision.
+    #[error("could not execute dry-run CREATE for a fixture on cluster {cluster:?}: {reason}")]
+    ReplayUnavailable {
+        /// The cluster's own name ([`admissionlab_core::cluster::ClusterSpec::name`]),
+        /// not its kubeconfig path, for the same reason
+        /// [`FixtureError::ResourceDiscoveryUnavailable`]'s own
+        /// `cluster` field is.
+        cluster: String,
+        /// A human-readable explanation, taken from the underlying
+        /// `kube`/serialization failure's own `Display`.
+        reason: String,
     },
 }
