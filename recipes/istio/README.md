@@ -183,9 +183,16 @@ non-empty and (b) `Deployment/istiod`'s `Available` condition becomes
 | 1     | ~4.16s                       | ~7.43s                      | ~3.3s  |
 | 2     | ~3.77s                       | ~7.14s                      | ~3.4s  |
 
-**Answer: no race exists. `caBundle` is patched in well before
-`Available` goes `True`, by a wide and repeatable margin (~3.3s in both
-trials), never the other way around.** This is consistent with
+**Answer: no race was observed.** In both trials `caBundle` was patched
+in ~3.3s before `Available` went `True`, never the other way around.
+Stated precisely, because the distinction matters: this is two samples
+on one development machine, so it is evidence that the ordering holds
+comfortably here, not proof that it holds on every cluster. A slower or
+heavily loaded node could in principle narrow or invert the margin. No
+counter-evidence was found, and the mechanism below explains why the
+observed ordering is the expected one -- but a caller that must not
+tolerate the inverted case should check `caBundle` directly rather than
+rely on `deploymentAvailable` alone. This is consistent with
 `istiod`'s own architecture: the in-process webhook-cert controller
 completes its first reconcile early in startup, well before the
 container's own HTTP readiness endpoint (which ultimately drives

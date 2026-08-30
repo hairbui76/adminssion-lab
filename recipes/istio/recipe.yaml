@@ -59,12 +59,19 @@ install:
   namespace: istio-system
 readiness:
   # The Deployment that serves the sidecar-injection webhook
-  # (`/inject`, on the `istiod` Service, port 443). Verified on a live
-  # cluster that this becoming Available=True is sufficient, by a wide
-  # and repeatable margin (~3.3s in two independent trials), to also
-  # guarantee the injector webhook's `caBundle` (below) is already
-  # patched in -- see README.md's "Sequencing" section for the full
-  # method, numbers, and why no additional poll is needed here.
+  # (`/inject`, on the `istiod` Service, port 443). Measured on a live
+  # cluster: `caBundle` was already non-empty ~3.3s BEFORE this became
+  # Available=True, in two independent trials on one machine. That is
+  # evidence, not a guarantee -- two samples on one machine cannot
+  # establish an ordering that holds on every cluster, and the schema
+  # has no readiness variant that can assert a field is non-empty (only
+  # object existence, see `webhookConfigurationPresent` below), so this
+  # recipe cannot encode that guard itself. A caller that needs the
+  # stronger property must check `caBundle` itself; the certification
+  # test does exactly that (`wait_for_injector_ca_bundle`). If sidecar
+  # injection ever fails with a fail-closed "connection refused" from
+  # the injector, this ordering is the first thing to re-measure.
+  # See README.md's "Sequencing" section for method and numbers.
   - type: deploymentAvailable
     namespace: istio-system
     name: istiod
