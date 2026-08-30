@@ -26,11 +26,16 @@
 //!
 //! - [`helm`] implements [`ComponentInstaller`] for a Helm chart install
 //!   (Task 2.2; [`admissionlab_spec::component::HelmInstallSpec`]).
+//! - [`manifests`] implements [`ComponentInstaller`] for a raw
+//!   Kubernetes manifest install (Task 2.3;
+//!   [`admissionlab_spec::ManifestInstallSpec`]), and separately exposes
+//!   [`manifests::load_manifest_bundle`] for parsing and hashing a
+//!   component's manifest files with no cluster interaction at all.
 //!
-//! Not yet implemented here: the raw-manifest backend (Task 2.3),
-//! readiness probing (Task 2.4), and stack installation orchestration
-//! (Task 2.6).
+//! Not yet implemented here: readiness probing (Task 2.4) and stack
+//! installation orchestration (Task 2.6).
 
+use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime};
 
@@ -40,8 +45,10 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 pub mod helm;
+pub mod manifests;
 
 pub use helm::HelmInstaller;
+pub use manifests::{ManifestBundle, ManifestsInstaller, load_manifest_bundle};
 
 /// The contract every component install backend implements: given a
 /// running cluster and a fully resolved component, install it and
@@ -98,14 +105,24 @@ pub struct InstallRecord {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Failure modes of [`ComponentInstaller::install`].
+/// Failure modes of [`ComponentInstaller::install`], and also of
+/// [`manifests::load_manifest_bundle`], which is a plain function rather
+/// than a [`ComponentInstaller`] method and so cannot itself name a
+/// failing `component` (there is no [`ResolvedComponent`] in scope at
+/// the point a bundle is loaded independently of an install).
 ///
-/// Every variant names the failing `component`, and (other than
-/// [`InstallError::UnsupportedMethod`]) carries either the underlying
-/// [`ProcessError`] or the failed command's full context, exit status,
-/// and captured output — so a caller always knows both what failed and
-/// at which step: [`ProcessError`] and [`CommandContext`] both render
-/// the full argv that was run in their own `Display` implementations.
+/// Every variant produced *by an install* names the failing `component`,
+/// and (other than [`InstallError::UnsupportedMethod`]) carries either
+/// the underlying [`ProcessError`] or the failed command's full context,
+/// exit status, and captured output — so a caller always knows both what
+/// failed and at which step: [`ProcessError`] and [`CommandContext`]
+/// both render the full argv that was run in their own `Display`
+/// implementations. [`InstallError::ManifestRead`] and
+/// [`InstallError::ManifestParse`] are the exception: both can be
+/// produced directly by [`manifests::load_manifest_bundle`] itself
+/// (with no component in scope to name), as well as by
+/// [`manifests::ManifestsInstaller::install`] calling it internally, so
+/// neither carries a `component` field.
 #[derive(Debug, Error)]
 pub enum InstallError {
     /// `component`'s resolved install method is not one this
@@ -152,6 +169,90 @@ pub enum InstallError {
         /// Everything it wrote to stdout.
         stdout: Vec<u8>,
         /// Everything it wrote to stderr.
+        stderr: Vec<u8>,
+    },
+    /// A manifest file named in a component's
+    /// [`admissionlab_spec::ManifestInstallSpec::paths`] could not be
+    /// read from local disk at all — for example it does not exist, is
+    /// not readable, or (Task 2.3 does not walk directories; see
+    /// [`manifests`]'s module documentation) names a directory rather
+    /// than a file. Always returned before any cluster operation runs
+    /// (Task 2.3 brief Step 2).
+    #[error("failed to read manifest file {}: {source}", .path.display())]
+    ManifestRead {
+        /// The manifest file path that could not be read.
+        path: PathBuf,
+        /// The underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// One document inside a manifest file named in a component's
+    /// [`admissionlab_spec::ManifestInstallSpec::paths`] is not
+    /// syntactically valid YAML or JSON. Always returned before any
+    /// cluster operation runs (Task 2.3 brief Step 2): a malformed
+    /// manifest fails locally, never partway through a `kubectl apply`
+    /// sequence.
+    #[error(
+        "manifest file {} is invalid: document {document_number} is not valid {format}: {reason}",
+        .path.display()
+    )]
+    ManifestParse {
+        /// The manifest file containing the malformed document.
+        path: PathBuf,
+        /// Which document within `path`, counting from 1 in file order.
+        /// A JSON file (which has no multi-document syntax) is always
+        /// document 1; a YAML file's first `---`-separated document is
+        /// document 1, its second is document 2, and so on.
+        document_number: usize,
+        /// Which format `path` was parsed as (`"YAML"` or `"JSON"`),
+        /// chosen from its extension — see [`manifests`]'s module
+        /// documentation.
+        format: &'static str,
+        /// A human-readable explanation from the underlying parser.
+        reason: String,
+    },
+    /// `component`'s manifest install failed because a `kubectl apply
+    /// --server-side=false` invocation for one manifest file would
+    /// exceed Kubernetes's hard-coded 262144-byte `metadata.annotations`
+    /// size limit. Client-side apply stores the whole applied object in
+    /// the `kubectl.kubernetes.io/last-applied-configuration`
+    /// annotation, so this is most commonly hit by a large
+    /// `CustomResourceDefinition`. See [`manifests`]'s module
+    /// documentation for how this is detected and why it is reported as
+    /// its own variant rather than a plain [`InstallError::CommandFailed`].
+    ///
+    /// This never causes an automatic retry with `--server-side=true`:
+    /// Global Constraint 16 requires that Admission Lab never silently
+    /// change apply semantics, so the remedy (install this component a
+    /// different way, or reduce the manifest's size) is left to the
+    /// user, with the original, unmodified `stderr` still attached below
+    /// rather than hidden behind this variant's own plain-language
+    /// explanation.
+    #[error(
+        "installing component {component:?} failed: applying {} via client-side `kubectl apply \
+         --server-side=false` would exceed Kubernetes's 262144-byte metadata.annotations size \
+         limit (most commonly hit by a large CustomResourceDefinition) -- install this \
+         component via Helm instead, or reduce the manifest's size; Admission Lab will not \
+         silently retry with `--server-side=true`",
+        .path.display()
+    )]
+    ManifestExceedsAnnotationLimit {
+        /// The component that could not be installed.
+        component: String,
+        /// The manifest file whose `kubectl apply` invocation hit the
+        /// limit.
+        path: PathBuf,
+        /// A safe-to-log description of the failed `kubectl apply`
+        /// invocation.
+        context: Box<CommandContext>,
+        /// Its exit status.
+        status: ExitStatus,
+        /// Everything it wrote to stdout.
+        stdout: Vec<u8>,
+        /// Everything it wrote to stderr, including Kubernetes's own raw
+        /// "Too long" validation message — preserved here rather than
+        /// discarded even though this variant's own message already
+        /// explains the cause in plain language.
         stderr: Vec<u8>,
     },
 }

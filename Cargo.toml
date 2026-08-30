@@ -24,6 +24,15 @@ predicates = "3.1.4"
 schemars = "1.2.2"
 serde = "1.0.229"
 serde_json = "1.0.151"
+# `admissionlab-installer`'s raw-manifest backend (Task 2.3) hashes each
+# manifest file's canonical source bytes into `ManifestBundle::source_hash`
+# (SHA-256, lowercase hex) for run-manifest provenance (PRODUCT.md §28) --
+# the same convention Task 3.1 uses for fixtures. Pinned to the 0.10 line
+# (not the newer 0.11) because its dependency chain resolves to
+# `generic-array 0.14`, which implements `LowerHex` for a digest's output
+# directly, so `format!("{:x}", hasher.finalize())` needs no extra hex-
+# encoding crate.
+sha2 = "0.10.9"
 # `serde_yaml` is deprecated (its only remaining release is
 # 0.9.34+deprecated, archived upstream). `serde_norway` is a maintained
 # fork that continues the same 0.9 version lineage and API, so it is a

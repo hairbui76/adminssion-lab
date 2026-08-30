@@ -35,8 +35,28 @@ async-trait = { workspace = true }
 # parses `kubectl version --output=json`: as a `serde_json::Value`, so a
 # well-formed-but-differently-shaped response degrades to a diagnostic
 # instead of a mis-extracted value. No `serde` derive needed for this --
-# reading one field out of a `Value` is enough.
+# reading one field out of a `Value` is enough. `manifests.rs` (Task 2.3)
+# also uses this to represent every parsed manifest document
+# (`ManifestBundle::documents`) and to parse a `.json` manifest file
+# directly.
 serde_json = { workspace = true }
+# `manifests.rs` (Task 2.3) parses a `.yaml`/`.yml` manifest file as a
+# (possibly multi-document) YAML stream via `serde_norway::Deserializer`,
+# then converts each document into a `serde_json::Value` -- see that
+# module's documentation. No derive feature needed: nothing here derives
+# `Serialize`/`Deserialize` for one of this crate's own types.
+serde_norway = { workspace = true }
+# The base `serde` crate itself, not only `serde_json`/`serde_norway`:
+# `manifests.rs` calls `serde_json::Value`'s existing `Deserialize` impl
+# generically against a `serde_norway::Deserializer` document, which
+# requires naming the `Deserialize` trait directly -- neither
+# `serde_json` nor `serde_norway` re-exports it. No derive feature
+# needed for the same reason `serde_json` above needs none.
+serde = { workspace = true }
+# Computes `ManifestBundle::source_hash` (Task 2.3): SHA-256 of every
+# manifest file's canonical source bytes. See the root `Cargo.toml`
+# comment on this dependency for the version-pin reasoning.
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
