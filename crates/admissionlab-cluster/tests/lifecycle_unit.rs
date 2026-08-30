@@ -117,12 +117,14 @@ fn exit_status(code: i32) -> ExitStatus {
 }
 
 /// Scans `args` for `--kubeconfig` and returns the path that follows it.
+/// Used for both `create` and `delete` argv -- both now always carry
+/// this flag.
 fn kubeconfig_arg(args: &[OsString]) -> PathBuf {
     args.iter()
         .position(|arg| arg == "--kubeconfig")
         .and_then(|index| args.get(index + 1))
         .map(PathBuf::from)
-        .expect("test fake: a `kind create cluster` invocation must carry --kubeconfig")
+        .expect("test fake: this kind invocation must carry --kubeconfig")
 }
 
 /// One scripted response [`FakeProcessRunner`] gives for a `kind`
@@ -286,7 +288,7 @@ fn create_invokes_kind_with_generated_config_and_explicit_kubeconfig_path() {
 }
 
 #[test]
-fn delete_invokes_kind_with_exact_cluster_name() {
+fn delete_invokes_kind_with_exact_cluster_name_and_its_own_kubeconfig() {
     let runner = Arc::new(FakeProcessRunner::new().with("delete", FakeOutcome::Success(b"")));
     let manager = KindClusterManager::new(runner.clone());
     let handle = ClusterHandle {
@@ -307,7 +309,10 @@ fn delete_invokes_kind_with_exact_cluster_name() {
             OsString::from("cluster"),
             OsString::from("--name"),
             OsString::from("adlab-baseline-deleteargv01"),
-        ]
+            OsString::from("--kubeconfig"),
+            OsString::from("/tmp/wherever.kubeconfig"),
+        ],
+        "delete must pass --kubeconfig with this cluster's own path -- never the user's          ~/.kube/config -- so two concurrent deletes never race on          ~/.kube/config.lock (see kind.rs's delete_argv documentation)"
     );
     // Same regression guard as the create-argv test above: `delete`
     // must not layer anything onto the child's inherited environment
@@ -483,6 +488,7 @@ fn create_rolls_back_when_kubeconfig_export_fails_after_kind_reports_success() {
         "expected exactly one create attempt and one rollback delete"
     );
     assert_eq!(calls[0].args[0], OsString::from("create"));
+    let expected_kubeconfig = paths.kubeconfigs().join("baseline.kubeconfig");
     assert_eq!(
         calls[1].args,
         vec![
@@ -490,8 +496,10 @@ fn create_rolls_back_when_kubeconfig_export_fails_after_kind_reports_success() {
             OsString::from("cluster"),
             OsString::from("--name"),
             OsString::from(spec.name.clone()),
+            OsString::from("--kubeconfig"),
+            expected_kubeconfig.into_os_string(),
         ],
-        "rollback must delete by the exact same cluster name"
+        "rollback must delete by the exact same cluster name and this cluster's own          kubeconfig path -- never the user's ~/.kube/config"
     );
 }
 
@@ -641,6 +649,68 @@ fn baseline_and_candidate_use_independent_kubeconfig_and_audit_paths() {
     let baseline_kubeconfig_arg = kubeconfig_arg(&calls[0].args);
     let candidate_kubeconfig_arg = kubeconfig_arg(&calls[1].args);
     assert_ne!(baseline_kubeconfig_arg, candidate_kubeconfig_arg);
+}
+
+#[test]
+fn concurrent_deletes_each_carry_their_own_kubeconfig_path() {
+    // Regression test for a real defect this exact concurrency pattern
+    // surfaced: without `--kubeconfig`, `kind delete cluster` falls back
+    // to locking and rewriting the user's own `~/.kube/config`, so two
+    // concurrent deletes -- exactly what
+    // `admissionlab_core::run::LabRunner::cleanup` does for baseline and
+    // candidate -- race on `~/.kube/config.lock`, and the loser reports
+    // a spurious failure for a delete that actually succeeded (see
+    // `kind.rs`'s `delete_argv` documentation for the reproduction).
+    // Passing each delete its own cluster's isolated kubeconfig path
+    // removes the shared file there is to race on in the first place;
+    // this test proves both concurrent calls each carry their own,
+    // distinct path.
+    let runner = Arc::new(FakeProcessRunner::new().with("delete", FakeOutcome::Success(b"")));
+    let manager = KindClusterManager::new(runner.clone());
+    let baseline_spec = baseline_spec("adlab-baseline-concurrentdel1");
+    let candidate_spec = ClusterSpec {
+        side: Side::Candidate,
+        name: "adlab-candidate-concurrentdel1".to_owned(),
+        ..baseline_spec.clone()
+    };
+    let baseline = ClusterHandle {
+        spec: baseline_spec,
+        kubeconfig: PathBuf::from("/tmp/adlab-concurrent-del/baseline.kubeconfig"),
+        audit_log: PathBuf::from("/tmp/adlab-concurrent-del/baseline-audit.log"),
+    };
+    let candidate = ClusterHandle {
+        spec: candidate_spec,
+        kubeconfig: PathBuf::from("/tmp/adlab-concurrent-del/candidate.kubeconfig"),
+        audit_log: PathBuf::from("/tmp/adlab-concurrent-del/candidate-audit.log"),
+    };
+
+    let (baseline_result, candidate_result) =
+        block_on(async { tokio::join!(manager.delete(&baseline), manager.delete(&candidate)) });
+
+    baseline_result.expect("baseline delete should succeed");
+    candidate_result.expect("candidate delete should succeed");
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 2, "expected exactly one delete call per side");
+
+    let kubeconfig_args: Vec<PathBuf> = calls
+        .iter()
+        .map(|call| kubeconfig_arg(&call.args))
+        .collect();
+    assert!(
+        kubeconfig_args.contains(&baseline.kubeconfig),
+        "expected baseline's delete to carry --kubeconfig {:?}, got {kubeconfig_args:?}",
+        baseline.kubeconfig
+    );
+    assert!(
+        kubeconfig_args.contains(&candidate.kubeconfig),
+        "expected candidate's delete to carry --kubeconfig {:?}, got {kubeconfig_args:?}",
+        candidate.kubeconfig
+    );
+    assert_ne!(
+        kubeconfig_args[0], kubeconfig_args[1],
+        "concurrent deletes must never share a kubeconfig path -- a shared path (or the          user's own ~/.kube/config, if the flag were omitted entirely) is exactly the kind          of shared file two concurrent `kind delete cluster` invocations would lock and race          on for real"
+    );
 }
 
 // ---------------------------------------------------------------------

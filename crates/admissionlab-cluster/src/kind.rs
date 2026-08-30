@@ -232,21 +232,58 @@ pub(crate) fn create_argv(name: &str, config_path: &Path, kubeconfig_path: &Path
 }
 
 /// Builds the exact argv (excluding the program name) for
-/// `kind delete cluster`: the cluster name only (Task 1.7 brief Step 1).
-/// `kind` identifies a cluster by name alone; no kubeconfig path is
-/// needed to delete one.
-pub(crate) fn delete_argv(name: &str) -> Vec<OsString> {
+/// `kind delete cluster`: an explicit `--name` and an explicit
+/// `--kubeconfig` path.
+///
+/// The `--kubeconfig` flag here is not optional, despite `kind`
+/// identifying a cluster by name alone: without it, `kind delete
+/// cluster` falls back to reading *and writing* `$KUBECONFIG` or
+/// `~/.kube/config` (to remove the deleted cluster's context/entries),
+/// taking a flock-style lock at `~/.kube/config.lock` to do so. Two
+/// concurrent `kind delete cluster` invocations racing on that lock
+/// (exactly what `admissionlab_core::run::LabRunner::cleanup` does,
+/// deleting baseline and candidate concurrently) means the loser exits
+/// non-zero — a spurious failure report for a delete that actually
+/// succeeded (the node is gone either way; only the *lock acquisition
+/// for the user's own file* failed), reproduced directly against real
+/// `kind`/Docker on 2026-08-30:
+///
+/// ```text
+/// failed to update kubeconfig: failed to lock config file:
+///   open /home/hairbui76/.kube/config.lock: file exists
+/// Deleted nodes: ["adlab-t2-control-plane"]
+/// ERROR: failed to delete cluster "adlab-t2": failed to lock config file: ...
+/// ```
+///
+/// Passing each delete its own cluster's isolated kubeconfig path (the
+/// same path `create_argv`'s own `--kubeconfig` pointed `kind create
+/// cluster` at, via [`admissionlab_core::ClusterHandle::kubeconfig`])
+/// eliminates the race at its root: `kind` never reaches for
+/// `~/.kube/config` at all, so there is no shared lock file for two
+/// concurrent deletes to contend on. This is also, independently, what
+/// PRODUCT.md §29.2 already requires of `create`: `kind` must never
+/// touch the user's own kubeconfig.
+pub(crate) fn delete_argv(name: &str, kubeconfig_path: &Path) -> Vec<OsString> {
     vec![
         "delete".into(),
         "cluster".into(),
         "--name".into(),
         name.into(),
+        "--kubeconfig".into(),
+        path_to_os_string(kubeconfig_path),
     ]
 }
 
 /// Builds the exact argv (excluding the program name) for
 /// `kind get clusters`, used by `diagnostics` to check whether a cluster
 /// by this name still exists.
+///
+/// Deliberately has no `--kubeconfig` flag, unlike [`create_argv`] and
+/// [`delete_argv`]: `kind get clusters --help` confirms the `clusters`
+/// subcommand accepts no such flag at all (only `-h`/`-q`/`-v`) — it
+/// lists clusters by inspecting Docker container state directly, never
+/// reading or writing any kubeconfig, so there is no race here to fix
+/// and no flag to give it that it would not simply reject.
 pub(crate) fn get_clusters_argv() -> Vec<OsString> {
     vec!["get".into(), "clusters".into()]
 }

@@ -48,9 +48,10 @@
 //! failure other than the command never having started at all (a
 //! [`ProcessError::Spawn`] — in practice, the `kind` binary itself is
 //! missing) is treated as "a node might now exist," and triggers a
-//! best-effort `kind delete cluster --name <name>` before the original
-//! error is returned (Task 1.7 brief Step 4; PRODUCT.md §33 "no leaked
-//! cluster after normal failure paths"). This is deliberately broader
+//! best-effort `kind delete cluster --name <name> --kubeconfig <path>`
+//! (see `kind.rs`'s `delete_argv` for why `--kubeconfig` is not
+//! optional) before the original error is returned (Task 1.7 brief Step
+//! 4; PRODUCT.md §33 "no leaked cluster after normal failure paths"). This is deliberately broader
 //! than just the two failure modes the brief names by name (kubeconfig
 //! export, health check): a timeout kills `kind` out from under itself
 //! before its own documented default cleanup-on-failure behavior ever
@@ -163,13 +164,22 @@ impl KindClusterManager {
     }
 
     /// Runs `kind delete cluster` for `name`, using `kind.rs`'s
-    /// `delete_argv`. Shared by the public [`ClusterManager::delete`]
-    /// and by [`KindClusterManager::rollback`], so both use exactly the
-    /// same argv and timeout.
-    async fn run_delete(&self, name: &str) -> Result<(), ClusterError> {
+    /// `delete_argv` -- always with `kubeconfig_path`, this cluster's
+    /// own isolated kubeconfig, never the user's. Shared by the public
+    /// [`ClusterManager::delete`] and by [`KindClusterManager::rollback`],
+    /// so both use exactly the same argv and timeout. See `kind.rs`'s
+    /// `delete_argv` documentation for why `kubeconfig_path` is not
+    /// optional: without it, two concurrent deletes (exactly what
+    /// `LabRunner::cleanup` does) race on `~/.kube/config.lock` and one
+    /// spuriously reports failure for a delete that actually succeeded.
+    async fn run_delete(
+        &self,
+        name: &str,
+        kubeconfig_path: &std::path::Path,
+    ) -> Result<(), ClusterError> {
         let spec = CommandSpec {
             program: kind::KIND_PROGRAM.into(),
-            args: kind::delete_argv(name),
+            args: kind::delete_argv(name, kubeconfig_path),
             cwd: None,
             env: BTreeMap::new(),
             sensitive_env_keys: BTreeSet::new(),
@@ -200,9 +210,16 @@ impl KindClusterManager {
     /// `source` (a failure that occurred at or after invoking
     /// `kind create cluster`), and wraps whatever happened together with
     /// `source` so the original failure is never lost. See the module
-    /// documentation's "Rollback" section.
-    async fn rollback(&self, name: &str, source: ClusterError) -> ClusterError {
-        let rollback = match self.run_delete(name).await {
+    /// documentation's "Rollback" section. `kubeconfig_path` is this
+    /// cluster's own isolated kubeconfig -- the same path `create_argv`
+    /// was given -- never the user's; see `run_delete`.
+    async fn rollback(
+        &self,
+        name: &str,
+        kubeconfig_path: &std::path::Path,
+        source: ClusterError,
+    ) -> ClusterError {
+        let rollback = match self.run_delete(name, kubeconfig_path).await {
             Ok(()) => RollbackOutcome::Deleted,
             Err(delete_error) => RollbackOutcome::Failed(Box::new(delete_error)),
         };
@@ -336,12 +353,17 @@ impl ClusterManager for KindClusterManager {
         {
             return Err(match error {
                 ClusterError::Process(ProcessError::Spawn { .. }) => error,
-                other => self.rollback(&spec.name, other).await,
+                other => {
+                    self.rollback(&spec.name, &layout.kubeconfig_path, other)
+                        .await
+                }
             });
         }
 
         if let Err(error) = kubeconfig::secure_kubeconfig(&store, &layout.kubeconfig_path).await {
-            return Err(self.rollback(&spec.name, error).await);
+            return Err(self
+                .rollback(&spec.name, &layout.kubeconfig_path, error)
+                .await);
         }
 
         Ok(ClusterHandle {
@@ -352,7 +374,7 @@ impl ClusterManager for KindClusterManager {
     }
 
     async fn delete(&self, handle: &ClusterHandle) -> Result<(), ClusterError> {
-        self.run_delete(&handle.spec.name).await
+        self.run_delete(&handle.spec.name, &handle.kubeconfig).await
     }
 
     async fn diagnostics(&self, handle: &ClusterHandle) -> ClusterDiagnostics {
