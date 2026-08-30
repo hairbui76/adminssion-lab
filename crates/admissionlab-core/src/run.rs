@@ -642,13 +642,40 @@ impl std::error::Error for StackInstallError {}
 
 /// Which side(s) failed to install its stack, and why. See
 /// [`LabRunner::install_stacks`].
+///
+/// Unlike [`ClusterCreationFailure`] (its analogue for
+/// [`LabRunner::prepare_clusters`]), the single-side variants here carry
+/// the *successful* side's [`SideInstall`] alongside the failure, rather
+/// than discarding it. The two situations differ in what's actually
+/// lost: when only one cluster comes up, `prepare_clusters` immediately
+/// deletes that orphaned cluster (see this module's documentation), so
+/// there is nothing left to report about it. Here, the successful side's
+/// cluster and fully-installed stack keep running — `install_stacks`
+/// does not roll anything back, and both are still there for
+/// [`LabRunner::cleanup`] to tear down later — so discarding its
+/// [`SideInstall`] would throw away real, current information for no
+/// benefit. PRODUCT.md §33 wants enough on first failure that a user
+/// need not rerun to learn what happened: "the candidate stack installed
+/// fine, baseline failed at component 2" is materially more diagnosable
+/// than the failure half alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StackInstallFailure {
-    /// Only the baseline side failed; candidate installed successfully.
-    Baseline(StackInstallError),
-    /// Only the candidate side failed; baseline installed successfully.
-    Candidate(StackInstallError),
-    /// Both sides failed.
+    /// Only the baseline side failed.
+    Baseline {
+        /// The baseline side's failure.
+        error: StackInstallError,
+        /// What the candidate side — which succeeded — reported.
+        candidate: SideInstall,
+    },
+    /// Only the candidate side failed.
+    Candidate {
+        /// What the baseline side — which succeeded — reported.
+        baseline: SideInstall,
+        /// The candidate side's failure.
+        error: StackInstallError,
+    },
+    /// Both sides failed — neither has a successful [`SideInstall`] to
+    /// carry.
     Both {
         /// The baseline side's failure.
         baseline: StackInstallError,
@@ -660,8 +687,10 @@ pub enum StackInstallFailure {
 impl fmt::Display for StackInstallFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Baseline(error) => write!(f, "baseline stack failed to install: {error}"),
-            Self::Candidate(error) => write!(f, "candidate stack failed to install: {error}"),
+            Self::Baseline { error, .. } => write!(f, "baseline stack failed to install: {error}"),
+            Self::Candidate { error, .. } => {
+                write!(f, "candidate stack failed to install: {error}")
+            }
             Self::Both {
                 baseline,
                 candidate,
@@ -672,6 +701,8 @@ impl fmt::Display for StackInstallFailure {
         }
     }
 }
+
+impl std::error::Error for StackInstallFailure {}
 
 impl<C: ClusterManager> LabRunner<C> {
     /// Installs both sides' component stacks onto `prepared`'s
@@ -699,7 +730,8 @@ impl<C: ClusterManager> LabRunner<C> {
     /// # Errors
     ///
     /// Returns [`StackInstallFailure`] if either side's stack failed to
-    /// install.
+    /// install — carrying the other side's [`SideInstall`] too when only
+    /// one side failed (see that type's own documentation for why).
     pub async fn install_stacks(
         &self,
         lab: &ResolvedLab,
@@ -725,8 +757,8 @@ impl<C: ClusterManager> LabRunner<C> {
                 baseline,
                 candidate,
             }),
-            (Err(error), Ok(_)) => Err(StackInstallFailure::Baseline(error)),
-            (Ok(_), Err(error)) => Err(StackInstallFailure::Candidate(error)),
+            (Err(error), Ok(candidate)) => Err(StackInstallFailure::Baseline { error, candidate }),
+            (Ok(baseline), Err(error)) => Err(StackInstallFailure::Candidate { baseline, error }),
             (Err(baseline), Err(candidate)) => Err(StackInstallFailure::Both {
                 baseline,
                 candidate,

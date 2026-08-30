@@ -46,8 +46,8 @@
 //!
 //! # Installer dispatch: one composite, not a generic parameter
 //!
-//! [`install_stack`]'s signature (fixed by Task 2.6's own interface
-//! registry) takes exactly one `installer: &dyn ComponentInstaller`, but
+//! [`install_stack`]'s signature (fixed by `task-2.6-brief.md`'s own
+//! Interfaces section) takes exactly one `installer: &dyn ComponentInstaller`, but
 //! there are two concrete installers
 //! ([`helm::HelmInstaller`][crate::helm::HelmInstaller],
 //! [`manifests::ManifestsInstaller`][crate::manifests::ManifestsInstaller])
@@ -62,10 +62,10 @@
 //! choice" discipline `admissionlab-cli`'s own `RunError` dispatch
 //! already uses).
 //!
-//! This was chosen over the alternative the brief itself raises
-//! ("or something else") — making [`install_stack`] generic over two
-//! installers, or accepting a `HashMap`/`Vec` of installers keyed by
-//! method — for three reasons:
+//! This was chosen over the alternative this task's own instructions
+//! explicitly left open ("or something else") — making [`install_stack`]
+//! generic over two installers, or accepting a `HashMap`/`Vec` of
+//! installers keyed by method — for three reasons:
 //!
 //! 1. **[`install_stack`]'s signature is fixed.** It already takes a
 //!    single `&dyn ComponentInstaller` trait object, not a generic type

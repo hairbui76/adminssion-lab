@@ -36,7 +36,9 @@ use admissionlab_core::{
     RunPaths, Side, SideInstall, StackInstallError, StackInstallFailure, StackInstaller,
     preserved_cluster_report,
 };
-use admissionlab_spec::{ResolvedComponent, ResolvedLab, load_lab, resolve_lab};
+use admissionlab_spec::{
+    InstallMethod, ManifestInstallSpec, ResolvedComponent, ResolvedLab, load_lab, resolve_lab,
+};
 use async_trait::async_trait;
 
 // ---------------------------------------------------------------------
@@ -75,6 +77,24 @@ fn minimal_resolved_lab() -> ResolvedLab {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../testdata/configs/minimal-valid.yaml");
     let loaded = load_lab(&path).expect("minimal-valid.yaml must load");
     resolve_lab(loaded).expect("minimal-valid.yaml must resolve")
+}
+
+/// A minimal, arbitrary [`ResolvedComponent`] named `name`. The install
+/// method's own content never matters to [`FakeStackInstaller`] — only
+/// the name does — so this always uses `Manifests` with a placeholder
+/// path, mirroring `admissionlab-installer`'s own `tests/stack.rs`
+/// fixture of the same shape.
+fn fake_component(name: &str) -> ResolvedComponent {
+    ResolvedComponent {
+        name: name.to_owned(),
+        version: "1.0.0".to_owned(),
+        install: InstallMethod::Manifests(ManifestInstallSpec {
+            paths: vec![PathBuf::from(format!("/fake/{name}.yaml"))],
+        }),
+        readiness: Vec::new(),
+        recipe_normalize_rules: Vec::new(),
+        capabilities: std::collections::BTreeSet::new(),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -953,12 +973,17 @@ fn install_stacks_installs_each_sides_own_components_concurrently_and_reports_bo
 }
 
 #[test]
-fn install_stacks_reports_a_baseline_only_failure() {
+fn install_stacks_reports_a_baseline_only_failure_and_carries_the_successful_candidate_record() {
     let (runner, options, root) = runner_with(
         "install-baseline-fails",
         FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
     );
-    let lab = minimal_resolved_lab();
+    // Candidate gets real, distinctive components -- not the checked-in
+    // minimal fixture's empty list -- so a bug that fabricates an empty
+    // `SideInstall` instead of actually carrying the successful side's
+    // real one would be caught, not accidentally matched.
+    let mut lab = minimal_resolved_lab();
+    lab.candidate.components = vec![fake_component("c1"), fake_component("c2")];
     let runtime = test_runtime();
     let prepared = runtime
         .block_on(runner.prepare_clusters(&lab, &options))
@@ -973,8 +998,19 @@ fn install_stacks_reports_a_baseline_only_failure() {
     ));
 
     match result {
-        Err(StackInstallFailure::Baseline(error)) => {
+        Err(StackInstallFailure::Baseline { error, candidate }) => {
             assert_eq!(error.component.as_deref(), Some("fake-baseline-component"));
+            assert_eq!(candidate.side, Side::Candidate);
+            assert_eq!(
+                candidate
+                    .components
+                    .iter()
+                    .map(|component| component.name.clone())
+                    .collect::<Vec<_>>(),
+                vec!["c1".to_owned(), "c2".to_owned()],
+                "the candidate side's own successful SideInstall must be carried through, not \
+                 discarded or fabricated as empty"
+            );
         }
         other => panic!("expected Err(StackInstallFailure::Baseline), got {other:?}"),
     }
@@ -988,12 +1024,13 @@ fn install_stacks_reports_a_baseline_only_failure() {
 }
 
 #[test]
-fn install_stacks_reports_a_candidate_only_failure() {
+fn install_stacks_reports_a_candidate_only_failure_and_carries_the_successful_baseline_record() {
     let (runner, options, root) = runner_with(
         "install-candidate-fails",
         FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
     );
-    let lab = minimal_resolved_lab();
+    let mut lab = minimal_resolved_lab();
+    lab.baseline.components = vec![fake_component("b1")];
     let runtime = test_runtime();
     let prepared = runtime
         .block_on(runner.prepare_clusters(&lab, &options))
@@ -1008,8 +1045,19 @@ fn install_stacks_reports_a_candidate_only_failure() {
     ));
 
     match result {
-        Err(StackInstallFailure::Candidate(error)) => {
+        Err(StackInstallFailure::Candidate { baseline, error }) => {
             assert_eq!(error.component.as_deref(), Some("fake-candidate-component"));
+            assert_eq!(baseline.side, Side::Baseline);
+            assert_eq!(
+                baseline
+                    .components
+                    .iter()
+                    .map(|component| component.name.clone())
+                    .collect::<Vec<_>>(),
+                vec!["b1".to_owned()],
+                "the baseline side's own successful SideInstall must be carried through, not \
+                 discarded"
+            );
         }
         other => panic!("expected Err(StackInstallFailure::Candidate), got {other:?}"),
     }

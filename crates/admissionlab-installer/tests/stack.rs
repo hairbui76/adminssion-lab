@@ -24,7 +24,7 @@
 //! property Task 2.6's Kyverno constraint (a component's webhooks may
 //! not exist until well after its `helm install` returns) depends on.
 //!
-//! Covers Task 2.6 brief:
+//! Covers Task 2.6's requirements:
 //! - Step 1 (component order preserved exactly) —
 //!   `install_stack_preserves_component_order_even_against_a_sort_defeating_order`.
 //! - Step 2 (stop on first failure, diagnosable) —
@@ -38,7 +38,10 @@
 //!   `install_stack_awaits_a_components_readiness_before_installing_the_next_component`.
 //! - `component_timeout`: one shared deadline per component, covering
 //!   install-plus-readiness together, not reset per check —
-//!   `install_stack_shares_one_deadline_across_a_components_multiple_readiness_checks`.
+//!   `install_stack_shares_one_deadline_across_a_components_multiple_readiness_checks`
+//!   — and computed *before* `install` is called, not fresh once it
+//!   returns —
+//!   `install_stack_computes_the_deadline_before_install_not_after_it_returns`.
 //! - Installer dispatch (`lib.rs`/`helm.rs`/`manifests.rs`: two concrete
 //!   installers, `InstallMethod` has two variants) —
 //!   `composite_installer_dispatches_helm_and_manifests_components_to_their_own_installer`.
@@ -534,6 +537,39 @@ async fn install_stack_shares_one_deadline_across_a_components_multiple_readines
         remaining_for_b < Duration::from_millis(250),
         "check-b must see a deadline that already reflects check-a's ~250ms sleep, not a fresh \
          400ms window; got {remaining_for_b:?} remaining"
+    );
+}
+
+#[tokio::test]
+async fn install_stack_computes_the_deadline_before_install_not_after_it_returns() {
+    // The other half of the "one shared deadline" property: not only
+    // must it stay fixed across a component's own checks (proved above),
+    // it must be *computed* before `install` is even called, not fresh
+    // once `install` returns. A slow install eating most of a tight
+    // budget must leave correspondingly little for the readiness check
+    // that follows it -- if the deadline were instead computed only
+    // after `install` returned, this component's check would see nearly
+    // the whole, untouched `component_timeout` remaining regardless of
+    // how long `install` took.
+    let components = vec![component_named("c1", vec![check_named("c1-check")])];
+    let cluster = cluster_handle(Side::Baseline);
+    let component_timeout = Duration::from_millis(150);
+    let fake = Fake::new().delayed_install("c1", Duration::from_millis(120));
+
+    install_stack(&cluster, &components, &fake, &fake, component_timeout)
+        .await
+        .expect(
+            "install succeeds (within its own installer-internal bound) and the readiness \
+                 check is satisfied on its first attempt",
+        );
+
+    let remaining = fake.remaining_at_call("c1-check");
+    assert!(
+        remaining < Duration::from_millis(70),
+        "c1's 120ms install against a 150ms component_timeout must leave well under the full \
+         150ms remaining for its readiness check (expected roughly 30ms) -- a deadline computed \
+         only after install() returned would instead show close to the full 150ms here; got \
+         {remaining:?} remaining"
     );
 }
 
