@@ -7,3 +7,46 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `helm.rs`'s `HelmInstaller` (Task 2.2) is a `ProcessRunner`-driven
+# `ComponentInstaller` that shells out to `helm`, mirroring
+# `admissionlab-cluster`'s `KindClusterManager` shelling out to `kind`.
+# `ClusterHandle` (the only cluster-side type an installer needs -- its
+# kubeconfig) is re-exported from here, not from `admissionlab-cluster`;
+# see `admissionlab-core`'s `cluster` module documentation for why the
+# trait and its data types live here rather than in a downstream cluster
+# crate. This crate does NOT depend on `admissionlab-cluster` at all --
+# see this crate's own `lib.rs` module documentation.
+admissionlab-core = { workspace = true }
+# `ResolvedComponent` / `InstallMethod` / `component::HelmInstallSpec`
+# (Controller Ruling R30: `admissionlab-spec` owns the resolved install
+# vocabulary, this crate owns the behavior that acts on it).
+# `admissionlab-spec` depends on none of this workspace's other crates,
+# so this is a safe, one-way edge -- the same shape `admissionlab-core`'s
+# own dependency on `admissionlab-spec` already has.
+admissionlab-spec = { workspace = true }
+# Required on `impl ComponentInstaller for HelmInstaller` itself, not
+# only on the trait definition: `async_trait`'s desugaring must match on
+# both sides for the impl to typecheck.
+async-trait = { workspace = true }
+# Parses `helm get metadata -o json`'s structured output (Task 2.2 brief
+# Step 3) the same way `admissionlab_core::tool::parse_kubectl_version`
+# parses `kubectl version --output=json`: as a `serde_json::Value`, so a
+# well-formed-but-differently-shaped response degrades to a diagnostic
+# instead of a mis-extracted value. No `serde` derive needed for this --
+# reading one field out of a `Value` is enough.
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# `tests/helm_unit.rs` drives `ComponentInstaller::install` (an `async
+# fn`) against a fake `ProcessRunner`, so it needs to execute that
+# future. `macros` is for `#[tokio::test]`; `rt` is the runtime it runs
+# on. Nothing in this crate's own production code spawns a task, sets a
+# timer, or touches the filesystem -- and the fake `ProcessRunner` used
+# in tests never spawns a real process either -- so neither feature is
+# needed outside `[dev-dependencies]`, unlike `admissionlab-core`'s own
+# `tokio` entry (see that crate's `Cargo.toml` comment for the
+# v2-resolver reasoning this mirrors).
+tokio = { workspace = true, features = ["rt", "macros"] }

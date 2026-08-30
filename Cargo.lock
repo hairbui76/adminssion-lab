@@ -68,6 +68,14 @@ version = "0.1.0"
 [[package]]
 name = "admissionlab-installer"
 version = "0.1.0"
+dependencies = [
+ "admissionlab-core",
+ "admissionlab-spec",
+ "async-trait",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
 
 [[package]]
 name = "admissionlab-normalize"
