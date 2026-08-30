@@ -22,7 +22,9 @@ pub use process::{
     env_key_looks_sensitive,
 };
 pub use run::{
-    ClusterCreationFailure, LabRunner, PreparedLab, RunError, RunOptions, preserved_cluster_report,
+    ClusterCreationFailure, InstalledComponent, InstalledLab, LabRunner, PreparedLab, RunError,
+    RunOptions, SideInstall, StackInstallError, StackInstallFailure, StackInstaller,
+    preserved_cluster_report,
 };
 pub use side::Side;
 pub use tool::{

@@ -37,10 +37,13 @@
 //!   Kubernetes API with a capped exponential backoff and an absolute
 //!   deadline.
 //!
-//! Not yet implemented here: stack installation orchestration (Task
-//! 2.6), which drives [`ComponentInstaller::install`] and
-//! [`readiness::ReadinessProbe::wait`] together over a component's own
-//! readiness checks.
+//! - [`stack`] implements stack installation orchestration (Task 2.6):
+//!   [`stack::install_stack`] drives [`ComponentInstaller::install`] and
+//!   [`readiness::ReadinessProbe::wait`] together, in order, over a
+//!   whole side's resolved components, and [`stack::CompositeInstaller`]
+//!   is the one [`ComponentInstaller`] that dispatches a component to
+//!   whichever of [`helm::HelmInstaller`]/[`manifests::ManifestsInstaller`]
+//!   actually matches its resolved [`admissionlab_spec::InstallMethod`].
 
 use std::path::PathBuf;
 use std::process::ExitStatus;
@@ -54,10 +57,12 @@ use thiserror::Error;
 pub mod helm;
 pub mod manifests;
 pub mod readiness;
+pub mod stack;
 
 pub use helm::HelmInstaller;
 pub use manifests::{ManifestBundle, ManifestsInstaller, load_manifest_bundle};
 pub use readiness::{KubeReadinessProbe, ReadinessEvidence, ReadinessProbe};
+pub use stack::{CompositeInstaller, InstalledStack, install_stack};
 
 /// The contract every component install backend implements: given a
 /// running cluster and a fully resolved component, install it and
@@ -292,5 +297,53 @@ pub enum InstallError {
         /// the underlying `kube`/kubeconfig-parsing failure's own
         /// `Display`.
         reason: String,
+    },
+    /// [`stack::install_stack`] (Task 2.6) could not confirm
+    /// `component`'s readiness: [`readiness::ReadinessProbe::wait`]
+    /// itself returned an error for one of `component`'s checks.
+    /// `ReadinessProbe::wait`'s own signature has no `component`
+    /// parameter (it is handed one check at a time, with no notion of
+    /// which component that check belongs to — see
+    /// [`InstallError::ReadinessUnavailable`], its most common cause),
+    /// so this variant exists purely to attach the `component` name
+    /// Task 2.6 brief Step 2's diagnosability requirement (PRODUCT.md
+    /// §33: enough on first failure that a user need not rerun to learn
+    /// which stage failed) needs, one layer above where the underlying
+    /// error was actually produced. `source` is that error, unmodified.
+    #[error("component {component:?} readiness could not be confirmed: {source}")]
+    ComponentReadinessUnavailable {
+        /// The component whose readiness could not be confirmed.
+        component: String,
+        /// The underlying failure from
+        /// [`readiness::ReadinessProbe::wait`].
+        #[source]
+        source: Box<InstallError>,
+    },
+    /// [`stack::install_stack`] (Task 2.6) installed `component` (its
+    /// [`ComponentInstaller::install`] call succeeded), but at least one
+    /// of its readiness checks never became satisfied before that
+    /// component's own timeout elapsed.
+    /// [`readiness::ReadinessProbe::wait`] itself reports this as data,
+    /// not an error (`Ok(ReadinessEvidence { satisfied: false, .. })` —
+    /// see that trait's documentation), but [`stack::install_stack`]
+    /// treats it as a stack-level installation failure: proceeding to
+    /// install the next component while `component` is not actually
+    /// ready is exactly the miscomparison readiness probing exists to
+    /// prevent (see [`stack`]'s module documentation's Kyverno example —
+    /// its webhook configurations are created at runtime, after `helm
+    /// install` already returned). `evidence` is whatever was last
+    /// observed, carried through unmodified — never fabricated (Global
+    /// Constraint 15).
+    #[error(
+        "component {component:?} did not become ready in time: {:?} was never satisfied \
+         (waited {:?})",
+        .evidence.check, .evidence.elapsed
+    )]
+    ComponentNotReady {
+        /// The component that did not become ready.
+        component: String,
+        /// The readiness evidence for whichever check failed to become
+        /// satisfied.
+        evidence: Box<ReadinessEvidence>,
     },
 }

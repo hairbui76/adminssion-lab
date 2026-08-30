@@ -81,13 +81,64 @@
 //! [`RunError::NodeImageResolutionFailed`] before any cluster is ever
 //! created — never silently passed through to a backend as an
 //! unvalidated, possibly-bogus image reference.
+//!
+//! # Stack installation (Task 2.6): [`StackInstaller`]
+//!
+//! [`LabRunner::install_stacks`] is this module's next lifecycle stage
+//! after [`LabRunner::prepare_clusters`]: installing each side's whole
+//! ordered component stack onto its already-created cluster. The actual
+//! install behavior — driving `admissionlab-installer`'s
+//! `ComponentInstaller`/`ReadinessProbe` — cannot be called from here
+//! directly: `admissionlab-installer` depends on `admissionlab-core`
+//! (for [`ClusterHandle`], [`Diagnostic`], and more), exactly the same
+//! shape of edge `admissionlab-cluster` has to this crate, and
+//! [`crate::cluster`]'s own module documentation already explains why
+//! that edge forces [`ClusterManager`] to live here rather than
+//! downstream (Controller Ruling R22): this crate hosts [`LabRunner`],
+//! so it must be able to name whatever trait drives `LabRunner`'s own
+//! lifecycle, and a trait living in a crate that itself depends on
+//! `admissionlab-core` would close `admissionlab-core ->
+//! admissionlab-installer -> admissionlab-core` into a cycle Cargo
+//! rejects outright.
+//!
+//! [`StackInstaller`] is the identical shape of abstraction, for the
+//! identical reason: defined here so [`LabRunner`] can drive it,
+//! implemented by a concrete type in a downstream crate that already
+//! depends on both `admissionlab-core` and `admissionlab-installer` —
+//! delegating to `admissionlab_installer::stack::install_stack` —
+//! without ever requiring this crate to depend on that one, or to name
+//! `ComponentInstaller`/`ReadinessProbe`/`InstallRecord`/`InstallError`
+//! directly. [`InstalledComponent`]/[`SideInstall`] mirror
+//! `admissionlab_installer::{InstallRecord, stack::InstalledStack}`'s
+//! own shape field-for-field instead of reusing those types (which this
+//! crate cannot name) or collapsing to something lossy like `()` — every
+//! field here is already a plain, core-owned type
+//! (`String`/`SystemTime`/`Duration`/[`Diagnostic`]), so a concrete
+//! [`StackInstaller`] copying its own richer `InstallRecord`s into these
+//! loses nothing. [`StackInstallError`] instead renders its
+//! implementation's own richer `InstallError` down to a `component` name
+//! plus a `message` string — the same "render to a `String`" pattern
+//! [`ClusterError::KindConfigRender`] already establishes for
+//! `admissionlab-cluster`'s own crate-specific errors that this crate
+//! cannot name either.
+//!
+//! No caller in this workspace constructs a real [`StackInstaller`] yet
+//! (that is CLI wiring, deliberately out of scope for Task 2.6 — see
+//! `admissionlab-cli`'s `commands::test` module documentation); this
+//! trait and [`LabRunner::install_stacks`] exist so a later caller has
+//! one, tested, DRY entry point for "both sides, concurrently, in
+//! deterministic per-side order" rather than needing to hand-write its
+//! own `tokio::join!` over `admissionlab_installer::stack::install_stack`
+//! every time.
 
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
-use admissionlab_spec::ResolvedLab;
+use admissionlab_spec::{ResolvedComponent, ResolvedLab};
+use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::artifact::{ArtifactError, ArtifactStore, RunPaths};
@@ -473,6 +524,213 @@ impl<C: ClusterManager> LabRunner<C> {
         match self.cluster_manager.delete(handle).await {
             Ok(()) => Vec::new(),
             Err(error) => vec![delete_failure_diagnostic(side, handle, &error)],
+        }
+    }
+}
+
+// =========================================================================
+// Stack installation (Task 2.6). See this module's documentation
+// ("Stack installation (Task 2.6)") for why this abstraction lives here
+// rather than in `admissionlab-installer`.
+// =========================================================================
+
+/// An abstraction over installing one side's whole ordered component
+/// stack onto an already-created cluster. See this module's
+/// documentation for why this lives in `admissionlab-core` rather than
+/// `admissionlab-installer`, and what a concrete implementation is
+/// expected to delegate to.
+///
+/// `Send + Sync` for the same reason [`ClusterManager`] is: a concrete
+/// implementation is driven concurrently for both sides by
+/// [`LabRunner::install_stacks`].
+#[async_trait]
+pub trait StackInstaller: Send + Sync {
+    /// Installs `components`, in order, onto `cluster`. A real
+    /// implementation is expected to delegate directly to
+    /// `admissionlab_installer::stack::install_stack`, which this
+    /// method's own `cluster`/`components`/`component_timeout`
+    /// parameters mirror exactly — see that function's documentation
+    /// for what "in order" and `component_timeout` mean.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StackInstallError`] if any component failed to install
+    /// or never became ready.
+    async fn install_stack(
+        &self,
+        cluster: &ClusterHandle,
+        components: &[ResolvedComponent],
+        component_timeout: Duration,
+    ) -> Result<SideInstall, StackInstallError>;
+}
+
+/// One component's outcome within a [`StackInstaller::install_stack`]
+/// call. Field-for-field the same shape as
+/// `admissionlab_installer::InstallRecord` — see this module's
+/// documentation for why this crate holds its own copy of that shape
+/// rather than naming that type directly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledComponent {
+    /// The installed component's name.
+    pub name: String,
+    /// A short, stable label for which install method actually ran (for
+    /// example `"helm"`).
+    pub method: String,
+    /// The version actually installed, confirmed against the cluster
+    /// when possible — never fabricated when it could not be confirmed
+    /// (Global Constraint 15).
+    pub resolved_version: String,
+    /// Wall-clock time this component's install began.
+    pub started_at: SystemTime,
+    /// Wall-clock time this component's install (and readiness wait)
+    /// took.
+    pub elapsed: Duration,
+    /// Non-fatal findings surfaced while installing this component.
+    /// Empty when there is nothing to report.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// What [`StackInstaller::install_stack`] reports for one successfully
+/// installed side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideInstall {
+    /// Which side this stack was installed onto.
+    pub side: Side,
+    /// One [`InstalledComponent`] per installed component, in the order
+    /// they were installed.
+    pub components: Vec<InstalledComponent>,
+}
+
+/// Both sides' stacks, once [`LabRunner::install_stacks`] has installed
+/// both successfully.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstalledLab {
+    /// The installed baseline stack.
+    pub baseline: SideInstall,
+    /// The installed candidate stack.
+    pub candidate: SideInstall,
+}
+
+/// [`StackInstaller::install_stack`] could not install every component
+/// it was given onto one side's cluster.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackInstallError {
+    /// Which component (by name) failed to install or never became
+    /// ready. `None` only if a [`StackInstaller`] implementation fails
+    /// before it can identify one.
+    pub component: Option<String>,
+    /// A human-readable, safe-to-print explanation. See this module's
+    /// documentation for why this crate holds a rendered `String` here
+    /// rather than a typed `admissionlab_installer::InstallError`.
+    pub message: String,
+}
+
+impl fmt::Display for StackInstallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.component {
+            Some(component) => write!(
+                f,
+                "component {component:?} failed to install: {}",
+                self.message
+            ),
+            None => write!(f, "stack installation failed: {}", self.message),
+        }
+    }
+}
+
+impl std::error::Error for StackInstallError {}
+
+/// Which side(s) failed to install its stack, and why. See
+/// [`LabRunner::install_stacks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StackInstallFailure {
+    /// Only the baseline side failed; candidate installed successfully.
+    Baseline(StackInstallError),
+    /// Only the candidate side failed; baseline installed successfully.
+    Candidate(StackInstallError),
+    /// Both sides failed.
+    Both {
+        /// The baseline side's failure.
+        baseline: StackInstallError,
+        /// The candidate side's failure.
+        candidate: StackInstallError,
+    },
+}
+
+impl fmt::Display for StackInstallFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Baseline(error) => write!(f, "baseline stack failed to install: {error}"),
+            Self::Candidate(error) => write!(f, "candidate stack failed to install: {error}"),
+            Self::Both {
+                baseline,
+                candidate,
+            } => write!(
+                f,
+                "both stacks failed to install: baseline: {baseline}; candidate: {candidate}"
+            ),
+        }
+    }
+}
+
+impl<C: ClusterManager> LabRunner<C> {
+    /// Installs both sides' component stacks onto `prepared`'s
+    /// already-created clusters, concurrently — `lab.baseline.components`
+    /// onto `prepared.baseline`, and `lab.candidate.components` onto
+    /// `prepared.candidate`, each side through its own call to
+    /// `stack_installer.install_stack` with the same `component_timeout`.
+    ///
+    /// Uses `tokio::join!`, never `try_join!` — the same rule
+    /// [`LabRunner::prepare_clusters`] follows and this module's
+    /// documentation explains for that method. It applies here for a
+    /// related but distinct reason: unlike an orphaned *cluster*, an
+    /// abandoned in-flight stack install leaks no additional external
+    /// resource on its own (both clusters are torn down by
+    /// [`LabRunner::cleanup`] regardless of how this method concludes),
+    /// but forcibly dropping a still-running install's future from
+    /// outside the [`StackInstaller`] that owns it is not a guarantee
+    /// this module can make for every current and future implementation
+    /// — the same reason `admissionlab_installer::stack::install_stack`
+    /// itself never wraps a component's own `install` call in an outer
+    /// cancelling timeout. Waiting for both sides to reach their own
+    /// natural conclusion is the only shape that avoids relying on that
+    /// unproven guarantee.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StackInstallFailure`] if either side's stack failed to
+    /// install.
+    pub async fn install_stacks(
+        &self,
+        lab: &ResolvedLab,
+        prepared: &PreparedLab,
+        stack_installer: &dyn StackInstaller,
+        component_timeout: Duration,
+    ) -> Result<InstalledLab, StackInstallFailure> {
+        let (baseline_result, candidate_result) = tokio::join!(
+            stack_installer.install_stack(
+                &prepared.baseline,
+                &lab.baseline.components,
+                component_timeout,
+            ),
+            stack_installer.install_stack(
+                &prepared.candidate,
+                &lab.candidate.components,
+                component_timeout,
+            ),
+        );
+
+        match (baseline_result, candidate_result) {
+            (Ok(baseline), Ok(candidate)) => Ok(InstalledLab {
+                baseline,
+                candidate,
+            }),
+            (Err(error), Ok(_)) => Err(StackInstallFailure::Baseline(error)),
+            (Ok(_), Err(error)) => Err(StackInstallFailure::Candidate(error)),
+            (Err(baseline), Err(candidate)) => Err(StackInstallFailure::Both {
+                baseline,
+                candidate,
+            }),
         }
     }
 }

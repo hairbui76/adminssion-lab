@@ -17,18 +17,26 @@
 //! still-in-flight side's future the instant the other side fails,
 //! which would leak exactly the cluster this whole task exists to never
 //! leak.
+//!
+//! The `install_stacks_*` tests (Task 2.6) cover
+//! [`LabRunner::install_stacks`] the same way, against
+//! [`FakeStackInstaller`]: both sides are installed, `tokio::join!`
+//! (never `try_join!`) means a slow side is never abandoned when the
+//! other fails, and a failure on either/both sides is reported through
+//! [`StackInstallFailure`] naming the right side(s).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use admissionlab_core::{
     ArtifactStore, ClusterCreationFailure, ClusterDiagnostics, ClusterError, ClusterHandle,
-    ClusterManager, ClusterSpec, LabRunner, RunError, RunId, RunOptions, RunPaths, Side,
+    ClusterManager, ClusterSpec, InstalledComponent, LabRunner, RunError, RunId, RunOptions,
+    RunPaths, Side, SideInstall, StackInstallError, StackInstallFailure, StackInstaller,
     preserved_cluster_report,
 };
-use admissionlab_spec::{ResolvedLab, load_lab, resolve_lab};
+use admissionlab_spec::{ResolvedComponent, ResolvedLab, load_lab, resolve_lab};
 use async_trait::async_trait;
 
 // ---------------------------------------------------------------------
@@ -767,6 +775,315 @@ fn rollback_failure_after_a_creation_failure_still_reports_the_original_error() 
         }
         other => panic!("expected Err(ClusterCreationFailed), got {other:?}"),
     }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------
+// FakeStackInstaller: a whole-trait `StackInstaller` test double
+// (Task 2.6).
+// ---------------------------------------------------------------------
+
+/// How [`FakeStackInstaller::install_stack`] behaves for one side.
+#[derive(Clone)]
+enum StackPlan {
+    /// Succeed immediately (no `.await` point ever yields).
+    Succeed,
+    /// Sleep for the given duration, then succeed. Used to prove the
+    /// *other* side's install is never abandoned when this side takes
+    /// longer.
+    SucceedAfter(Duration),
+    /// Fail immediately.
+    Fail,
+}
+
+/// Any [`StackInstallError`] works as this file's fake failure; `side`
+/// only makes the fake, synthetic failure identifiable in assertions.
+fn fake_stack_error(side: Side) -> StackInstallError {
+    StackInstallError {
+        component: Some(format!("fake-{}-component", side.as_str())),
+        message: format!("fake {side} stack install failure"),
+    }
+}
+
+/// A plausible [`SideInstall`] for `side`, with one [`InstalledComponent`]
+/// per entry in `components` — enough to prove
+/// [`LabRunner::install_stacks`] handed each side its own component
+/// list, without needing any real installer behind it.
+fn fake_side_install(side: Side, components: &[ResolvedComponent]) -> SideInstall {
+    SideInstall {
+        side,
+        components: components
+            .iter()
+            .map(|component| InstalledComponent {
+                name: component.name.clone(),
+                method: "fake".to_owned(),
+                resolved_version: component.version.clone(),
+                started_at: SystemTime::now(),
+                elapsed: Duration::ZERO,
+                diagnostics: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+/// A [`StackInstaller`] test double. Never spawns a process or touches a
+/// real cluster: `install_stack` is a plain, configurable, in-memory
+/// outcome. Records which sides it was actually called for, with which
+/// component names and `component_timeout`, in call order, so tests can
+/// assert not just the returned `Result` but exactly what
+/// [`LabRunner::install_stacks`] handed it.
+struct FakeStackInstaller {
+    baseline_plan: StackPlan,
+    candidate_plan: StackPlan,
+    calls: Mutex<Vec<(Side, Vec<String>, Duration)>>,
+}
+
+impl FakeStackInstaller {
+    fn new(baseline_plan: StackPlan, candidate_plan: StackPlan) -> Self {
+        Self {
+            baseline_plan,
+            candidate_plan,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The sides `install_stack` was actually invoked for, in call
+    /// order.
+    fn called_sides(&self) -> Vec<Side> {
+        self.calls
+            .lock()
+            .expect("calls mutex poisoned")
+            .iter()
+            .map(|(side, _, _)| *side)
+            .collect()
+    }
+
+    /// The exact `(side, component names, component_timeout)` triples
+    /// `install_stack` was actually invoked with, in call order.
+    fn calls(&self) -> Vec<(Side, Vec<String>, Duration)> {
+        self.calls.lock().expect("calls mutex poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl StackInstaller for FakeStackInstaller {
+    async fn install_stack(
+        &self,
+        cluster: &ClusterHandle,
+        components: &[ResolvedComponent],
+        component_timeout: Duration,
+    ) -> Result<SideInstall, StackInstallError> {
+        let side = cluster.spec.side;
+        self.calls.lock().expect("calls mutex poisoned").push((
+            side,
+            components.iter().map(|c| c.name.clone()).collect(),
+            component_timeout,
+        ));
+
+        let plan = match side {
+            Side::Baseline => &self.baseline_plan,
+            Side::Candidate => &self.candidate_plan,
+        };
+        match plan {
+            StackPlan::Succeed => Ok(fake_side_install(side, components)),
+            StackPlan::SucceedAfter(duration) => {
+                tokio::time::sleep(*duration).await;
+                Ok(fake_side_install(side, components))
+            }
+            StackPlan::Fail => Err(fake_stack_error(side)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// install_stacks (Task 2.6): both sides, concurrently.
+// ---------------------------------------------------------------------
+
+#[test]
+fn install_stacks_installs_each_sides_own_components_concurrently_and_reports_both_sides() {
+    let (runner, options, root) = runner_with(
+        "install-both",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let stack_installer = FakeStackInstaller::new(StackPlan::Succeed, StackPlan::Succeed);
+
+    let installed = runtime
+        .block_on(runner.install_stacks(&lab, &prepared, &stack_installer, Duration::from_secs(5)))
+        .expect("both sides succeeding must succeed overall");
+
+    assert_eq!(installed.baseline.side, Side::Baseline);
+    assert_eq!(installed.candidate.side, Side::Candidate);
+    assert_eq!(
+        sorted(stack_installer.called_sides()),
+        vec![Side::Baseline, Side::Candidate]
+    );
+    for (side, components, timeout) in stack_installer.calls() {
+        let expected_components: Vec<String> = match side {
+            Side::Baseline => lab
+                .baseline
+                .components
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
+            Side::Candidate => lab
+                .candidate
+                .components
+                .iter()
+                .map(|c| c.name.clone())
+                .collect(),
+        };
+        assert_eq!(
+            components, expected_components,
+            "{side} must be installed with exactly its own side's resolved components"
+        );
+        assert_eq!(
+            timeout,
+            Duration::from_secs(5),
+            "component_timeout must be passed through unchanged"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn install_stacks_reports_a_baseline_only_failure() {
+    let (runner, options, root) = runner_with(
+        "install-baseline-fails",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let stack_installer = FakeStackInstaller::new(StackPlan::Fail, StackPlan::Succeed);
+
+    let result = runtime.block_on(runner.install_stacks(
+        &lab,
+        &prepared,
+        &stack_installer,
+        Duration::from_secs(5),
+    ));
+
+    match result {
+        Err(StackInstallFailure::Baseline(error)) => {
+            assert_eq!(error.component.as_deref(), Some("fake-baseline-component"));
+        }
+        other => panic!("expected Err(StackInstallFailure::Baseline), got {other:?}"),
+    }
+    assert_eq!(
+        sorted(stack_installer.called_sides()),
+        vec![Side::Baseline, Side::Candidate],
+        "candidate must still be attempted even though baseline fails"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn install_stacks_reports_a_candidate_only_failure() {
+    let (runner, options, root) = runner_with(
+        "install-candidate-fails",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let stack_installer = FakeStackInstaller::new(StackPlan::Succeed, StackPlan::Fail);
+
+    let result = runtime.block_on(runner.install_stacks(
+        &lab,
+        &prepared,
+        &stack_installer,
+        Duration::from_secs(5),
+    ));
+
+    match result {
+        Err(StackInstallFailure::Candidate(error)) => {
+            assert_eq!(error.component.as_deref(), Some("fake-candidate-component"));
+        }
+        other => panic!("expected Err(StackInstallFailure::Candidate), got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn install_stacks_reports_both_sides_failing() {
+    let (runner, options, root) = runner_with(
+        "install-both-fail",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let stack_installer = FakeStackInstaller::new(StackPlan::Fail, StackPlan::Fail);
+
+    let result = runtime.block_on(runner.install_stacks(
+        &lab,
+        &prepared,
+        &stack_installer,
+        Duration::from_secs(5),
+    ));
+
+    assert!(
+        matches!(result, Err(StackInstallFailure::Both { .. })),
+        "expected Err(StackInstallFailure::Both), got {result:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn install_stacks_does_not_abandon_a_still_installing_side_when_the_other_fails_immediately() {
+    // Mirrors `candidate_creation_is_not_abandoned_when_baseline_fails_immediately`
+    // above, one lifecycle stage later: if `install_stacks` used
+    // `try_join!` instead of `tokio::join!`, this test would fail —
+    // `try_join!` returns the instant baseline's future resolves to
+    // `Err`, dropping candidate's still-sleeping future before it is
+    // ever recorded as called.
+    let (runner, options, root) = runner_with(
+        "install-concurrency",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let stack_installer = FakeStackInstaller::new(
+        StackPlan::Fail,
+        StackPlan::SucceedAfter(Duration::from_millis(75)),
+    );
+
+    let result = runtime.block_on(runner.install_stacks(
+        &lab,
+        &prepared,
+        &stack_installer,
+        Duration::from_secs(5),
+    ));
+
+    assert!(
+        result.is_err(),
+        "baseline failed, so install_stacks must fail overall"
+    );
+    assert_eq!(
+        sorted(stack_installer.called_sides()),
+        vec![Side::Baseline, Side::Candidate],
+        "candidate's slower install must have been awaited to completion (tokio::join!, not \
+         try_join!), never abandoned the instant baseline failed"
+    );
 
     let _ = std::fs::remove_dir_all(&root);
 }
