@@ -22,10 +22,10 @@
 //!   same property end-to-end through `ManifestsInstaller::install`,
 //!   with zero kubectl invocations).
 //! - Step 3 (`kubectl apply --server-side=false -f <file>`, always with
-//!   `--kubeconfig`) -- the `ManifestsInstaller` tests in the second
-//!   section, including
-//!   `every_kubectl_invocation_carries_kubeconfig_pointing_at_the_clusters_own_path`
-//!   (the regression-proof structural property) and
+//!   `--kubeconfig` and `--cache-dir`) -- the `ManifestsInstaller` tests
+//!   in the second section, including
+//!   `every_kubectl_invocation_carries_kubeconfig_and_cache_dir_pointing_inside_the_run_workspace`
+//!   (the regression-proof structural property for both flags) and
 //!   `annotation_size_limit_failure_is_surfaced_with_clear_diagnostic_and_no_silent_retry`
 //!   (the `--server-side=false` annotation-size failure mode, made
 //!   legible without a silent `--server-side=true` retry).
@@ -41,7 +41,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use admissionlab_core::{
-    ClusterHandle, ClusterSpec, CommandResult, CommandSpec, ProcessError, ProcessRunner, Side,
+    ClusterHandle, ClusterSpec, CommandResult, CommandSpec, ProcessError, ProcessRunner, RunId,
+    RunPaths, Side,
 };
 use admissionlab_installer::{
     ComponentInstaller, InstallError, ManifestsInstaller, load_manifest_bundle,
@@ -81,6 +82,15 @@ fn write_manifest(dir: &Path, name: &str, contents: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::write(&path, contents).expect("write temp manifest file");
     path
+}
+
+/// A fresh, arbitrary [`RunPaths`] for one test, mirroring
+/// `tests/helm_unit.rs`'s own `test_run_paths` helper. `RunPaths::new`
+/// performs no filesystem IO, so this never touches disk; each call
+/// gets its own [`RunId`] so two tests never accidentally compute the
+/// same `--cache-dir` path.
+fn test_run_paths() -> RunPaths {
+    RunPaths::new(Path::new("/fake-run-root"), &RunId::generate())
 }
 
 /// A [`ClusterHandle`] whose kubeconfig is `kubeconfig` -- deliberately
@@ -532,7 +542,7 @@ fn source_hash_is_lowercase_hex_sha256_and_changes_with_content() {
 // ---------------------------------------------------------------------
 
 #[tokio::test]
-async fn apply_uses_exact_argv_with_server_side_false_and_kubeconfig() {
+async fn apply_uses_exact_argv_with_server_side_false_kubeconfig_and_cache_dir() {
     let dir = unique_temp_dir("apply-argv");
     let path = write_manifest(
         &dir,
@@ -543,7 +553,8 @@ async fn apply_uses_exact_argv_with_server_side_false_and_kubeconfig() {
     let runner = Arc::new(
         FakeProcessRunner::new().with(&path, FakeOutcome::Success(b"configmap/cfg created\n")),
     );
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![path.clone()]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -564,13 +575,16 @@ async fn apply_uses_exact_argv_with_server_side_false_and_kubeconfig() {
             path.into_os_string(),
             OsString::from("--kubeconfig"),
             OsString::from("/run/adlab/baseline.kubeconfig"),
+            OsString::from("--cache-dir"),
+            run_paths.logs().join("kubectl-cache").into_os_string(),
         ]
     );
 }
 
 #[tokio::test]
-async fn every_kubectl_invocation_carries_kubeconfig_pointing_at_the_clusters_own_path() {
-    let dir = unique_temp_dir("kubeconfig-everywhere");
+async fn every_kubectl_invocation_carries_kubeconfig_and_cache_dir_pointing_inside_the_run_workspace()
+ {
+    let dir = unique_temp_dir("kubeconfig-and-cache-dir-everywhere");
     let paths: Vec<PathBuf> = (0..3)
         .map(|i| {
             write_manifest(
@@ -586,10 +600,12 @@ async fn every_kubectl_invocation_carries_kubeconfig_pointing_at_the_clusters_ow
         runner_builder = runner_builder.with(path, FakeOutcome::Success(b""));
     }
     let runner = Arc::new(runner_builder);
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(paths);
     let distinctive_kubeconfig = "/run/adlab/run-9f2c/candidate.kubeconfig";
     let cluster = cluster_handle(distinctive_kubeconfig);
+    let expected_cache_dir = run_paths.logs().join("kubectl-cache").into_os_string();
 
     installer
         .install(&cluster, &component)
@@ -606,9 +622,20 @@ async fn every_kubectl_invocation_carries_kubeconfig_pointing_at_the_clusters_ow
             "every kubectl invocation must carry --kubeconfig pointing at this cluster's own \
              kubeconfig"
         );
+        assert_eq!(
+            find_flag(&call.args, "--cache-dir"),
+            Some(&expected_cache_dir),
+            "every kubectl invocation must carry --cache-dir pointing inside this run's own \
+             workspace, never the operator's real ~/.kube/cache"
+        );
         assert!(
             !call.env.contains_key(&OsString::from("KUBECONFIG")),
             "kubeconfig selection must go through --kubeconfig alone, never a KUBECONFIG env \
+             override"
+        );
+        assert!(
+            !call.env.contains_key(&OsString::from("KUBECACHEDIR")),
+            "cache-dir selection must go through --cache-dir alone, never a KUBECACHEDIR env \
              override"
         );
     }
@@ -633,7 +660,8 @@ async fn files_are_applied_in_declared_order_one_kubectl_call_per_file() {
             .with(&path_first, FakeOutcome::Success(b""))
             .with(&path_second, FakeOutcome::Success(b"")),
     );
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![path_first.clone(), path_second.clone()]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -664,7 +692,8 @@ async fn duplicate_paths_are_applied_only_once() {
     );
 
     let runner = Arc::new(FakeProcessRunner::new().with(&path, FakeOutcome::Success(b"")));
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![path.clone(), path]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -691,7 +720,8 @@ async fn malformed_manifest_fails_before_any_kubectl_call() {
     let bad = write_manifest(&dir, "bad.yaml", "kind: ConfigMap\n\tname: cfg\n");
 
     let runner = Arc::new(FakeProcessRunner::new().with(&good, FakeOutcome::Success(b"")));
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![good, bad]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -731,7 +761,8 @@ async fn nonzero_kubectl_exit_surfaces_as_install_error_with_stderr_not_panic() 
                 ),
             ),
     );
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![path_first, path_second]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -770,7 +801,8 @@ async fn kubectl_not_found_surfaces_as_install_error_process_variant() {
     );
 
     let runner = Arc::new(FakeProcessRunner::new().with(&path, FakeOutcome::Missing));
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![path]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -791,7 +823,8 @@ async fn kubectl_not_found_surfaces_as_install_error_process_variant() {
 #[tokio::test]
 async fn helm_install_method_is_rejected_without_invoking_runner() {
     let runner = Arc::new(FakeProcessRunner::new());
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = helm_component();
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -817,7 +850,8 @@ async fn successful_install_reports_declared_version_and_manifests_method() {
     );
 
     let runner = Arc::new(FakeProcessRunner::new().with(&path, FakeOutcome::Success(b"")));
-    let installer = ManifestsInstaller::new(runner);
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner, &run_paths);
     let component = manifests_component(vec![path]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -852,7 +886,8 @@ async fn annotation_size_limit_failure_is_surfaced_with_clear_diagnostic_and_no_
     let stderr: &[u8] = b"error: CustomResourceDefinition \"hugecrd.example.io\" is invalid: \
                            metadata.annotations: Too long: must have at most 262144 bytes\n";
     let runner = Arc::new(FakeProcessRunner::new().with(&path, FakeOutcome::Failure(stderr)));
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![path.clone()]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -906,7 +941,8 @@ async fn plain_nonzero_exit_without_annotation_limit_wording_stays_a_generic_com
         &path,
         FakeOutcome::Failure(b"Error from server (Forbidden): configmaps is forbidden\n"),
     ));
-    let installer = ManifestsInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component(vec![path]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 

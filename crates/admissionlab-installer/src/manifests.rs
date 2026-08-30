@@ -14,7 +14,7 @@
 //! cluster) and is exported for a later task (run-manifest/fixture
 //! provenance, PRODUCT.md §28) to call independently.
 //!
-//! # Why every `kubectl` invocation is safe by construction
+//! # Why every `kubectl` invocation is safe by construction: `--kubeconfig` and `--cache-dir`
 //!
 //! Task 2.2's Helm installer found, in review, that passing an empty
 //! environment to `helm` does not stop it from reaching for the
@@ -34,27 +34,130 @@
 //!
 //! This module closes that off structurally rather than by convention:
 //! [`ManifestsInstaller::kubectl_command`] is the *only* place in this
-//! module — and, since [`apply_args`] never accepts a kubeconfig
-//! parameter at all, the only place in this crate — that assembles
-//! `kubectl` argv into a runnable [`CommandSpec`]. It unconditionally
-//! appends `--kubeconfig <cluster's own kubeconfig>` itself, every
-//! single time, with no parameter to opt out. Unlike the Helm
-//! installer's own chokepoint (which must leave `--kubeconfig` to each
-//! call site, because `helm repo add` is a local, cluster-independent
-//! operation that must never receive it), *every* `kubectl` invocation
-//! this module ever makes operates on a live cluster, so there is no
-//! such exception to carve out here. `--kubeconfig` selection also never
-//! goes through the `KUBECONFIG` environment variable:
-//! [`ManifestsInstaller::kubectl_command`] sets no environment overrides
-//! at all. A future call site cannot silently reintroduce the original
-//! class of defect: doing so would require hand-building a
+//! module — and, since [`apply_args`] never accepts a kubeconfig or
+//! cache-dir parameter at all, the only place in this crate — that
+//! assembles `kubectl` argv into a runnable [`CommandSpec`]. It
+//! unconditionally appends both `--kubeconfig <cluster's own
+//! kubeconfig>` and `--cache-dir <this run's own cache directory>`
+//! itself, every single time, with no parameter to opt out of either.
+//! Unlike the Helm installer's own chokepoint (which must leave
+//! `--kubeconfig` to each call site, because `helm repo add` is a
+//! local, cluster-independent operation that must never receive it),
+//! *every* `kubectl` invocation this module ever makes operates on a
+//! live cluster, so there is no such exception to carve out here.
+//! Neither flag's selection goes through an environment variable
+//! either (`KUBECONFIG` or `KUBECACHEDIR`):
+//! [`ManifestsInstaller::kubectl_command`] sets no environment
+//! overrides at all. A future call site cannot silently reintroduce
+//! either class of defect: doing so would require hand-building a
 //! [`CommandSpec`] directly rather than calling this method, a
 //! deliberate departure from how the one existing call site
 //! ([`ManifestsInstaller::apply_file`]) works, not an easy oversight.
 //! `tests/manifests_unit.rs`'s
-//! `every_kubectl_invocation_carries_kubeconfig_pointing_at_the_clusters_own_path`
-//! makes this a regression-proof property rather than merely an
+//! `every_kubectl_invocation_carries_kubeconfig_and_cache_dir_pointing_inside_the_run_workspace`
+//! makes both flags a regression-proof property rather than merely an
 //! inspection of the code.
+//!
+//! ## `--cache-dir`: found in review, one severity tier lower than Helm's
+//!
+//! The first version of this module applied the lesson above only to
+//! `--kubeconfig`, and reasoned that `kubectl` had no directly
+//! analogous ambient-state exposure to Helm's repository cache. That
+//! reasoning was wrong, caught in review by checking rather than
+//! assuming: with no `--cache-dir` set, `kubectl` reads and writes
+//! `~/.kube/cache` — specifically `~/.kube/cache/discovery/<host>_<port>/`
+//! (one directory per distinct API-server host:port it has ever talked
+//! to) and `~/.kube/cache/http/` (a generic HTTP response cache, keyed
+//! by a hash of the request). Verified empirically on the reviewing
+//! machine: `~/.kube/cache/discovery/` already held eight
+//! `127.0.0.1_<port>` directories, one per now-*deleted* `kind` cluster
+//! whose ephemeral API-server port will never be reused, and
+//! `~/.kube/cache` totaled 64 MB with nothing to ever clean it up.
+//! Every `admissionlab test` run would add two more such directories
+//! (one per side) that outlive the run forever — an unbounded leak into
+//! the operator's home, in a directory this project claims not to
+//! touch.
+//!
+//! This is the same *shape* of finding as Helm's `repositories.yaml`,
+//! one severity tier lower: a discovery/HTTP cache is regenerable and
+//! holds nothing a user would ever look at, so hitting this loses no
+//! data (not the kind of Global Constraint 15/PRODUCT.md §29 violation
+//! a corrupted `repositories.yaml` entry would be) — but it still
+//! contradicts the isolation property, and unlike `repositories.yaml`
+//! (one file that gets overwritten, not grown) this genuinely
+//! accumulates without bound.
+//!
+//! **Per-run, not per-side — reasoned from `kubectl`'s own source, not
+//! copied from Helm's answer.** Helm's per-side split exists because
+//! `helm repo add` performs a read-the-whole-file,
+//! mutate-in-memory, write-the-whole-file-back cycle against *one*
+//! shared `repositories.yaml`: two concurrent `helm repo add`
+//! processes (baseline and candidate installing at once) racing on
+//! that single mutable document can lose one side's update entirely.
+//! `kubectl`'s caches have no equivalent shared, mutable, whole-document
+//! write. Confirmed directly from `k8s.io/cli-runtime`'s
+//! `pkg/genericclioptions/config_flags.go` (`ToDiscoveryClient`, not
+//! assumed): the discovery cache is namespaced *on disk* by the target
+//! server's own host:port —
+//!
+//! ```text
+//! discoveryCacheDir := computeDiscoverCacheDir(filepath.Join(cacheDir, "discovery"), config.Host)
+//! ```
+//!
+//! (`computeDiscoverCacheDir` strips the scheme and replaces `:` with
+//! `_`, which is exactly why the real directories observed above are
+//! named `127.0.0.1_<port>`) — and the HTTP cache
+//! (`k8s.io/client-go/discovery/cached/disk`'s `newCacheRoundTripper`,
+//! backed by a `diskv` key-value store) is keyed by a hash of the full
+//! request, which always embeds the target host:port. Since baseline
+//! and candidate always talk to two different `kind` clusters
+//! (different ports, by construction), their cache writes can never
+//! land on the same key or the same discovery subdirectory even when
+//! both write into one shared parent `--cache-dir` concurrently — there
+//! is no shared mutable document for them to race on, only independent
+//! per-key files. A per-side split here would add directory-management
+//! complexity for a race that does not exist, unlike Helm's split,
+//! which eliminates a race that was verified to exist.
+//!
+//! **Where: `paths.logs().join("kubectl-cache")` — reusing
+//! [`admissionlab_core::RunPaths::logs`], no new `RunPaths` field.**
+//! Same precedent Task 2.2 already established for Helm's own state
+//! (and that the rendered `kind` configuration already established
+//! before it): this is a backend's own generated, non-secret,
+//! backend-scratch working state — not a captured admission object, not
+//! a rendered report, and not credential material — so it belongs
+//! alongside the other content already living there. Computed once, at
+//! construction time ([`ManifestsInstaller::new`] now also takes
+//! `&RunPaths`), not per `install` call: unlike Helm's per-side
+//! directory (recomputed on every call from `cluster.spec.side`), there
+//! is exactly one cache directory for the whole run, independent of
+//! which side is currently installing — the per-run decision above.
+//!
+//! **`--cache-dir` alone covers both `discovery/` and `http/`; nothing
+//! is left pointing at the real `~/.kube/cache`.** Verified from the
+//! same `config_flags.go` source, not assumed: both subdirectories are
+//! computed from the *same* `cacheDir` value —
+//!
+//! ```text
+//! httpCacheDir := filepath.Join(cacheDir, "http")
+//! discoveryCacheDir := computeDiscoverCacheDir(filepath.Join(cacheDir, "discovery"), config.Host)
+//! return diskcached.NewCachedDiscoveryClientForConfig(config, discoveryCacheDir, httpCacheDir, ...)
+//! ```
+//!
+//! — where `cacheDir` is `~/.kube/cache` only when `--cache-dir` is
+//! unset (`getDefaultCacheDir`); once the flag is set, `cacheDir`
+//! becomes that value and *both* lines derive from it. Neither cache
+//! backend needs this module to create its directory first, so (as
+//! with Helm's `HELM_REPOSITORY_CONFIG`/`HELM_REPOSITORY_CACHE`,
+//! verified empirically against a real `helm` binary) there is no
+//! `mkdir` step here either — confirmed this time by reading the
+//! dependency source rather than running the real binary (the brief
+//! for this fix asked for no real `kubectl` invocation): the discovery
+//! cache's `writeCachedFile` calls `os.MkdirAll(filepath.Dir(filename),
+//! 0750)` before every write
+//! (`k8s.io/client-go/discovery/cached/disk/cached_discovery.go`), and
+//! the HTTP cache's underlying `diskv` store does the same on its own
+//! write path (`peterbourgon/diskv`'s `Write`/`ensurePathTo`).
 //!
 //! # Manifest loading: order, duplicates, and hashing
 //!
@@ -213,7 +316,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use admissionlab_core::{ClusterHandle, CommandResult, CommandSpec, ProcessRunner};
+use admissionlab_core::{ClusterHandle, CommandResult, CommandSpec, ProcessRunner, RunPaths};
 use admissionlab_spec::{InstallMethod, ResolvedComponent};
 use async_trait::async_trait;
 use serde::Deserialize as _;
@@ -225,6 +328,12 @@ use crate::{ComponentInstaller, InstallError, InstallRecord};
 /// path, matching this crate's `helm` module's own convention for
 /// external tools.
 const KUBECTL_PROGRAM: &str = "kubectl";
+
+/// The subdirectory of [`admissionlab_core::RunPaths::logs`] every
+/// `kubectl` invocation in this module uses as its `--cache-dir` (see
+/// the module documentation's "`--cache-dir`" section): one directory
+/// for the whole run, not per side.
+const KUBECTL_CACHE_SUBDIR: &str = "kubectl-cache";
 
 /// How long one `kubectl apply --server-side=false -f <file>` invocation
 /// may run before it is killed and reported as timed out.
@@ -455,40 +564,50 @@ fn looks_like_annotation_size_limit_failure(stderr: &[u8]) -> bool {
 }
 
 /// Drives `kubectl` (via a shared [`ProcessRunner`]) to install a single
-/// resolved raw-manifests component. Holds only the runner: unlike the
-/// Helm installer, this installer has no backend-owned client state to
-/// isolate (`kubectl` needs nothing beyond `--kubeconfig`; see the
-/// module documentation), so there is no per-run/per-side workspace
-/// directory to capture at construction.
+/// resolved raw-manifests component. Holds the runner plus this run's
+/// own `--cache-dir` (see the module documentation's "`--cache-dir`"
+/// section for why this is one directory for the whole run, computed
+/// once here, rather than a per-side directory recomputed on every
+/// `install` call the way the Helm installer's own state directory is).
 pub struct ManifestsInstaller {
     runner: Arc<dyn ProcessRunner>,
+    /// This run's own `kubectl` cache directory:
+    /// `paths.logs().join("kubectl-cache")`, captured once at
+    /// construction. Never the operator's real `~/.kube/cache`.
+    cache_dir: PathBuf,
 }
 
 impl ManifestsInstaller {
-    /// Creates an installer that drives `kubectl` through `runner`.
+    /// Creates an installer that drives `kubectl` through `runner`,
+    /// directing its discovery/HTTP cache (see the module
+    /// documentation) into `paths`'s `logs` directory instead of the
+    /// operator's real `~/.kube/cache`.
     #[must_use]
-    pub fn new(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
+    pub fn new(runner: Arc<dyn ProcessRunner>, paths: &RunPaths) -> Self {
+        Self {
+            runner,
+            cache_dir: paths.logs().join(KUBECTL_CACHE_SUBDIR),
+        }
     }
 
     /// The one place every `kubectl`-targeting [`CommandSpec`] in this
     /// module is built. See the module documentation's "Why every
     /// `kubectl` invocation is safe by construction" section: this
-    /// function unconditionally appends `--kubeconfig <kubeconfig>` to
-    /// whatever subcommand-specific `args` it is given, with no way to
-    /// opt out, and sets no environment overrides at all — kubeconfig
-    /// selection always goes through this flag, never a `KUBECONFIG`
-    /// environment variable. Takes no `&self`: unlike the Helm
-    /// installer's own chokepoint, nothing here depends on
-    /// per-instance state, so `clippy::unused_self` correctly flags
-    /// `&self` as unnecessary if added back.
+    /// method unconditionally appends `--kubeconfig <kubeconfig>` and
+    /// `--cache-dir <self.cache_dir>` to whatever subcommand-specific
+    /// `args` it is given, with no way to opt out of either, and sets
+    /// no environment overrides at all — neither selection ever goes
+    /// through an environment variable (`KUBECONFIG`/`KUBECACHEDIR`).
     fn kubectl_command(
+        &self,
         kubeconfig: &Path,
         mut args: Vec<OsString>,
         timeout: Duration,
     ) -> CommandSpec {
         args.push("--kubeconfig".into());
         args.push(kubeconfig.as_os_str().to_owned());
+        args.push("--cache-dir".into());
+        args.push(self.cache_dir.as_os_str().to_owned());
         CommandSpec {
             program: KUBECTL_PROGRAM.into(),
             args,
@@ -545,7 +664,7 @@ impl ManifestsInstaller {
         kubeconfig: &Path,
         path: &Path,
     ) -> Result<(), InstallError> {
-        let spec = Self::kubectl_command(kubeconfig, apply_args(path), APPLY_TIMEOUT);
+        let spec = self.kubectl_command(kubeconfig, apply_args(path), APPLY_TIMEOUT);
         match self.run_and_check(component, spec).await {
             Err(InstallError::CommandFailed {
                 component: failed_component,
@@ -611,13 +730,14 @@ impl ComponentInstaller for ManifestsInstaller {
     }
 }
 
-/// Builds the argv (excluding the program name and `--kubeconfig`) for
-/// `kubectl apply --server-side=false -f <path>` (Task 2.3 brief Step
-/// 3). Pure argv construction only — [`ManifestsInstaller::kubectl_command`]
-/// is what turns this into a runnable [`CommandSpec`], and it alone adds
-/// `--kubeconfig`; this function must never add it itself, or a future
-/// reader could mistake it for a second, competing place that decides
-/// kubeconfig selection.
+/// Builds the argv (excluding the program name, `--kubeconfig`, and
+/// `--cache-dir`) for `kubectl apply --server-side=false -f <path>`
+/// (Task 2.3 brief Step 3). Pure argv construction only —
+/// [`ManifestsInstaller::kubectl_command`] is what turns this into a
+/// runnable [`CommandSpec`], and it alone adds `--kubeconfig`/
+/// `--cache-dir`; this function must never add either itself, or a
+/// future reader could mistake it for a second, competing place that
+/// decides kubeconfig/cache-dir selection.
 fn apply_args(path: &Path) -> Vec<OsString> {
     vec![
         "apply".into(),
