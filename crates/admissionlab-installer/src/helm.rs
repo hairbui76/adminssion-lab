@@ -95,7 +95,15 @@
 //! two `helm repo add` processes on the same `repositories.yaml`; giving
 //! each side its own file removes that race entirely rather than merely
 //! narrowing its window, at no extra cost (the directory is created on
-//! demand by `helm` itself either way).
+//! demand by `helm` itself either way). This isolates baseline from
+//! candidate — the only concurrency this codebase establishes today
+//! (Task 1.10 creates both clusters at once) — but **not** two
+//! components installed concurrently onto the *same* side: they would
+//! still share one `<side>-helm/repositories.yaml`. Not a defect as of
+//! this task (nothing here installs components concurrently), but
+//! Task 2.6's stack-orchestration design should account for it before
+//! choosing whether components within one side install one at a time or
+//! concurrently.
 //!
 //! **Lives under [`admissionlab_core::RunPaths::logs`], not a new
 //! `RunPaths` field.** `RunPaths` already has exactly this shape of
@@ -169,7 +177,19 @@ const REPO_ADD_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The `--timeout` passed to `helm upgrade --install` itself, bounding
 /// how long Helm's own client waits for any individual Kubernetes
-/// operation (chart hooks, primarily) to complete.
+/// operation it performs *without* `--wait` — in practice, running
+/// pre-/post-install and pre-/post-upgrade hook Jobs to completion, and
+/// waiting for any chart-bundled `CustomResourceDefinition`s to become
+/// established. This module deliberately never passes `--wait` or
+/// `--wait-for-jobs` (readiness is [`admissionlab_spec::ReadinessCheck`]'s
+/// concern, probed separately by Task 2.4 once this install already
+/// returned), so `--timeout` here does **not** bound, and this step does
+/// not wait for, the main `Deployment`/`DaemonSet`/`StatefulSet`'s pods
+/// actually scheduling or pulling their images — that is a materially
+/// different (and for a real admission stack, usually much larger)
+/// window than hook-Job/CRD-establishment waiting, and budgeting it is
+/// Task 2.4's job, sized independently once this task's install has
+/// already returned rather than here.
 ///
 /// Chosen strictly shorter than [`UPGRADE_PROCESS_TIMEOUT`] (by two
 /// minutes) so that, in the overwhelming majority of failure cases,
@@ -177,14 +197,18 @@ const REPO_ADD_TIMEOUT: Duration = Duration::from_secs(60);
 /// on its own, with an informative Helm-authored message on stderr,
 /// which reaches the caller as a normal [`InstallError::CommandFailed`]
 /// — far more diagnosable than a hard `SIGKILL` with no such message.
-/// 480 seconds (8 minutes) is chosen over Helm's own 5-minute default
-/// because a real admission-stack install is documented to be slower
-/// than even a cold `kind create cluster` (measured at roughly 105
-/// seconds on this machine), and image pulls are what dominates that
-/// time; 5 minutes leaves too little margin for a legitimately
-/// slow-but-succeeding cold pull of a real chart's images on a loaded CI
-/// runner, which would otherwise convert a would-have-succeeded install
-/// into a spurious timeout failure.
+/// 480 seconds (8 minutes) — about 1.6x Helm's own 5-minute default —
+/// gives comfortable headroom for a real chart's hook Job (some
+/// admission-stack charts run one to seed CRDs, issue a webhook
+/// certificate, or run a pre-flight check, and that Job's own container
+/// image may itself need a cold pull) without the exact number being
+/// load-bearing: because a too-generous value here only delays a
+/// failure report rather than causing incorrect behavior, rounding up is
+/// the safe direction when this task has no measured reference point for
+/// "typical hook Job duration" the way `admissionlab_cluster::kind`'s
+/// own `CREATE_TIMEOUT` (a `kind`-lifecycle constant this crate has no
+/// dependency on, so it cannot be named as a doc link here) has directly
+/// measured cold/warm `kind create cluster` figures to reason from.
 const HELM_UPGRADE_TIMEOUT: Duration = Duration::from_secs(480);
 
 /// The outer [`admissionlab_core::ProcessRunner`] timeout for the `helm
@@ -247,6 +271,37 @@ impl HelmInstaller {
         }
     }
 
+    /// The one place every `helm`-targeting [`CommandSpec`] in this
+    /// module is built: `program` is always [`HELM_PROGRAM`], `cwd` is
+    /// always `None`, `sensitive_env_keys` is always empty (nothing this
+    /// module ever passes to `helm`'s argv or env is credential-like),
+    /// and `env` is always this run's Helm state isolation environment
+    /// for `side` (see the module documentation's "Helm state
+    /// isolation" section) -- computed here from `self.logs_dir`, not
+    /// accepted as a parameter callers could substitute or omit. Every
+    /// `helm` invocation this module makes (today: repo-add, upgrade
+    /// --install, get metadata; a future `helm rollback`/`helm
+    /// uninstall` for Task 2.6 would be no exception) must go through
+    /// this method to become a runnable [`CommandSpec`] -- there is no
+    /// other way in this module to produce one whose `program` is
+    /// `helm`, so a new call site cannot silently reintroduce the
+    /// original defect (`env: BTreeMap::new()`, inherited-ambient-
+    /// environment) found in review: doing so would require bypassing
+    /// this constructor and hand-building a `CommandSpec` directly, a
+    /// deliberate departure from how every existing call site works,
+    /// not an easy oversight.
+    fn helm_command(&self, side: Side, args: Vec<OsString>, timeout: Duration) -> CommandSpec {
+        let state_dir = helm_state_dir(&self.logs_dir, side);
+        CommandSpec {
+            program: HELM_PROGRAM.into(),
+            args,
+            cwd: None,
+            env: helm_isolation_env(&state_dir),
+            sensitive_env_keys: BTreeSet::new(),
+            timeout,
+        }
+    }
+
     /// Runs `spec` (one `helm` invocation for `component`) and maps its
     /// outcome to `Result<CommandResult, InstallError>`: a
     /// [`admissionlab_core::ProcessError`] becomes
@@ -293,9 +348,13 @@ impl HelmInstaller {
         component: &str,
         helm: &HelmInstallSpec,
         kubeconfig: &Path,
-        env: &BTreeMap<OsString, OsString>,
+        side: Side,
     ) -> (String, Vec<Diagnostic>) {
-        let spec = get_metadata_spec(helm, kubeconfig, env);
+        let spec = self.helm_command(
+            side,
+            get_metadata_args(helm, kubeconfig),
+            GET_METADATA_TIMEOUT,
+        );
         let context = spec.context();
         let reason = match self.runner.run(spec).await {
             Ok(result) if result.status.success() => match parse_chart_version(&result.stdout) {
@@ -340,20 +399,25 @@ impl ComponentInstaller for HelmInstaller {
 
         let started_at = SystemTime::now();
         let start = Instant::now();
+        let side = cluster.spec.side;
 
-        let state_dir = helm_state_dir(&self.logs_dir, cluster.spec.side);
-        let env = helm_isolation_env(&state_dir);
-
-        self.run_and_check(&component.name, repo_add_spec(helm, &env))
-            .await?;
         self.run_and_check(
             &component.name,
-            upgrade_install_spec(helm, &cluster.kubeconfig, &env),
+            self.helm_command(side, repo_add_args(helm), REPO_ADD_TIMEOUT),
+        )
+        .await?;
+        self.run_and_check(
+            &component.name,
+            self.helm_command(
+                side,
+                upgrade_install_args(helm, &cluster.kubeconfig),
+                UPGRADE_PROCESS_TIMEOUT,
+            ),
         )
         .await?;
 
         let (resolved_version, diagnostics) = self
-            .capture_resolved_version(&component.name, helm, &cluster.kubeconfig, &env)
+            .capture_resolved_version(&component.name, helm, &cluster.kubeconfig, side)
             .await;
 
         Ok(InstallRecord {
@@ -367,35 +431,26 @@ impl ComponentInstaller for HelmInstaller {
     }
 }
 
-/// Builds the argv for `helm repo add <repo_name> <repo_url>
-/// --force-update`. `env` is this invocation's Helm state isolation
-/// environment (see the module documentation); every `helm` invocation
-/// this module makes carries it.
-fn repo_add_spec(helm: &HelmInstallSpec, env: &BTreeMap<OsString, OsString>) -> CommandSpec {
-    CommandSpec {
-        program: HELM_PROGRAM.into(),
-        args: vec![
-            "repo".into(),
-            "add".into(),
-            helm.repo_name.as_str().into(),
-            helm.repo_url.as_str().into(),
-            "--force-update".into(),
-        ],
-        cwd: None,
-        env: env.clone(),
-        sensitive_env_keys: BTreeSet::new(),
-        timeout: REPO_ADD_TIMEOUT,
-    }
+/// Builds the argv (excluding the program name) for `helm repo add
+/// <repo_name> <repo_url> --force-update`. Pure argv construction only
+/// -- [`HelmInstaller::helm_command`] is what turns this into a runnable
+/// [`CommandSpec`], carrying the isolation environment and timeout.
+fn repo_add_args(helm: &HelmInstallSpec) -> Vec<OsString> {
+    vec![
+        "repo".into(),
+        "add".into(),
+        helm.repo_name.as_str().into(),
+        helm.repo_url.as_str().into(),
+        "--force-update".into(),
+    ]
 }
 
-/// Builds the argv for `helm upgrade --install`. See the module
-/// documentation for the exact flag set and ordering rules, and for what
-/// `env` (this invocation's Helm state isolation environment) is for.
-fn upgrade_install_spec(
-    helm: &HelmInstallSpec,
-    kubeconfig: &Path,
-    env: &BTreeMap<OsString, OsString>,
-) -> CommandSpec {
+/// Builds the argv (excluding the program name) for `helm upgrade
+/// --install`. See the module documentation for the exact flag set and
+/// ordering rules. Pure argv construction only -- see [`repo_add_args`]'s
+/// documentation for why this returns a bare `Vec<OsString>` rather than
+/// a [`CommandSpec`].
+fn upgrade_install_args(helm: &HelmInstallSpec, kubeconfig: &Path) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec![
         "upgrade".into(),
         "--install".into(),
@@ -421,44 +476,26 @@ fn upgrade_install_spec(
         args.push(format!("{key}={value}").into());
     }
 
-    CommandSpec {
-        program: HELM_PROGRAM.into(),
-        args,
-        cwd: None,
-        env: env.clone(),
-        sensitive_env_keys: BTreeSet::new(),
-        timeout: UPGRADE_PROCESS_TIMEOUT,
-    }
+    args
 }
 
-/// Builds the argv for `helm get metadata <release> --namespace
-/// <namespace> --kubeconfig <kubeconfig> -o json`. `get metadata` does
-/// not itself need repository resolution, but `env` is applied anyway
-/// for the same reason every invocation gets it — see the module
-/// documentation.
-fn get_metadata_spec(
-    helm: &HelmInstallSpec,
-    kubeconfig: &Path,
-    env: &BTreeMap<OsString, OsString>,
-) -> CommandSpec {
-    CommandSpec {
-        program: HELM_PROGRAM.into(),
-        args: vec![
-            "get".into(),
-            "metadata".into(),
-            helm.release_name.as_str().into(),
-            "--namespace".into(),
-            helm.namespace.as_str().into(),
-            "--kubeconfig".into(),
-            kubeconfig.as_os_str().to_owned(),
-            "-o".into(),
-            "json".into(),
-        ],
-        cwd: None,
-        env: env.clone(),
-        sensitive_env_keys: BTreeSet::new(),
-        timeout: GET_METADATA_TIMEOUT,
-    }
+/// Builds the argv (excluding the program name) for `helm get metadata
+/// <release> --namespace <namespace> --kubeconfig <kubeconfig> -o json`.
+/// Pure argv construction only -- see [`repo_add_args`]'s documentation
+/// for why this returns a bare `Vec<OsString>` rather than a
+/// [`CommandSpec`].
+fn get_metadata_args(helm: &HelmInstallSpec, kubeconfig: &Path) -> Vec<OsString> {
+    vec![
+        "get".into(),
+        "metadata".into(),
+        helm.release_name.as_str().into(),
+        "--namespace".into(),
+        helm.namespace.as_str().into(),
+        "--kubeconfig".into(),
+        kubeconfig.as_os_str().to_owned(),
+        "-o".into(),
+        "json".into(),
+    ]
 }
 
 /// Computes the per-side directory this run's `helm` invocations store
