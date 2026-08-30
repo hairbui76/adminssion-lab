@@ -96,6 +96,12 @@ version = "0.1.0"
 [[package]]
 name = "admissionlab-recipes"
 version = "0.1.0"
+dependencies = [
+ "admissionlab-spec",
+ "serde",
+ "serde_norway",
+ "thiserror",
+]
 
 [[package]]
 name = "admissionlab-report"

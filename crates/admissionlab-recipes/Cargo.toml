@@ -7,3 +7,38 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `Capability` / `InstallMethod` / `ReadinessCheck` / `RecipeNormalizeRule`
+# (Controller Ruling R30, Task 2.5): `admissionlab-spec` owns the
+# resolved install/readiness/normalize/capability vocabulary because
+# `ResolvedComponent::capabilities` already references `Capability` and
+# `admissionlab-spec` must stay a leaf crate -- this crate reuses those
+# types from there rather than redefining them. `admissionlab-spec`
+# depends on none of this workspace's other crates, so this is a safe,
+# one-way edge -- the same shape `admissionlab-installer`'s own
+# dependency on `admissionlab-spec` already has. Deliberately NOT a
+# dependency on `admissionlab-diff` or `admissionlab-policy`: PRODUCT.md
+# §14 / Global Constraint 6 require this crate to carry no regression-
+# classification logic at all, and neither of those crates is even
+# reachable from here to begin with (verify with `cargo metadata
+# --no-deps`, not by grepping this file -- Task 2.5's own report records
+# that check).
+admissionlab-spec = { workspace = true }
+# The recipe YAML schema (`model::RawRecipe` and friends) is parsed with
+# `serde`'s derive macros, the same `rename_all = "camelCase",
+# deny_unknown_fields` convention `admissionlab-spec::model` documents
+# and uses throughout -- deny_unknown_fields is exactly what makes an
+# unrecognized key (`failOn`, `severity`, or anything else PRODUCT.md
+# §14 does not list) a hard parse error at every nesting level, not
+# merely at the top of the document.
+serde = { workspace = true, features = ["derive"] }
+# Recipe documents are YAML, parsed the same way `admissionlab-spec`
+# parses `admissionlab.yaml` (`serde_norway::from_str`) -- see the root
+# `Cargo.toml`'s comment on this dependency for why `serde_norway`
+# rather than the archived `serde_yaml`.
+serde_norway = { workspace = true }
+# `RecipeError`'s variants (failed read, failed parse, failed semantic
+# validation) mirror `admissionlab_spec::SpecError`'s own shape and use
+# the same `#[derive(Error)]` convention.
+thiserror = { workspace = true }

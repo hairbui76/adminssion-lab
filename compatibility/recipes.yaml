@@ -1,0 +1,107 @@
+# Which recipe x Kubernetes version combinations Admission Lab certifies,
+# and why -- a different question from `compatibility/kubernetes.yaml`
+# (which Kubernetes versions Admission Lab itself provisions at all;
+# 1.35.8 / 1.36.4 (primary) / 1.37.0 as of this writing). Controller
+# Ruling R28 (Task 2.5): a recipe's own documented Kubernetes support can
+# be -- and, for at least one Alpha recipe below, is -- narrower than
+# that overall matrix. This file exists to make that distinction
+# expressible, not to assume every recipe automatically covers whatever
+# Admission Lab itself supports.
+#
+# This file has no Rust loader yet -- nothing in this workspace consults
+# it programmatically today. `crates/admissionlab-recipes/tests/load.rs`
+# still parses and asserts against it directly (a small, test-local
+# struct, not a public API), so a bad hand-edit here fails CI immediately
+# rather than silently drifting unnoticed; a typed, `pub` consumer is left
+# to whichever later task first has a concrete reason to read this file
+# at runtime (plausibly Task 2.8/2.9's own certification tooling, or a
+# future `doctor`-style preflight check).
+#
+# Shape, per entry under `recipes:`:
+#
+#   - name: the recipe's name (matches `Recipe::name`).
+#     version: the recipe's own pinned version (matches `Recipe::version`).
+#     kubernetes:
+#       documentedRange: the Kubernetes minor-version window the
+#         vendor's OWN documentation states for this recipe version, at
+#         exactly the granularity the vendor states it (a minor, not a
+#         fabricated patch-level claim the vendor never made). A chart's
+#         `Chart.yaml` `kubeVersion` field is deliberately NOT used for
+#         this by itself: an open lower bound with no upper bound (for
+#         example `>=1.25.0-0`) is Helm's own install-time gate, not a
+#         compatibility guarantee -- Helm will happily install a chart
+#         on a Kubernetes version its own maintainers never tested
+#         against. An absent or unbounded constraint means "unknown,"
+#         never "supported" (Global Constraint 15: missing data is
+#         unavailable/unknown, never fabricated). Explicitly `null`
+#         (never silently omitted) when no vendor statement was found at
+#         all, so a reader can tell "no vendor statement exists" apart
+#         from "someone forgot to fill this in."
+#       certified: the exact set of Kubernetes PATCH versions -- always
+#         a subset of `compatibility/kubernetes.yaml`'s own
+#         `supported: true` entries -- that this recipe version is
+#         DECLARED to target. Computed by intersecting `documentedRange`
+#         (when present) with Admission Lab's own supported matrix, then
+#         hand-reviewed and checked in here exactly like
+#         `compatibility/kubernetes.yaml` itself is (a deliberate,
+#         reviewed change to this file, never derived at runtime). This
+#         is a TARGET for that recipe's own certification task to test
+#         against, not a report of tests already run: Task 2.5 (this
+#         file's origin) implements no recipe and creates no cluster --
+#         Tasks 2.8/2.9 are what actually install and verify Kyverno/
+#         Istio, against exactly the Kubernetes version(s) named here.
+#
+# Multiple entries may share a `name` over time as a recipe's pinned
+# version changes (append a new entry; do not edit an old one in place),
+# the same append-don't-mutate discipline
+# `compatibility/kubernetes.yaml` uses for a retired Kubernetes minor.
+#
+# Populated 2026-08-30, researched for Task 2.5 against
+# `.superpowers/sdd/ROADMAP/research-kyverno.md` and `research-istio.md`
+# (both fetched from upstream chart/doc sources; commands given inline in
+# each file), cross-referenced against `compatibility/kubernetes.yaml`
+# (same date): supported set 1.35.8 / 1.36.4 (primary) / 1.37.0.
+recipes:
+  - name: kyverno
+    version: "3.9.0"
+    kubernetes:
+      # kyverno.io/docs/installation/releases/ (current release line,
+      # chart 3.9.0 / appVersion v1.19.0, fetched 2026-08-30):
+      # "Kubernetes Versions Supported: v1.33 - v1.35." (with the caveat
+      # "Other Kubernetes versions may work, but are not tested and
+      # therefore no guarantees are made as to their full
+      # compatibility.") Chart.yaml itself declares
+      # `kubeVersion: '>=1.25.0-0'` -- open lower bound, no upper bound
+      # -- which per this file's header comment is not itself a
+      # compatibility guarantee.
+      documentedRange:
+        min: "1.33"
+        max: "1.35"
+      # Only 1.35.8 falls inside documentedRange. Admission Lab's own
+      # Tier-1 primary, 1.36.4, does NOT -- deliberately excluded, not
+      # an oversight: this is the exact divergence this file exists to
+      # make expressible (research-kyverno.md §1.1: "neither chart's
+      # upstream-tested range reaches 1.36 (Admission Lab's primary) or
+      # 1.37").
+      certified:
+        - "1.35.8"
+  - name: istio
+    version: "1.30.4"
+    kubernetes:
+      # Neither `istio/base` nor `istio/istiod` 1.30.4 declares a
+      # `kubeVersion` constraint in Chart.yaml (research-istio.md,
+      # opening summary), and no "Kubernetes versions supported"
+      # statement from Istio's own docs was found during that research
+      # session (unlike Kyverno's docs, which state one explicitly).
+      # Explicitly null rather than silently omitted -- see this file's
+      # header comment.
+      documentedRange: null
+      # With no documented constraint narrowing it, `certified` is the
+      # full Admission Lab supported set, including the Tier-1 primary
+      # -- unlike Kyverno's above. (This is a declared target for Task
+      # 2.9's own certification testing, not a claim that testing has
+      # already happened -- see this file's header comment.)
+      certified:
+        - "1.35.8"
+        - "1.36.4"
+        - "1.37.0"
