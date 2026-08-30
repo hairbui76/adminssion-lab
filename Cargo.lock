@@ -138,6 +138,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pki-types",
+ "serde_json",
  "thiserror",
  "time",
  "tokio",

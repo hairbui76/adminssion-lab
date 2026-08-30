@@ -15,6 +15,32 @@ metadata:
   labels:
     app.kubernetes.io/name: admissionlab-test-webhook
 spec:
+  # MUST stay 1. `caBundle` (20-webhook-configuration.yaml) is a single
+  # cluster-wide value, and this Deployment's own `bootstrap` init
+  # container is the only writer of it (`crates/admissionlab-test-webhook/src/bootstrap.rs`'s
+  # fetch-mutate-`replace`, last-write-wins, no cross-pod coordination
+  # of any kind). Every safety argument documented in that module and
+  # in `crates/admissionlab-test-webhook/src/cert.rs` about restarts and
+  # pod recreation reasons at the granularity of *one* pod; none of it
+  # composes across two pods running at once. Raise `replicas` above 1
+  # -- by hand, by a future task, or via a transient `RollingUpdate`
+  # surge pod -- and two pods independently generate two different
+  # self-signed CAs and race to overwrite the one `caBundle`, after
+  # which the Service round-robins across pods presenting certs that
+  # don't match whichever CA won the race. Neither declared readiness
+  # check catches this: `deploymentAvailable` only reads the `Available`
+  # condition and `webhookConfigurationPresent` only checks the object
+  # exists (`admissionlab-installer::readiness::evaluate`) -- neither
+  # compares the live `caBundle` against what is actually being served,
+  # so the recipe would report itself ready while the webhook is
+  # unusable. `tests/recipe_loads.rs`'s
+  # `deployment_replicas_is_pinned_to_one` pins this value so a change
+  # here fails a fast, cluster-free test rather than surfacing later as
+  # an intermittent TLS trust failure. Scaling this Deployment is not a
+  # one-line change -- it requires redesigning how the CA/caBundle are
+  # produced and agreed on (for example: elect one pod to bootstrap, or
+  # move CA generation out of the pod entirely), not just raising this
+  # number.
   replicas: 1
   selector:
     matchLabels:

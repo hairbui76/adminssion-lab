@@ -24,6 +24,7 @@
 use std::path::{Path, PathBuf};
 
 use admissionlab_core::RunId;
+use admissionlab_installer::load_manifest_bundle;
 use admissionlab_recipes::{Capability, InstallMethod, ReadinessCheck, load_recipe_overrides};
 
 /// This checkout's own `recipes/test-webhook` directory — two levels
@@ -162,5 +163,63 @@ fn recipe_is_not_directly_loadable_without_the_recipe_dir_substitution() {
     assert!(
         message.contains("is relative"),
         "error must explain why (a non-absolute path), got: {message}"
+    );
+}
+
+/// Pins `30-deployment.yaml`'s `spec.replicas` at exactly `1` — see
+/// that file's own comment on the line, and
+/// `crates/admissionlab-test-webhook/src/bootstrap.rs`'s module
+/// documentation ("Every guarantee above is per-pod; none of it
+/// composes across pods"), for the full reasoning: `caBundle`
+/// (`20-webhook-configuration.yaml`) is one cluster-wide value, written
+/// last-write-wins by whichever pod's `bootstrap` init container ran
+/// last, with no cross-pod coordination at all. Two pods would each
+/// generate an independent CA and race to overwrite it, and neither of
+/// this recipe's own readiness checks (`deploymentAvailable`,
+/// `webhookConfigurationPresent`) would ever notice — both would report
+/// ready while the webhook served an untrusted certificate on whichever
+/// pod lost the race.
+///
+/// Parses the real, checked-in manifest file through
+/// `admissionlab_installer::load_manifest_bundle` (Task 2.3's own,
+/// already-tested manifest loader) rather than a hand-rolled YAML
+/// read, so this test exercises the same parsing path production code
+/// does. A future edit that raises `replicas` — by hand, or as an
+/// unnoticed side effect of some other change to this file — fails
+/// here, in a cluster-free test that runs on every `cargo test
+/// --workspace`, instead of only surfacing later as an intermittent
+/// TLS trust failure once two pods are briefly both `Running` (for
+/// example during a `RollingUpdate` surge).
+#[test]
+fn deployment_replicas_is_pinned_to_one() {
+    let deployment_manifest = recipe_dir().join("manifests/30-deployment.yaml");
+    let bundle = load_manifest_bundle(std::slice::from_ref(&deployment_manifest))
+        .expect("30-deployment.yaml must parse as valid Kubernetes manifests");
+
+    let deployment_documents: Vec<_> = bundle
+        .documents
+        .iter()
+        .filter(|document| {
+            document.get("kind").and_then(|kind| kind.as_str()) == Some("Deployment")
+        })
+        .collect();
+    assert_eq!(
+        deployment_documents.len(),
+        1,
+        "30-deployment.yaml must declare exactly one Deployment document, found: {:?}",
+        bundle.documents
+    );
+    let deployment = deployment_documents[0];
+
+    let replicas = deployment
+        .pointer("/spec/replicas")
+        .and_then(serde_json::Value::as_i64);
+    assert_eq!(
+        replicas,
+        Some(1),
+        "spec.replicas must stay pinned at 1 -- caBundle is a single cluster-wide \
+         value with no cross-pod coordination; see this test's own doc comment \
+         and crates/admissionlab-test-webhook/src/bootstrap.rs's module \
+         documentation before changing this"
     );
 }

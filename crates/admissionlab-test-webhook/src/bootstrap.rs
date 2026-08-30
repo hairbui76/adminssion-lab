@@ -44,6 +44,47 @@
 //! is fixed, absolute, and only ever meaningful inside a running pod's
 //! own filesystem.
 //!
+//! # Every guarantee above is per-pod; none of it composes across pods
+//!
+//! Read the section above again with this in mind: every safety
+//! argument in it — the ordering guarantee, the "restart doesn't
+//! re-run this" guarantee, "a fresh pod always means a fresh call to
+//! [`crate::cert::generate`]" — is reasoned entirely about *one* pod in
+//! isolation. None of it says anything about what happens if *two*
+//! pods of this Deployment ever run at once, and the honest answer is:
+//! nothing good. [`patch_ca_bundle`] writes to a single, cluster-wide
+//! `ValidatingWebhookConfiguration.webhooks[].clientConfig.caBundle` —
+//! there is exactly one of these per cluster, not one per pod — via
+//! fetch-mutate-[`Api::replace`], with no lease, no leader election, no
+//! compare-and-swap beyond what `resourceVersion` already gives a
+//! single writer racing nothing. Two pods each generate their own
+//! independent CA ([`crate::cert::generate`] takes no cluster-wide
+//! input at all — that is the entire point of "per cluster," but it
+//! also means "per pod" the moment more than one pod exists) and race
+//! to overwrite the same field with two different CAs. Whichever
+//! `replace` lands last wins `caBundle`; the `Service` in front of both
+//! pods keeps round-robining traffic to *both*, including the pod whose
+//! own serving certificate no longer matches the CA a caller now
+//! trusts.
+//!
+//! Neither of this recipe's declared readiness checks would notice:
+//! `deploymentAvailable` only reads the Deployment's own `Available`
+//! condition, and `webhookConfigurationPresent` only checks that the
+//! `ValidatingWebhookConfiguration` object exists
+//! (`admissionlab_installer::readiness::evaluate`) — neither compares
+//! the live `caBundle` against what either pod is actually serving. A
+//! scaled-up version of this recipe would report itself ready while
+//! genuinely broken.
+//!
+//! This is why `recipes/test-webhook/manifests/30-deployment.yaml` pins
+//! `replicas: 1` with a comment pointing back at this exact paragraph,
+//! and why `tests/recipe_loads.rs`'s
+//! `deployment_replicas_is_pinned_to_one` fails the moment that number
+//! changes. Raising it is not a one-line edit: it requires an actual
+//! redesign of how the CA and `caBundle` are produced and agreed on
+//! (electing a single bootstrapping pod, or moving CA generation out of
+//! the pod entirely) — not just a bigger number.
+//!
 //! # `caBundle`: retried, never assumed present on the first attempt
 //!
 //! `recipes/test-webhook/manifests/20-webhook-configuration.yaml`

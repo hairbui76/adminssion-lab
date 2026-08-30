@@ -54,11 +54,19 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # proves it resolves into a `Recipe` with the exact fields this task
 # declares — a real regression test, not just "the file exists".
 admissionlab-recipes = { workspace = true }
+# `tests/recipe_loads.rs`'s `deployment_replicas_is_pinned_to_one` also
+# parses `30-deployment.yaml` directly through this crate's own
+# `load_manifest_bundle` (Task 2.3) to assert `spec.replicas == 1` —
+# see that test's own doc comment for why this invariant is pinned.
+admissionlab-installer = { workspace = true }
 # `tests/kind_smoke.rs` (`#[ignore]`d — needs Docker and `kind`) drives
 # the recipe through the real Task 2.4/2.6 install-and-wait pipeline
 # against a real cluster, the same way `admissionlab-cluster`'s own
 # `tests/kind_smoke.rs` (Task 1.9) drives cluster creation.
 admissionlab-cluster = { workspace = true }
 admissionlab-core = { workspace = true }
-admissionlab-installer = { workspace = true }
 admissionlab-spec = { workspace = true }
+# `bundle.documents` (above) is `Vec<serde_json::Value>` --
+# `deployment_replicas_is_pinned_to_one` reads `spec.replicas` back out
+# of it via `serde_json::Value`'s own inherent methods directly.
+serde_json = { workspace = true }
