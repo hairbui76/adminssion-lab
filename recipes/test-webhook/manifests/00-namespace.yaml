@@ -1,0 +1,13 @@
+# The dedicated namespace every other object in this recipe lives in
+# (except the two cluster-scoped RBAC objects and the
+# ValidatingWebhookConfiguration itself, which have no namespace to live
+# in). Applied first — `install.paths` order in `recipe.yaml` — because
+# every namespaced object below it must be created after its own
+# namespace exists.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-test-webhook
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+    app.kubernetes.io/part-of: admission-lab

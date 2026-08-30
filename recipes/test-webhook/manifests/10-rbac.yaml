@@ -1,0 +1,59 @@
+# RBAC for the `bootstrap` init container only (see
+# `crates/admissionlab-test-webhook/src/bootstrap.rs`'s own module
+# documentation for what it does and why). The `serve` main container
+# needs none of this — it never calls the Kubernetes API at all (see
+# `crates/admissionlab-test-webhook/src/serve.rs`'s own module
+# documentation) — but Kubernetes has no per-container ServiceAccount, so
+# it receives the same token by virtue of sharing this pod. That token's
+# blast radius if ever exfiltrated from the `serve` container is exactly
+# what the ClusterRole below grants: `get`/`update` on one single named
+# object, nothing else — see this task's own report for why this was
+# judged an acceptable trade-off against the added complexity of a
+# manually projected, per-container-scoped token volume.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: admissionlab-test-webhook-bootstrap
+  namespace: admissionlab-test-webhook
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+---
+# Scoped as narrowly as the Kubernetes RBAC API allows for a
+# cluster-scoped resource: `resourceNames` restricts every rule to the
+# single, exact `ValidatingWebhookConfiguration` this recipe installs
+# (`20-webhook-configuration.yaml`) — not "any webhook configuration in
+# the cluster". `get`+`update` only: the bootstrap init container fetches
+# the object and writes the *whole* object back (`kube`'s `Api::replace`,
+# an HTTP `PUT`, which RBAC maps to the `update` verb — not `patch`,
+# which this code never calls). No `list`/`watch`/`create`/`delete`, and
+# no other `apiGroups`/`resources` at all: in particular, nothing here
+# grants access to `secrets` — the generated private key is never a
+# Kubernetes `Secret` object in the first place (see
+# `crates/admissionlab-test-webhook/src/bootstrap.rs`'s own module
+# documentation for where it actually goes instead).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: admissionlab-test-webhook-bootstrap
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+rules:
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    resourceNames: ["admissionlab-test-webhook"]
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: admissionlab-test-webhook-bootstrap
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+subjects:
+  - kind: ServiceAccount
+    name: admissionlab-test-webhook-bootstrap
+    namespace: admissionlab-test-webhook
+roleRef:
+  kind: ClusterRole
+  name: admissionlab-test-webhook-bootstrap
+  apiGroup: rbac.authorization.k8s.io

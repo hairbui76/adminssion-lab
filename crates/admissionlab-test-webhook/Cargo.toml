@@ -7,3 +7,58 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "admissionlab-test-webhook"
+path = "src/main.rs"
+
+[dependencies]
+# Two subcommands (`bootstrap`, `serve`) — see `src/main.rs`. Already a
+# workspace dependency (`admissionlab-cli`); `derive` is already enabled
+# at the workspace level.
+clap = { workspace = true }
+# `bootstrap` mode's Kubernetes API access: fetching and replacing the
+# `ValidatingWebhookConfiguration` this recipe installs, so its
+# `caBundle` reflects the CA generated for *this* cluster (see
+# `src/bootstrap.rs`'s module documentation). Default features
+# (`client`, `rustls-tls`, `ring`) already cover in-cluster config
+# discovery (`Client::try_default`) — no `derive`/`runtime` feature
+# needed, mirroring `admissionlab-installer`'s own reasoning for this
+# same dependency.
+kube = { workspace = true }
+k8s-openapi = { workspace = true }
+# `bootstrap` mode's CA and serving-certificate generation (see this
+# crate's own root-level `Cargo.toml` comment for why `rcgen` over
+# shelling out to `openssl`). `time` computes the generated certificates'
+# validity window (`rcgen` does not re-export it).
+rcgen = { workspace = true }
+time = { workspace = true }
+# `serve` mode's minimal hand-rolled HTTPS server for `/healthz` — see
+# the root `Cargo.toml`'s comments on each of these for why none of them
+# is a new dependency to the workspace's resolved graph.
+bytes = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
+tokio-rustls = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+# `tests/recipe_loads.rs` loads `recipes/test-webhook/recipe.yaml`
+# through Task 2.5's own public loader (`load_recipe_overrides`) and
+# proves it resolves into a `Recipe` with the exact fields this task
+# declares — a real regression test, not just "the file exists".
+admissionlab-recipes = { workspace = true }
+# `tests/kind_smoke.rs` (`#[ignore]`d — needs Docker and `kind`) drives
+# the recipe through the real Task 2.4/2.6 install-and-wait pipeline
+# against a real cluster, the same way `admissionlab-cluster`'s own
+# `tests/kind_smoke.rs` (Task 1.9) drives cluster creation.
+admissionlab-cluster = { workspace = true }
+admissionlab-core = { workspace = true }
+admissionlab-installer = { workspace = true }
+admissionlab-spec = { workspace = true }

@@ -1,0 +1,122 @@
+# The workload itself: one `bootstrap` init container followed by one
+# `serve` main container, sharing a single `Memory`-backed `emptyDir` for
+# certificate material (see
+# `crates/admissionlab-test-webhook/src/bootstrap.rs`'s own module
+# documentation for the full design and why this is deliberately not a
+# Kubernetes `Secret`). `image:` below must match
+# `scripts/build-test-images.sh`'s own `IMAGE_TAG` exactly — both are
+# hardcoded, cross-referencing comments in each file, since a shell
+# script and a YAML manifest have no mechanism to share one literal.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: admissionlab-test-webhook
+  namespace: admissionlab-test-webhook
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-test-webhook
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-test-webhook
+    spec:
+      # Applies to *both* containers below — Kubernetes has no
+      # per-container ServiceAccount. See `10-rbac.yaml`'s own comment
+      # for why sharing this narrowly-scoped token with the otherwise
+      # API-server-independent `serve` container was judged an
+      # acceptable trade-off.
+      serviceAccountName: admissionlab-test-webhook-bootstrap
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: bootstrap
+          image: admissionlab-test-webhook:dev
+          imagePullPolicy: IfNotPresent
+          args: ["bootstrap"]
+          env:
+            # Must match `metadata.name` of the `Service` below exactly
+            # — used to compute the serving certificate's Subject
+            # Alternative Names (`crates/admissionlab-test-webhook/src/cert.rs`).
+            - name: ADMISSIONLAB_TEST_WEBHOOK_SERVICE_NAME
+              value: admissionlab-test-webhook
+            # Must match `20-webhook-configuration.yaml`'s
+            # `metadata.name` exactly.
+            - name: ADMISSIONLAB_TEST_WEBHOOK_WEBHOOK_CONFIGURATION_NAME
+              value: admissionlab-test-webhook
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      containers:
+        - name: webhook
+          image: admissionlab-test-webhook:dev
+          imagePullPolicy: IfNotPresent
+          args: ["serve"]
+          ports:
+            - name: https
+              containerPort: 8443
+          volumeMounts:
+            - name: certs
+              mountPath: /certs
+              readOnly: true
+          # `kubelet`'s own HTTP prober never verifies a probed server's
+          # TLS certificate, so the self-signed chain of trust here is
+          # irrelevant to these probes specifically — see
+          # `crates/admissionlab-test-webhook/src/serve.rs`'s own module
+          # documentation.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+      volumes:
+        # `medium: Memory`: never spilled to the node's durable disk,
+        # not only never checked into git — see
+        # `crates/admissionlab-test-webhook/src/bootstrap.rs`'s own
+        # module documentation for the full reasoning.
+        - name: certs
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: admissionlab-test-webhook
+  namespace: admissionlab-test-webhook
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-test-webhook
+  ports:
+    - name: https
+      port: 443
+      targetPort: https

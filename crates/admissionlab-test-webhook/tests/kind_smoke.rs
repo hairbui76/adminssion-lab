@@ -1,0 +1,391 @@
+//! Real, non-mocked recipe-install smoke test for `recipes/test-webhook`
+//! (Task 2.7 brief Step 3). `#[ignore]`d — needs Docker and `kind` — in
+//! the same established style `admissionlab-cluster/tests/kind_smoke.rs`
+//! (Task 1.9) uses, so `cargo test --workspace` never requires either.
+//!
+//! End to end, this test: builds the `admissionlab-test-webhook` image
+//! and loads it into a fresh `kind` cluster by actually running
+//! `scripts/build-test-images.sh` as a real subprocess (proving that
+//! script itself works, not only that its logic *would*); loads
+//! `recipes/test-webhook/recipe.yaml` through Task 2.5's own public
+//! loader (the same `${RECIPE_DIR}` substitution
+//! `tests/recipe_loads.rs` already proves is necessary and sufficient);
+//! drives it through the real Task 2.4/2.6 install-and-wait pipeline
+//! (`admissionlab_installer::install_stack`); and — beyond what
+//! `install_stack`'s own success already proves — independently confirms
+//! the `bootstrap` init container actually did its job by fetching the
+//! live `ValidatingWebhookConfiguration` and checking its `caBundle` is
+//! now populated with real PEM certificate text, not merely that the
+//! object exists (which `install_stack`'s own `webhookConfigurationPresent`
+//! readiness check already established).
+//!
+//! What this test does *not* separately verify: that `/healthz` itself
+//! returns `200 OK` to an outside caller. `install_stack`'s own
+//! `deploymentAvailable` readiness check already cannot succeed unless
+//! the main container's `readinessProbe` (`GET /healthz` over HTTPS,
+//! `recipes/test-webhook/manifests/30-deployment.yaml`) has itself
+//! already succeeded at least `failureThreshold` times fewer than
+//! needed to fail the pod — so `DeploymentAvailable` passing is already
+//! live, real evidence `/healthz` answered correctly; a second,
+//! independent HTTP call (needing its own port-forward or `NodePort`
+//! plumbing this test does not otherwise need) would be duplicate
+//! coverage of the same underlying fact, not a new one.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::Duration;
+
+use admissionlab_cluster::{KindClusterManager, cluster_name, load_matrix, resolve_node_image};
+use admissionlab_core::{
+    ArtifactStore, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, CommandSpec,
+    ProcessRunner, RunId, RunPaths, Side, TokioProcessRunner,
+};
+use admissionlab_installer::{KubeReadinessProbe, ManifestsInstaller, install_stack};
+use admissionlab_recipes::load_recipe_overrides;
+use admissionlab_spec::{ReadinessCheck, ResolvedComponent};
+use k8s_openapi::api::admissionregistration::v1::ValidatingWebhookConfiguration;
+use kube::api::Api;
+use kube::config::{KubeConfigOptions, Kubeconfig};
+use kube::{Client, Config};
+
+/// The Kubernetes version this smoke test provisions its cluster at —
+/// Tier 1's primary supported version, the same
+/// `compatibility/kubernetes.yaml`-resolved constant
+/// `admissionlab-cluster/tests/kind_smoke.rs` and
+/// `scripts/verify-cleanup.sh` both already use.
+const KUBERNETES_VERSION: &str = "1.36.4";
+
+/// Generous bound for one `bash scripts/build-test-images.sh` run: a
+/// cold `docker build` (no layer cache) plus `kind load docker-image`.
+/// Measured on the reference machine at well under two minutes with the
+/// Rust builder base image not yet cached; this leaves comfortable
+/// headroom for a slower/loaded CI runner without letting a genuine hang
+/// stall the test indefinitely.
+const BUILD_AND_LOAD_TIMEOUT: Duration = Duration::from_secs(600);
+
+/// Bounds one component's install-plus-readiness
+/// (`admissionlab_installer::stack::install_stack`'s own
+/// `component_timeout` parameter) — generous for a slow/loaded CI
+/// runner given the image is already loaded locally (no registry pull
+/// wait), covering four small `kubectl apply` invocations plus pod
+/// scheduling, the init container's (sub-second) certificate generation,
+/// and the main container reaching `Ready`.
+const COMPONENT_TIMEOUT: Duration = Duration::from_secs(120);
+
+// ---------------------------------------------------------------------
+// Cleanup guard -- mirrors admissionlab-cluster/tests/kind_smoke.rs's
+// own `ClusterGuard` exactly (see that file's module documentation for
+// why `Drop` may only warn, never delete).
+// ---------------------------------------------------------------------
+
+struct ClusterGuard {
+    handle: Option<ClusterHandle>,
+}
+
+impl ClusterGuard {
+    fn new(handle: ClusterHandle) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    fn handle(&self) -> &ClusterHandle {
+        self.handle
+            .as_ref()
+            .expect("ClusterGuard::handle called after cleanup")
+    }
+
+    async fn cleanup(mut self, manager: &KindClusterManager) -> Result<(), ClusterError> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(());
+        };
+        match manager.delete(&handle).await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.handle = Some(handle);
+                Err(error)
+            }
+        }
+    }
+}
+
+impl Drop for ClusterGuard {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            let name = &handle.spec.name;
+            eprintln!(
+                "warning: cluster {name:?} was not confirmed deleted by this test; if it \
+                 still exists, delete it manually with: kind delete cluster --name {name}"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// The test itself.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires Docker and kind"]
+async fn test_webhook_recipe_installs_and_becomes_ready() {
+    let outcome = run_smoke_test().await;
+    outcome.expect("test-webhook recipe install smoke test");
+}
+
+async fn run_smoke_test() -> Result<(), String> {
+    let manager = KindClusterManager::new(Arc::new(TokioProcessRunner::new()));
+    let runner = TokioProcessRunner::new();
+
+    let root = unique_root();
+    let store = ArtifactStore::new(&root);
+    let run_id = RunId::generate();
+    let paths = store
+        .create_run(&run_id)
+        .await
+        .map_err(|error| format!("failed to prepare a run workspace: {error}"))?;
+
+    let matrix = load_matrix()
+        .map_err(|error| format!("failed to load the compatibility matrix: {error}"))?;
+    let resolved = resolve_node_image(KUBERNETES_VERSION, &matrix)
+        .map_err(|error| format!("failed to resolve a node image: {error}"))?;
+    let name = cluster_name(Side::Baseline, &run_id)
+        .map_err(|error| format!("failed to build a cluster name: {error}"))?;
+    let spec = ClusterSpec {
+        side: Side::Baseline,
+        name,
+        kubernetes_version: resolved.version.clone(),
+        node_image: resolved.pinned_image.clone(),
+    };
+
+    let handle = manager
+        .create(&spec, &paths)
+        .await
+        .map_err(|error| format!("failed to create cluster: {error}"))?;
+    let guard = ClusterGuard::new(handle);
+
+    let check_result = install_and_verify(&runner, guard.handle()).await;
+
+    let mut problems: Vec<String> = check_result.err().into_iter().collect();
+    if let Err(error) = guard.cleanup(&manager).await {
+        problems.push(format!("failed to delete the cluster: {error}"));
+    }
+    let _ = tokio::fs::remove_dir_all(&root).await;
+
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(problems.join("\n"))
+    }
+}
+
+async fn install_and_verify(
+    runner: &dyn ProcessRunner,
+    cluster: &ClusterHandle,
+) -> Result<(), String> {
+    build_and_load_image(runner, &cluster.spec.name).await?;
+
+    let recipe_dir = write_substituted_recipe().await?;
+    let recipes = load_recipe_overrides(&recipe_dir.dir)
+        .map_err(|error| format!("failed to load recipes/test-webhook/recipe.yaml: {error}"))?;
+    let recipe = recipes
+        .into_iter()
+        .next()
+        .ok_or_else(|| "recipe.yaml produced no recipes".to_string())?;
+    // The K8s object name a `webhookConfigurationPresent` readiness
+    // check names -- not `recipe.name` (the recipe's own identifier,
+    // "test-webhook", a different string entirely from the
+    // `ValidatingWebhookConfiguration` object's own `metadata.name`,
+    // "admissionlab-test-webhook"). Read from the recipe's own declared
+    // readiness checks rather than assumed, so this assertion stays
+    // correct even if the object's name ever changes without this test
+    // file being updated by hand.
+    let webhook_configuration_name = recipe
+        .readiness
+        .iter()
+        .find_map(|check| match check {
+            ReadinessCheck::WebhookConfigurationPresent { name } => Some(name.clone()),
+            _ => None,
+        })
+        .ok_or_else(|| {
+            "recipe.yaml declares no webhookConfigurationPresent readiness check".to_string()
+        })?;
+
+    let component = ResolvedComponent {
+        name: recipe.name,
+        version: recipe.version,
+        install: recipe.install,
+        readiness: recipe.readiness,
+        recipe_normalize_rules: recipe.normalize_rules,
+        capabilities: recipe.capabilities,
+    };
+
+    let manifests_installer =
+        ManifestsInstaller::new(Arc::new(TokioProcessRunner::new()), &recipe_dir.paths);
+    let readiness_probe = KubeReadinessProbe::new();
+
+    let installed = install_stack(
+        cluster,
+        std::slice::from_ref(&component),
+        &manifests_installer,
+        &readiness_probe,
+        COMPONENT_TIMEOUT,
+    )
+    .await
+    .map_err(|error| format!("install_stack failed: {error}"))?;
+
+    if installed.components.len() != 1 || installed.components[0].component != component.name {
+        return Err(format!("unexpected InstalledStack contents: {installed:?}"));
+    }
+
+    assert_ca_bundle_populated(cluster, &webhook_configuration_name).await?;
+
+    let _ = tokio::fs::remove_dir_all(&recipe_dir.dir).await;
+    Ok(())
+}
+
+/// Runs `bash scripts/build-test-images.sh <cluster_name>` as a real
+/// subprocess through this project's own `ProcessRunner` (never a
+/// direct shell call) — see this module's own documentation for why
+/// this test drives the real script rather than reimplementing its
+/// `docker build`/`kind load` steps in Rust.
+async fn build_and_load_image(
+    runner: &dyn ProcessRunner,
+    cluster_name: &str,
+) -> Result<(), String> {
+    let repo_root = repo_root();
+    let script = repo_root.join("scripts/build-test-images.sh");
+    if !script.is_file() {
+        return Err(format!("script not found at {}", script.display()));
+    }
+
+    let spec = CommandSpec {
+        program: "bash".into(),
+        args: vec![script.into_os_string(), cluster_name.into()],
+        cwd: Some(repo_root),
+        env: BTreeMap::new(),
+        sensitive_env_keys: BTreeSet::new(),
+        timeout: BUILD_AND_LOAD_TIMEOUT,
+    };
+    let result = runner
+        .run(spec)
+        .await
+        .map_err(|error| format!("failed to run scripts/build-test-images.sh: {error}"))?;
+    if !result.status.success() {
+        return Err(format!(
+            "scripts/build-test-images.sh exited with {}\nstdout:\n{}\nstderr:\n{}",
+            result.status,
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        ));
+    }
+    Ok(())
+}
+
+/// A substituted copy of `recipes/test-webhook/recipe.yaml` (see
+/// `tests/recipe_loads.rs`'s own module documentation for why the
+/// `${RECIPE_DIR}` placeholder needs substituting at all), plus the
+/// scratch directory it lives in and the `RunPaths` `ManifestsInstaller`
+/// needs.
+struct SubstitutedRecipe {
+    dir: PathBuf,
+    paths: RunPaths,
+}
+
+async fn write_substituted_recipe() -> Result<SubstitutedRecipe, String> {
+    let source_dir = repo_root().join("recipes/test-webhook");
+    let raw = tokio::fs::read_to_string(source_dir.join("recipe.yaml"))
+        .await
+        .map_err(|error| format!("failed to read recipe.yaml: {error}"))?;
+    let absolute_manifests_dir = source_dir
+        .canonicalize()
+        .map_err(|error| format!("failed to canonicalize {}: {error}", source_dir.display()))?
+        .display()
+        .to_string();
+    let substituted = raw.replace("${RECIPE_DIR}", &absolute_manifests_dir);
+
+    let dir = unique_scratch_dir("recipe-override");
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|error| format!("failed to create scratch override directory: {error}"))?;
+    tokio::fs::write(dir.join("recipe.yaml"), substituted)
+        .await
+        .map_err(|error| format!("failed to write substituted recipe.yaml: {error}"))?;
+
+    let run_paths_root = unique_scratch_dir("run-paths");
+    let store = ArtifactStore::new(&run_paths_root);
+    let run_id = RunId::generate();
+    let paths = store
+        .create_run(&run_id)
+        .await
+        .map_err(|error| format!("failed to prepare a run workspace for the installer: {error}"))?;
+
+    Ok(SubstitutedRecipe { dir, paths })
+}
+
+/// Fetches the named `ValidatingWebhookConfiguration` from `cluster` and
+/// confirms its `caBundle` was actually populated by the `bootstrap`
+/// init container — not merely that the object exists (that much is
+/// already covered by `install_stack`'s own `webhookConfigurationPresent`
+/// readiness check).
+async fn assert_ca_bundle_populated(cluster: &ClusterHandle, name: &str) -> Result<(), String> {
+    let kubeconfig = Kubeconfig::read_from(&cluster.kubeconfig)
+        .map_err(|error| format!("failed to read kubeconfig: {error}"))?;
+    let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
+        .await
+        .map_err(|error| format!("failed to build kube config: {error}"))?;
+    let client = Client::try_from(config)
+        .map_err(|error| format!("failed to build kube client: {error}"))?;
+
+    let api: Api<ValidatingWebhookConfiguration> = Api::all(client);
+    let found = api.get(name).await.map_err(|error| {
+        format!("failed to fetch ValidatingWebhookConfiguration {name:?}: {error}")
+    })?;
+
+    let webhooks = found
+        .webhooks
+        .ok_or_else(|| format!("{name:?} has no `webhooks` field at all"))?;
+    let webhook = webhooks
+        .first()
+        .ok_or_else(|| format!("{name:?} has no `webhooks` entries"))?;
+    let ca_bundle = webhook.client_config.ca_bundle.as_ref().ok_or_else(|| {
+        "caBundle was never populated by the bootstrap init container".to_string()
+    })?;
+    if ca_bundle.0.is_empty() {
+        return Err("caBundle is present but empty".to_string());
+    }
+    let text = String::from_utf8_lossy(&ca_bundle.0);
+    if !text.contains("BEGIN CERTIFICATE") {
+        return Err(format!(
+            "caBundle does not look like a PEM certificate: {text:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// This checkout's own repository root — three levels above this
+/// crate's own `CARGO_MANIFEST_DIR`
+/// (`crates/admissionlab-test-webhook/tests` -> `crates/admissionlab-test-webhook`
+/// -> `crates` -> repo root — `CARGO_MANIFEST_DIR` already points at the
+/// crate directory, so two `..` reach the root, matching every other
+/// `CARGO_MANIFEST_DIR`-anchored path in this workspace's own test
+/// suites).
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("this crate's own CARGO_MANIFEST_DIR/../.. must exist")
+}
+
+/// A fresh, guaranteed-unique scratch directory under the OS temp dir.
+fn unique_scratch_dir(label: &str) -> PathBuf {
+    let unique = RunId::generate();
+    std::env::temp_dir().join(format!(
+        "admissionlab-test-webhook-{label}-{}",
+        unique.as_str()
+    ))
+}
+
+fn unique_root() -> PathBuf {
+    unique_scratch_dir("kind-smoke")
+}

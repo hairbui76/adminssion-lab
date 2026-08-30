@@ -1,0 +1,71 @@
+# A `ValidatingWebhookConfiguration` with no working admission-review
+# handler behind it yet — see `crates/admissionlab-test-webhook/src/serve.rs`'s
+# own module documentation: PRODUCT.md §30's controlled behaviors (allow,
+# deny, add label, add/remove container, and so on) are Task 3.9's job,
+# not this task's. This object exists now, applied with `caBundle`
+# omitted entirely (a Kubernetes-valid state — the API falls back to the
+# apiserver's own system trust roots, which will never trust the
+# self-signed certificate this recipe generates; irrelevant here, since
+# `namespaceSelector` below means nothing ever calls this webhook during
+# Phase 2 regardless), purely so that:
+#
+#   - Task 2.4's `webhookConfigurationPresent` readiness check
+#     (`recipe.yaml`) has a real object to observe. A webhook
+#     configuration is created at *runtime* by many real controllers
+#     (Kyverno among them — see `admissionlab-installer::readiness`'s own
+#     module documentation), so a readiness model that only waits on
+#     chart/manifest-installed objects would not reflect real-world
+#     webhook lifecycles; this recipe's own manifest installs it
+#     directly instead, but the check still needs a real object to find.
+#   - the `bootstrap` init container
+#     (`crates/admissionlab-test-webhook/src/bootstrap.rs`) has an
+#     already-applied object to update with a real `caBundle` — proving
+#     that path end to end now, ready for Task 3.9 to build real
+#     admission-review handling on top of unchanged.
+#
+# `install.paths` in `recipe.yaml` applies this file *before*
+# `30-deployment.yaml`, so in the common case this object already exists
+# by the time the bootstrap init container starts; `bootstrap` mode does
+# not assume that ordering held regardless (it retries a "not found"
+# lookup — see that module's own documentation).
+#
+# # Why this webhook can never actually fire during Phase 2
+#
+# Two independent, deliberately redundant layers, so neither one alone
+# has to be perfectly relied on:
+#
+#   1. `namespaceSelector` requires the opt-in label below. Nothing in
+#      this repository's own Phase 2 tests creates a namespace carrying
+#      it, so the API server never even considers routing a request
+#      here — structural, not merely "there is no handler yet".
+#   2. `failurePolicy: Ignore`: even a request that somehow matched
+#      anyway, calling a server with no route for `/validate` at all
+#      (`serve` mode implements only `GET /healthz`), is treated as
+#      "webhook skipped" rather than a cluster-wide admission failure.
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: admissionlab-test-webhook
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+webhooks:
+  - name: validate.test-webhook.admissionlab.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    matchPolicy: Equivalent
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+    namespaceSelector:
+      matchLabels:
+        admissionlab.dev/test-webhook: "enabled"
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+    clientConfig:
+      service:
+        name: admissionlab-test-webhook
+        namespace: admissionlab-test-webhook
+        path: /validate
+        port: 443

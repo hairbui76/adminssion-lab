@@ -10,11 +10,38 @@ repository = "https://github.com/hairbui76/adminssion-lab"
 [workspace.dependencies]
 admissionlab-cluster = { path = "crates/admissionlab-cluster" }
 admissionlab-core = { path = "crates/admissionlab-core" }
+# `admissionlab-test-webhook`'s `tests/kind_smoke.rs` (Task 2.7) is the
+# first cross-crate consumer of this crate — drives a resolved recipe's
+# component through the real Task 2.6 install-and-wait pipeline.
+admissionlab-installer = { path = "crates/admissionlab-installer" }
+# `admissionlab-test-webhook`'s `tests/recipe_loads.rs` and
+# `tests/kind_smoke.rs` (Task 2.7) are the first cross-crate consumers of
+# this crate — loading `recipes/test-webhook/recipe.yaml` through Task
+# 2.5's own public loader.
+admissionlab-recipes = { path = "crates/admissionlab-recipes" }
 admissionlab-spec = { path = "crates/admissionlab-spec" }
 assert_cmd = "2.2.2"
 async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive"] }
 globset = "0.4.20"
+# `admissionlab-test-webhook`'s `serve` mode (Task 2.7) is a minimal
+# hand-rolled HTTPS server for `/healthz` — no `axum`/`tower` framework
+# for a single static route. `bytes`/`http-body-util`/`hyper`/`hyper-util`
+# are all *already* resolved in `Cargo.lock`, transitively, via `kube`'s
+# own `rustls-tls` HTTP client stack — pinning these to the exact versions
+# `kube` already pulls in (verified against `Cargo.lock` before adding:
+# `bytes` 1.12.1; `http-body-util` 0.1.5; `hyper` 1.11.1; `hyper-util`
+# 0.1.20) adds no new crate to the dependency graph, only promotes
+# already-fetched transitive dependencies to direct ones. No separate
+# `http` entry: `hyper` itself re-exports every `http::` type this crate
+# needs (`Request`/`Response`/`StatusCode`/`Method`; confirmed by reading
+# `hyper-1.11.1/src/lib.rs`'s own `pub use http::{...}` line), so naming
+# `http` directly would be a redundant second name for the same crate.
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", features = ["http1", "server"] }
+# `tokio`: the async runtime `TokioIo` adapts hyper's IO traits onto.
+hyper-util = { version = "0.1.20", features = ["tokio"] }
 # `admissionlab-installer`'s readiness probes (Task 2.4) read `Deployment`/
 # `DaemonSet`/`Job`/webhook-configuration objects through `k8s-openapi`'s
 # generated types. `k8s-openapi` requires *exactly one* `v1_*` Kubernetes
@@ -63,6 +90,55 @@ kube = { version = "4.2.0" }
 # unconditional one, so it is never even fetched for a non-Unix target.
 nix = { version = "0.31.3", default-features = false, features = ["fs"] }
 predicates = "3.1.4"
+# `admissionlab-test-webhook`'s `bootstrap` mode (Task 2.7) generates a
+# deterministic, test-only, per-cluster CA and a CA-signed serving cert
+# for its own HTTPS listener entirely in-process — no shelling out to a
+# system `openssl` binary (which the image would then need to bundle) and
+# no private key ever touching disk outside the pod's own ephemeral,
+# memory-backed `emptyDir`. `rcgen` is the standard pure-Rust X.509
+# generation crate (no `unsafe` of its own; this workspace forbids it in
+# every crate regardless). Default features (`crypto`, `pem`, `ring`) are
+# kept: `ring` is the same crypto backend `kube`'s own `rustls-tls`
+# feature already selects (see that entry's comment below), so this adds
+# no *second* crypto backend to the graph.
+rcgen = "0.14.10"
+# The `ring`-backed TLS stack `admissionlab-test-webhook`'s `serve` mode
+# (Task 2.7) builds its own `rustls::ServerConfig` from directly (never
+# through the process-global default-provider install `kube`'s client may
+# also touch — see that crate's own module documentation for why this
+# never races: `bootstrap` and `serve` are always two separate container
+# processes, never both live in the same process). Pinned to the exact
+# version `kube`'s `rustls-tls` feature already resolves in `Cargo.lock`
+# (0.23.43), so this is a promotion of an already-fetched transitive
+# dependency to a direct one, not a new one. `default-features = false`
+# is load-bearing, not cosmetic: rustls 0.23's *default* feature set
+# pulls in `aws_lc_rs` (a second, unneeded crypto backend/C dependency)
+# alongside whatever is explicitly requested — confirmed empirically,
+# not assumed, after a first pass here without `default-features = false`
+# actually compiled `aws-lc-rs`/`aws-lc-sys` into the graph even though
+# only `ring` was named. Explicit `ring`/`std`/`tls12` matches exactly
+# what `kube`'s own `rustls-tls` feature already selects, so the whole
+# workspace still builds exactly one crypto backend. `ring` feature:
+# gives access to `rustls::crypto::ring::default_provider()`.
+rustls = { version = "0.23.43", default-features = false, features = [
+    "ring",
+    "std",
+    "tls12",
+] }
+# Parses the PEM certificate/key `rcgen` writes to the shared `emptyDir`
+# back into `rustls`'s own `CertificateDer`/`PrivateKeyDer` types, via
+# the `PemObject` trait (`CertificateDer::pem_file_iter`/
+# `PrivateKeyDer::from_pem_file`). Already resolved transitively at this
+# exact version via `rustls` itself (a promotion, not a new dependency).
+# **Not** `rustls-pemfile`, which this crate used in an earlier pass:
+# `cargo deny check` flagged it as unmaintained (RUSTSEC-2025-0134,
+# archived upstream August 2025) the moment it was added, and that
+# advisory's own text names this exact replacement ("depend directly on
+# the underlying PEM parsing code included in rustls-pki-types since
+# 1.9.0 ... via the `PemObject` trait") — this is that migration, not a
+# speculative choice. `std` feature: `default-features` alone only pulls
+# in `alloc` (`pem_file_iter`/`from_pem_file` need real file I/O).
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
 schemars = "1.2.2"
 serde = "1.0.229"
 serde_json = "1.0.151"
@@ -83,6 +159,33 @@ sha2 = "0.10.9"
 serde_norway = "0.9.42"
 thiserror = "2.0.20"
 tokio = "1.53.1"
+# `admissionlab-test-webhook`'s `serve` mode (Task 2.7) terminates TLS on
+# its own accepted `TcpStream`s directly (no reverse proxy). Pinned to the
+# exact version `kube`'s own client stack already resolves in
+# `Cargo.lock` (0.26.4) -- a promotion, not a new dependency.
+# `default-features = false` for the same reason as the `rustls` entry
+# above: `tokio-rustls`'s own `default` feature list is `["logging",
+# "tls12", "aws_lc_rs"]` (verified by reading its `Cargo.toml` directly,
+# not assumed from `cargo add`'s dry-run summary, which — confirmed
+# empirically — renders this particular alias pair misleadingly) --
+# left alone, that default silently re-introduces the second crypto
+# backend `rustls`'s own `default-features = false` above was written to
+# avoid. `ring` is deliberately not requested here: it only forwards to
+# `rustls/ring`, which this workspace's `rustls` entry already enables
+# directly.
+tokio-rustls = { version = "0.26.4", default-features = false, features = [
+    "logging",
+    "tls12",
+] }
+# `admissionlab-test-webhook`'s `bootstrap` mode (Task 2.7) computes the
+# generated CA/serving certificate's validity window
+# (`OffsetDateTime::now_utc()` plus/minus a fixed `Duration`).
+# `CertificateParams::not_before`/`not_after` are this crate's own
+# `OffsetDateTime`, which `rcgen` does not re-export, so this is a direct
+# dependency rather than reaching through `rcgen::`. Already resolved
+# transitively at 0.3.55 via `rcgen` itself -- a promotion, not a new
+# dependency.
+time = "0.3.55"
 tracing = "0.1.44"
 tracing-subscriber = "0.3.23"
 uuid = "1.26.0"
