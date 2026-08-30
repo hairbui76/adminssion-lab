@@ -312,7 +312,7 @@ fn delete_invokes_kind_with_exact_cluster_name_and_its_own_kubeconfig() {
             OsString::from("--kubeconfig"),
             OsString::from("/tmp/wherever.kubeconfig"),
         ],
-        "delete must pass --kubeconfig with this cluster's own path -- never the user's          ~/.kube/config -- so two concurrent deletes never race on          ~/.kube/config.lock (see kind.rs's delete_argv documentation)"
+        "delete must pass --kubeconfig with this cluster's own path -- never the user's ~/.kube/config -- so two concurrent deletes never race on ~/.kube/config.lock (see kind.rs's delete_argv documentation)"
     );
     // Same regression guard as the create-argv test above: `delete`
     // must not layer anything onto the child's inherited environment
@@ -709,7 +709,7 @@ fn concurrent_deletes_each_carry_their_own_kubeconfig_path() {
     );
     assert_ne!(
         kubeconfig_args[0], kubeconfig_args[1],
-        "concurrent deletes must never share a kubeconfig path -- a shared path (or the          user's own ~/.kube/config, if the flag were omitted entirely) is exactly the kind          of shared file two concurrent `kind delete cluster` invocations would lock and race          on for real"
+        "concurrent deletes must never share a kubeconfig path -- a shared path (or the user's own ~/.kube/config, if the flag were omitted entirely) is exactly the kind of shared file two concurrent `kind delete cluster` invocations would lock and race on for real"
     );
 }
 

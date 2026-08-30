@@ -23,7 +23,22 @@
 #
 # Exits non-zero and prints a line starting with "verify-cleanup: FAIL"
 # the moment any problem is detected: a bad argument, a missing `kind`/
-# `docker`, a failed create or delete, or a surviving `adlab-*` cluster.
+# `docker`, a failed create or delete, a surviving `adlab-*` cluster, or
+# `kind get clusters` itself failing (never conflated with "zero
+# clusters" -- see `fetch_clusters` below).
+#
+# Scope: this validates exactly one thing -- single-cluster, sequential
+# create/delete never leaks. Each iteration creates and deletes ONE
+# cluster before the next iteration starts; it never runs two deletes
+# concurrently, so it does NOT exercise (and cannot regress-test) the
+# concurrent-teardown kubeconfig-lock race commit 4b8241b fixed. That
+# path is covered elsewhere: at the argv level by
+# `admissionlab-cluster`'s `tests/lifecycle_unit.rs::concurrent_deletes_each_carry_their_own_kubeconfig_path`
+# (two concurrent deletes against a fake `ProcessRunner`, asserting both
+# carry their own `--kubeconfig`), and at the real-OS level by the
+# repeated real `admissionlab test` runs recorded in
+# `.superpowers/sdd/ROADMAP/task-1.10-report.md`. A PASS here says
+# nothing about concurrent teardown.
 
 set -euo pipefail
 
@@ -63,17 +78,34 @@ for tool in kind docker; do
   fi
 done
 
-# Counts how many `adlab-*` clusters `kind` currently reports. Never
-# lets a "found none" result (grep's own non-zero exit when nothing
-# matches) trip `set -e`/`pipefail` — that is the expected, passing case
-# on every iteration.
-count_adlab_clusters() {
-  kind get clusters 2>/dev/null | grep -c '^adlab-' || true
-}
-
 fail() {
   echo "verify-cleanup: FAIL — $1" >&2
   exit 1
+}
+
+# Fetches `kind get clusters`' raw output, failing loudly through
+# `fail` (never silently) if the command itself fails. This is the
+# fix for a real defect: `kind get clusters | grep -c '^adlab-' ||
+# true` prints "0" whether `kind` genuinely reported zero clusters OR
+# `kind` itself failed (a transient Docker hiccup, a timeout, an
+# output-format change) and produced no output at all -- both cases
+# are indistinguishable once `2>/dev/null` discards stderr and
+# `|| true` neutralizes the pipeline's exit status. Over an unattended
+# ~53-minute, 100-iteration run, that failure mode is realistic, not
+# hypothetical, and it is exactly the kind of leak this script exists
+# to catch -- a check that cannot fail is worse than no check, because
+# it reads as coverage. Fetching once here and deriving both the count
+# and (on a real leak) the diagnostic listing from this same captured
+# output also means there is only ever one `kind get clusters`
+# invocation per iteration to reason about, not two.
+fetch_clusters() {
+  local output
+  local status=0
+  output="$(kind get clusters 2>&1)" || status=$?
+  if [ "${status}" -ne 0 ]; then
+    fail "kind get clusters failed (exit ${status}): ${output}"
+  fi
+  printf '%s\n' "${output}"
 }
 
 echo "verify-cleanup: starting ${iterations} iteration(s), node image ${NODE_IMAGE}"
@@ -95,10 +127,11 @@ while [ "${iteration}" -le "${iterations}" ]; do
     fail "kind delete cluster failed on iteration ${iteration}"
   fi
 
-  remaining="$(count_adlab_clusters)"
+  cluster_list="$(fetch_clusters)"
+  remaining="$(printf '%s\n' "${cluster_list}" | grep -c '^adlab-' || true)"
   if [ "${remaining}" -ne 0 ]; then
     echo "verify-cleanup: surviving adlab-* cluster(s):" >&2
-    kind get clusters 2>/dev/null | grep '^adlab-' >&2 || true
+    printf '%s\n' "${cluster_list}" | grep '^adlab-' >&2 || true
     fail "${remaining} adlab-* cluster(s) still present after iteration ${iteration}"
   fi
 
