@@ -654,6 +654,23 @@ fn resolve_manifest_path(
 /// change this function does not make on its own — see
 /// [`resolve_manifest_path`]'s callers, none of which requires an
 /// `install.paths` entry to exist at recipe-resolution time today.
+///
+/// # This is input validation, not a security boundary
+///
+/// The symlink gap above is a documented limitation rather than a hole
+/// to plug, because confinement here is not what stands between a
+/// hostile recipe and the filesystem — nothing does. An **absolute**
+/// `install.paths` entry passes through [`resolve_manifest_path`]
+/// entirely unchecked, so a recipe author who wants to read `/etc` can
+/// simply write `/etc`, with no symlink and no `..` needed. Hardening
+/// this function against symlinks while that remains true would buy no
+/// safety and cost a real behavior change.
+///
+/// What this function is actually for: catching an **accidental** `..`
+/// in a checked-in, reviewed recipe — a copied path that silently
+/// escapes its directory and reads something unintended. Treat a
+/// recipe as trusted input, because it is; confine relative paths
+/// because a mistake there is easy to make and easy to miss in review.
 fn join_confined(base_dir: &Path, relative: &Path) -> Option<PathBuf> {
     let mut resolved = base_dir.to_path_buf();
     let mut depth: usize = 0;
