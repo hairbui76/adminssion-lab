@@ -6,7 +6,8 @@
 # actually a vendor's (Kyverno's, Istio's) behavior changing underneath
 # it.
 #
-# Unlike `recipes/kyverno.yaml`/`recipes/istio.yaml` (Tasks 2.8/2.9),
+# Unlike `recipes/kyverno/recipe.yaml` (Task 2.8, a real built-in as of
+# that task) and `recipes/istio/recipe.yaml` (Task 2.9, not yet added),
 # this recipe is *not* embedded as a built-in
 # (`crates/admissionlab-recipes/src/load.rs`'s `BUILTIN_RECIPES`): it
 # installs raw manifests, and `admissionlab-recipes`' own schema requires

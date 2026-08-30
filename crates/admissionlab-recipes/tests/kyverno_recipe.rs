@@ -91,18 +91,40 @@
 //! [`ClusterGuard`] is copied verbatim from
 //! `admissionlab-test-webhook/tests/kind_smoke.rs` (itself mirroring
 //! `admissionlab-cluster/tests/kind_smoke.rs`) — see that pattern's own
-//! documentation for why `Drop` only warns, never deletes. **Unlike**
+//! documentation for why `Drop` only warns, never deletes. This test
+//! uses exactly **one** [`admissionlab_core::RunPaths`] root for
+//! everything — the cluster, the Helm installer's isolated state
+//! directory, and this test's own `kubectl` cache directory — unlike
 //! `admissionlab-test-webhook/tests/kind_smoke.rs`, which leaks two
-//! scratch directories by not applying the same discipline outside its
-//! `ClusterGuard` (a recipe-override directory only removed on the
-//! success path, and a second `RunPaths` root never removed at all),
-//! this test uses exactly **one** [`admissionlab_core::RunPaths`] root
-//! for everything — the cluster, the Helm installer's isolated state
-//! directory, and this test's own `kubectl` cache directory — and
-//! removes it unconditionally in [`run_smoke_test`]'s own explicit
-//! cleanup, on every path, the same way [`ClusterGuard::cleanup`] is
-//! always called regardless of what [`install_and_verify`] found. This
-//! test also never touches the user's real `~/.kube/`,
+//! separate scratch directories by not applying the same discipline
+//! outside its own `ClusterGuard`.
+//!
+//! That one root is owned by [`ScratchRoot`], a small guard whose
+//! `Drop` removes it synchronously (`std::fs::remove_dir_all`, not
+//! `tokio::fs`): no subprocess and no `.await` are involved in deleting
+//! a local directory tree, so — unlike [`ClusterGuard`] — there is no
+//! async-in-`Drop` hazard here to design around.
+//!
+//! **Correction, found in review:** an earlier version of this file
+//! instead called `tokio::fs::remove_dir_all` exactly once, explicitly,
+//! at the very tail of [`run_smoke_test`], after
+//! [`ClusterGuard::cleanup`] had already run — genuinely unconditional
+//! for any failure *inside* [`install_and_verify`] (every one of those
+//! returns through that same tail), but **not** for the five fallible
+//! steps between creating the root directory and constructing
+//! [`ClusterGuard`] itself (`kyverno_certified_kubernetes_version`,
+//! `load_matrix`, `resolve_node_image`, `cluster_name`,
+//! `manager.create`): each is a `?` that returns before `guard` exists,
+//! bypassing that tail entirely and leaking `root`. `manager.create`
+//! failing — a `kind create cluster` failure on a loaded runner — is
+//! the operationally realistic way to trigger this, and is exactly the
+//! situation in which a test gets re-run repeatedly, compounding the
+//! leak each time. [`ScratchRoot`]'s `Drop` covers every one of those
+//! paths too, because the guard is constructed before any of them run —
+//! there is no window in this file, of any length, in which `root`
+//! exists but nothing owns removing it.
+//!
+//! This test also never touches the user's real `~/.kube/`,
 //! `~/.config/helm/`, or `~/.cache/`: every `helm`/`kubectl` invocation
 //! below is either routed through [`admissionlab_installer::HelmInstaller`]
 //! (already isolated — see that module's own documentation) or built by
@@ -163,6 +185,29 @@ const KUBECTL_TIMEOUT: Duration = Duration::from_secs(30);
 /// discipline: an explicit `--cache-dir`, never `$KUBECACHEDIR` or the
 /// operator's real `~/.kube/cache`.
 const KUBECTL_CACHE_SUBDIR: &str = "kyverno-recipe-test-kubectl-cache";
+
+// ---------------------------------------------------------------------
+// Scratch root guard. See this file's own module documentation
+// ("Cleanup discipline") for the leak this replaced and why a
+// synchronous `Drop` is safe here (unlike `ClusterGuard`'s, below).
+// ---------------------------------------------------------------------
+
+/// Owns this test's single scratch root ([`unique_root`]) and removes
+/// it, best-effort, the moment it goes out of scope -- covering every
+/// exit path from [`run_smoke_test`], including a `?` return before
+/// [`ClusterGuard`] even exists yet. Construct this immediately after
+/// computing the root path and before any fallible step, and hold it
+/// for the rest of the function; nothing else about its placement
+/// matters, since Rust drops every live local variable when a function
+/// returns through any path (an early `?`, a panic unwind, or normal
+/// completion) -- not only the one at the bottom of the source text.
+struct ScratchRoot(PathBuf);
+
+impl Drop for ScratchRoot {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 // ---------------------------------------------------------------------
 // Cleanup guard -- copied verbatim from
@@ -228,8 +273,9 @@ async fn kyverno_recipe_installs_and_enforces_fixture_policies() {
 }
 
 /// Creates one cluster, installs `kyverno`, runs both fixture scenarios,
-/// and -- regardless of what any of that finds -- always deletes the
-/// cluster and removes this test's single scratch root before
+/// and -- regardless of what any of that finds, including a failure
+/// before a cluster is even created -- always deletes the cluster (if
+/// one exists) and removes this test's single scratch root before
 /// returning. See this file's own module documentation ("Cleanup
 /// discipline").
 async fn run_smoke_test() -> Result<(), String> {
@@ -237,6 +283,11 @@ async fn run_smoke_test() -> Result<(), String> {
     let runner = TokioProcessRunner::new();
 
     let root = unique_root();
+    // Bound immediately, before any fallible step below -- see
+    // `ScratchRoot`'s own documentation for why its `Drop` alone is
+    // both necessary and sufficient to guarantee `root` never leaks,
+    // regardless of which `?` (if any) this function returns through.
+    let _scratch_root_guard = ScratchRoot(root.clone());
     let store = ArtifactStore::new(&root);
     let run_id = RunId::generate();
     let paths = store
@@ -271,12 +322,11 @@ async fn run_smoke_test() -> Result<(), String> {
     if let Err(error) = guard.cleanup(&manager).await {
         problems.push(format!("failed to delete the cluster: {error}"));
     }
-    // The one, single scratch root this whole test used (cluster
-    // workspace, Helm installer state, kubectl cache) -- removed
-    // unconditionally here, the only place it needs to be, unlike
-    // `admissionlab-test-webhook/tests/kind_smoke.rs`'s two separate
-    // roots (one cleaned only on success, one never cleaned at all).
-    let _ = tokio::fs::remove_dir_all(&root).await;
+    // No explicit removal of `root` here: `_scratch_root_guard`
+    // (bound above, before any fallible step) removes it on `Drop`,
+    // which fires here regardless of whether this is a normal return
+    // or (with `root` never having reached this point at all) an
+    // earlier `?`.
 
     if problems.is_empty() {
         Ok(())
