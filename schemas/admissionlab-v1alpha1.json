@@ -49,11 +49,11 @@
   ],
   "$defs": {
     "ComponentSpec": {
-      "description": "One admission-stack component to install into an [`EnvironmentSpec`].\n\nThis is the **user-facing YAML form**. Task 2.1 defines a separate\nresolved component model; this type only carries what a user writes\nby hand.",
+      "description": "One admission-stack component to install into an [`EnvironmentSpec`].\n\nThis is the **user-facing YAML form**. [`crate::component`] defines\nthe separate resolved component model [`crate::resolve_lab`] converts\nthis into ([`crate::ResolvedComponent`]); this type only carries what\na user writes by hand.",
       "type": "object",
       "properties": {
         "install": {
-          "description": "How to install this component, if not driven entirely by\n`recipe`. Any relative paths inside it (`HelmInstallSpec::values_files`,\n`ManifestsInstallSpec::paths`) are carried through exactly as\nwritten by this task — resolving them against the configuration\nfile's directory is part of Task 2.1's full resolved component\nmodel, along with the rest of this field's resolution.",
+          "description": "How to install this component. Required by [`crate::resolve_lab`]\n— recipe-driven installation (Task 2.5) does not exist yet, so\nthis is currently the only source of a resolved\n[`crate::InstallMethod`]. Any relative paths inside it\n(`HelmInstallSpec::values_files`, `ManifestsInstallSpec::paths`)\nare resolved against the configuration file's own directory by\n[`crate::resolve_lab`], the same as every other path in the\ndocument — see [`crate::resolve::config_directory`].",
           "anyOf": [
             {
               "$ref": "#/$defs/InstallMethodSpec"
@@ -72,7 +72,7 @@
           "default": null
         },
         "recipe": {
-          "description": "A named recipe to install this component from. Recipe resolution\nis Task 2.5's responsibility; this task only carries the name\nthrough unresolved.",
+          "description": "A named recipe to install this component from. Recipe resolution\nis Task 2.5's responsibility; this field is carried through\nunresolved and does not currently affect resolution at all — an\nexplicit `install` block (below) is required regardless of\nwhether `recipe` is also set.",
           "type": [
             "string",
             "null"
@@ -80,7 +80,7 @@
           "default": null
         },
         "version": {
-          "description": "The component's version, in whatever form its install method\nunderstands (a Helm chart version, an image tag, and so on).",
+          "description": "The component's version, in whatever form its install method\nunderstands (a Helm chart version, an image tag, and so on).\n[`crate::resolve_lab`] requires a non-empty value here *unless*\nthe install method itself carries an unambiguous version (a\npinned Helm chart version), in which case an omitted value here\ndefaults to that.",
           "type": [
             "string",
             "null"
@@ -127,18 +127,18 @@
       "additionalProperties": false
     },
     "InstallMethodSpec": {
-      "description": "The user-facing YAML form of a component's install method.\n\nThis is intentionally minimal: enough to express the two Alpha\ninstallers — a Helm chart, or a fixed set of raw manifests — exactly\nas a user would write them by hand. Task 2.1 defines the separate\n*resolved* `InstallMethod` the installer actually consumes; the two\nare distinct types by design and must not be merged or aliased.\n\nRepresented as an internally tagged enum (a `type` discriminant field\nalongside the variant's own fields), not the more common\nexternally-tagged `{helm: {...}}` shape: `serde_yaml`/`serde_norway`\nonly support externally tagged enums via an explicit YAML type tag\n(`!Helm ...`), not a wrapping single-key mapping, so external tagging\ncannot represent this the way a hand-written YAML config wants to.\nInternally tagged enums use a format-agnostic buffering strategy that\nworks with a plain mapping, giving both a natural YAML shape:\n\n```yaml\ninstall:\n  type: helm\n  chart: cert-manager\n  repo: https://charts.jetstack.io\n```\n\nand a strict one: an unrecognized `type` or a misspelled field inside\nthe variant is still a loud, named error.",
+      "description": "The user-facing YAML form of a component's install method.\n\nThis is intentionally minimal: enough to express the two Alpha\ninstallers — a Helm chart, or a fixed set of raw manifests — exactly\nas a user would write them by hand. [`crate::InstallMethod`] is the\nseparate *resolved* form the installer actually consumes; the two are\ndistinct types by design and must not be merged or aliased.\n\nRepresented as an internally tagged enum (a `type` discriminant field\nalongside the variant's own fields), not the more common\nexternally-tagged `{helm: {...}}` shape: `serde_yaml`/`serde_norway`\nonly support externally tagged enums via an explicit YAML type tag\n(`!Helm ...`), not a wrapping single-key mapping, so external tagging\ncannot represent this the way a hand-written YAML config wants to.\nInternally tagged enums use a format-agnostic buffering strategy that\nworks with a plain mapping, giving both a natural YAML shape:\n\n```yaml\ninstall:\n  type: helm\n  chart: cert-manager\n  repo: https://charts.jetstack.io\n```\n\nand a strict one: an unrecognized `type` or a misspelled field inside\nthe variant is still a loud, named error.",
       "oneOf": [
         {
           "description": "Install via a Helm chart.",
           "type": "object",
           "properties": {
             "chart": {
-              "description": "The chart reference passed to `helm install` (a repo-relative\nchart name, a local path, or an `oci://` reference).",
+              "description": "The chart reference passed to `helm install` (a repo-relative\nchart name, a local path, or an `oci://` reference). Only the\nrepo-relative form is resolvable today — see `repo`.",
               "type": "string"
             },
             "repo": {
-              "description": "The Helm repository URL to add/use, if `chart` is a bare chart\nname rather than a path or `oci://` reference.",
+              "description": "The Helm repository URL to add/use, if `chart` is a bare chart\nname rather than a path or `oci://` reference. Required by\n[`crate::resolve_lab`]: local path and `oci://` chart references\nremain syntactically valid in `chart` above, but resolution has no\nway to act on them without a registered repository, so `repo`\nmust be set for every Helm install today.",
               "type": [
                 "string",
                 "null"
@@ -150,7 +150,7 @@
               "const": "helm"
             },
             "valuesFiles": {
-              "description": "Values override files. **Not yet resolved against the\nconfiguration file's directory** — [`crate::resolve_lab`] does not\ndescend into `install` (see [`ComponentSpec::install`]); these\npaths are exactly as written until Task 2.1's resolved component\nmodel resolves them.",
+              "description": "Values override files, resolved against the configuration file's\nown directory by [`crate::resolve_lab`] — see\n[`ComponentSpec::install`] and [`crate::resolve::config_directory`].",
               "type": "array",
               "default": [],
               "items": {
@@ -158,7 +158,7 @@
               }
             },
             "version": {
-              "description": "The chart version constraint passed to `helm install --version`.",
+              "description": "The chart version passed to `helm install --version`. Required by\n[`crate::resolve_lab`] to be an exact pin, never a floating range\n— see [`crate::validate::require_pinned_helm_version`]'s\ndocumentation for exactly what counts as floating and why.",
               "type": [
                 "string",
                 "null"
@@ -177,7 +177,7 @@
           "type": "object",
           "properties": {
             "paths": {
-              "description": "Manifest file or directory paths. **Not yet resolved** — see\n[`HelmInstallSpec::values_files`]'s documentation; the same\napplies here.",
+              "description": "Manifest file or directory paths, resolved against the\nconfiguration file's own directory by [`crate::resolve_lab`] — see\n[`HelmInstallSpec::values_files`]'s documentation; the same\napplies here.",
               "type": "array",
               "items": {
                 "type": "string"

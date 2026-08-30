@@ -398,7 +398,17 @@ fn duplicate_component_names_within_an_environment_are_rejected() {
           kubernetes: "1.29.4"
           components:
             - name: cert-manager
+              install:
+                type: helm
+                chart: cert-manager
+                repo: https://charts.jetstack.io
+                version: "1.14.4"
             - name: cert-manager
+              install:
+                type: helm
+                chart: cert-manager
+                repo: https://charts.jetstack.io
+                version: "1.14.4"
         candidate:
           kubernetes: "1.29.4"
         fixtures:
@@ -433,10 +443,20 @@ fn same_component_name_in_baseline_and_candidate_is_allowed() {
           kubernetes: "1.29.4"
           components:
             - name: cert-manager
+              install:
+                type: helm
+                chart: cert-manager
+                repo: https://charts.jetstack.io
+                version: "1.14.4"
         candidate:
           kubernetes: "1.29.4"
           components:
             - name: cert-manager
+              install:
+                type: helm
+                chart: cert-manager
+                repo: https://charts.jetstack.io
+                version: "1.14.4"
         fixtures:
           include: ["fixtures/**/*.yaml"]
         "#,

@@ -114,9 +114,10 @@ pub struct EnvironmentSpec {
 
 /// One admission-stack component to install into an [`EnvironmentSpec`].
 ///
-/// This is the **user-facing YAML form**. Task 2.1 defines a separate
-/// resolved component model; this type only carries what a user writes
-/// by hand.
+/// This is the **user-facing YAML form**. [`crate::component`] defines
+/// the separate resolved component model [`crate::resolve_lab`] converts
+/// this into ([`crate::ResolvedComponent`]); this type only carries what
+/// a user writes by hand.
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ComponentSpec {
@@ -127,20 +128,28 @@ pub struct ComponentSpec {
     #[serde(default)]
     pub name: Option<String>,
     /// A named recipe to install this component from. Recipe resolution
-    /// is Task 2.5's responsibility; this task only carries the name
-    /// through unresolved.
+    /// is Task 2.5's responsibility; this field is carried through
+    /// unresolved and does not currently affect resolution at all — an
+    /// explicit `install` block (below) is required regardless of
+    /// whether `recipe` is also set.
     #[serde(default)]
     pub recipe: Option<String>,
     /// The component's version, in whatever form its install method
     /// understands (a Helm chart version, an image tag, and so on).
+    /// [`crate::resolve_lab`] requires a non-empty value here *unless*
+    /// the install method itself carries an unambiguous version (a
+    /// pinned Helm chart version), in which case an omitted value here
+    /// defaults to that.
     #[serde(default)]
     pub version: Option<String>,
-    /// How to install this component, if not driven entirely by
-    /// `recipe`. Any relative paths inside it (`HelmInstallSpec::values_files`,
-    /// `ManifestsInstallSpec::paths`) are carried through exactly as
-    /// written by this task — resolving them against the configuration
-    /// file's directory is part of Task 2.1's full resolved component
-    /// model, along with the rest of this field's resolution.
+    /// How to install this component. Required by [`crate::resolve_lab`]
+    /// — recipe-driven installation (Task 2.5) does not exist yet, so
+    /// this is currently the only source of a resolved
+    /// [`crate::InstallMethod`]. Any relative paths inside it
+    /// (`HelmInstallSpec::values_files`, `ManifestsInstallSpec::paths`)
+    /// are resolved against the configuration file's own directory by
+    /// [`crate::resolve_lab`], the same as every other path in the
+    /// document — see [`crate::resolve::config_directory`].
     #[serde(default)]
     pub install: Option<InstallMethodSpec>,
 }
@@ -149,9 +158,9 @@ pub struct ComponentSpec {
 ///
 /// This is intentionally minimal: enough to express the two Alpha
 /// installers — a Helm chart, or a fixed set of raw manifests — exactly
-/// as a user would write them by hand. Task 2.1 defines the separate
-/// *resolved* `InstallMethod` the installer actually consumes; the two
-/// are distinct types by design and must not be merged or aliased.
+/// as a user would write them by hand. [`crate::InstallMethod`] is the
+/// separate *resolved* form the installer actually consumes; the two are
+/// distinct types by design and must not be merged or aliased.
 ///
 /// Represented as an internally tagged enum (a `type` discriminant field
 /// alongside the variant's own fields), not the more common
@@ -185,20 +194,26 @@ pub enum InstallMethodSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HelmInstallSpec {
     /// The chart reference passed to `helm install` (a repo-relative
-    /// chart name, a local path, or an `oci://` reference).
+    /// chart name, a local path, or an `oci://` reference). Only the
+    /// repo-relative form is resolvable today — see `repo`.
     pub chart: String,
     /// The Helm repository URL to add/use, if `chart` is a bare chart
-    /// name rather than a path or `oci://` reference.
+    /// name rather than a path or `oci://` reference. Required by
+    /// [`crate::resolve_lab`]: local path and `oci://` chart references
+    /// remain syntactically valid in `chart` above, but resolution has no
+    /// way to act on them without a registered repository, so `repo`
+    /// must be set for every Helm install today.
     #[serde(default)]
     pub repo: Option<String>,
-    /// The chart version constraint passed to `helm install --version`.
+    /// The chart version passed to `helm install --version`. Required by
+    /// [`crate::resolve_lab`] to be an exact pin, never a floating range
+    /// — see [`crate::validate::require_pinned_helm_version`]'s
+    /// documentation for exactly what counts as floating and why.
     #[serde(default)]
     pub version: Option<String>,
-    /// Values override files. **Not yet resolved against the
-    /// configuration file's directory** — [`crate::resolve_lab`] does not
-    /// descend into `install` (see [`ComponentSpec::install`]); these
-    /// paths are exactly as written until Task 2.1's resolved component
-    /// model resolves them.
+    /// Values override files, resolved against the configuration file's
+    /// own directory by [`crate::resolve_lab`] — see
+    /// [`ComponentSpec::install`] and [`crate::resolve::config_directory`].
     #[serde(default)]
     pub values_files: Vec<PathBuf>,
 }
@@ -207,7 +222,8 @@ pub struct HelmInstallSpec {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ManifestsInstallSpec {
-    /// Manifest file or directory paths. **Not yet resolved** — see
+    /// Manifest file or directory paths, resolved against the
+    /// configuration file's own directory by [`crate::resolve_lab`] — see
     /// [`HelmInstallSpec::values_files`]'s documentation; the same
     /// applies here.
     pub paths: Vec<PathBuf>,
