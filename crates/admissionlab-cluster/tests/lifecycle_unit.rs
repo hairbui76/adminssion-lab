@@ -23,24 +23,30 @@
 //!
 //! Plus: absolute-`RunPaths` validation, kubeconfig/audit-log isolation
 //! between baseline and candidate sharing one `RunPaths`, `diagnostics`
-//! never failing, and a coupling test proving `kind.rs`'s private
+//! never failing, and (in both argv tests) that neither `create` nor
+//! `delete` layers anything onto the child's inherited environment --
+//! the invariant the no-`KUBECONFIG`-leak guarantee rests on.
+//!
+//! One check does *not* live here: the proof that `kind.rs`'s private
 //! `AUDIT_LOG_FILE_NAME` constant matches what `render_kind_config`
-//! actually configures.
+//! actually configures lives in `kind.rs`'s own inline `#[cfg(test)]`
+//! module instead, because it needs to reference that `pub(crate)`
+//! constant directly -- an external test crate like this one cannot see
+//! it, and a copy of the check living here could only ever hardcode the
+//! same literal a second time, which would not detect the constant
+//! drifting.
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::future::Future;
 use std::io;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use admissionlab_cluster::{
-    KindClusterConfigInput, KindClusterManager, cluster_name, render_kind_config,
-    validate_cluster_name,
-};
+use admissionlab_cluster::{KindClusterManager, cluster_name, validate_cluster_name};
 use admissionlab_core::{
     ArtifactStore, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, CommandResult,
     CommandSpec, ProcessError, ProcessRunner, RollbackOutcome, RunId, RunPaths, Side,
@@ -269,6 +275,14 @@ fn create_invokes_kind_with_generated_config_and_explicit_kubeconfig_path() {
             expected_kubeconfig.into_os_string(),
         ]
     );
+    // Regression guard for the no-KUBECONFIG-leak invariant (PRODUCT.md
+    // §29.2): isolation today rests entirely on `create` never layering
+    // anything onto the child's inherited environment, so a future edit
+    // that starts passing an env value through (for example a stray
+    // `KUBECONFIG` override) is caught here rather than only by a
+    // reviewer's grep of `lifecycle.rs`.
+    assert!(calls[0].env.is_empty());
+    assert!(calls[0].sensitive_env_keys.is_empty());
 }
 
 #[test]
@@ -295,6 +309,11 @@ fn delete_invokes_kind_with_exact_cluster_name() {
             OsString::from("adlab-baseline-deleteargv01"),
         ]
     );
+    // Same regression guard as the create-argv test above: `delete`
+    // must not layer anything onto the child's inherited environment
+    // either.
+    assert!(calls[0].env.is_empty());
+    assert!(calls[0].sensitive_env_keys.is_empty());
 }
 
 // ---------------------------------------------------------------------
@@ -697,42 +716,4 @@ fn diagnostics_never_fails_when_kind_cannot_be_reached() {
     );
     assert!(!diagnostics.kubeconfig_present);
     assert!(!diagnostics.audit_log_present);
-}
-
-// ---------------------------------------------------------------------
-// Coupling: kind.rs's private AUDIT_LOG_FILE_NAME constant must match
-// what render_kind_config actually configures kube-apiserver to write.
-// ---------------------------------------------------------------------
-
-#[test]
-fn audit_log_file_name_matches_what_render_kind_config_actually_configures() {
-    let rendered = render_kind_config(&KindClusterConfigInput {
-        name: "adlab-baseline-couplingtest".to_owned(),
-        node_image: "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed".to_owned(),
-        audit_policy_host_path: PathBuf::from("/tmp/adlab-coupling/audit-policy.yaml"),
-        audit_log_host_dir: PathBuf::from("/tmp/adlab-coupling/audit"),
-    })
-    .expect("render_kind_config should succeed for valid input");
-
-    let doc: serde_norway::Value =
-        serde_norway::from_str(&rendered).expect("rendered config must be valid YAML");
-    let patch_text = doc["nodes"][0]["kubeadmConfigPatches"][0]
-        .as_str()
-        .expect("kubeadmConfigPatches[0] must be a string");
-    let patch: serde_norway::Value =
-        serde_norway::from_str(patch_text).expect("embedded patch must be valid YAML");
-    let audit_log_path = patch["apiServer"]["extraArgs"]["audit-log-path"]
-        .as_str()
-        .expect("apiServer.extraArgs.audit-log-path must be a string");
-
-    let basename = Path::new(audit_log_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .expect("audit-log-path must have a file name");
-
-    // `kind.rs`'s `AUDIT_LOG_FILE_NAME` is a `pub(crate)` constant not
-    // reachable from this external test file, so this hardcodes the
-    // same literal it names -- see that constant's own documentation
-    // for why the two must be kept in sync by hand.
-    assert_eq!(basename, "kube-apiserver-audit.log");
 }

@@ -28,12 +28,24 @@ unstable-doctor-deep = []
 [dependencies]
 # Read-only lookup of the Kubernetes compatibility matrix
 # (`compatibility/kubernetes.yaml`) for `doctor`'s kubectl client/server
-# skew warning. Safe to depend on from here despite also depending on
-# `admissionlab-core`: `admissionlab-cluster` does not (and, to avoid a
-# cycle when it later needs `ProcessRunner`, must not) depend back on
-# `admissionlab-core`, and nothing depends on this bin-only crate, so
-# `admissionlab-cli -> {admissionlab-core, admissionlab-cluster}` can
-# never become a cycle.
+# skew warning. Depending on both `admissionlab-cluster` and
+# `admissionlab-core` from this bin-only crate is safe regardless of the
+# edge between those two crates themselves. The true, load-bearing
+# invariant (corrected here after Task 1.7, which added the edge this
+# comment used to forbid): `admissionlab-cluster -> admissionlab-core`
+# is a required one-way edge — `crates/admissionlab-cluster/Cargo.toml`
+# depends on `admissionlab-core` for `ProcessRunner`, `RunPaths`, `Side`,
+# and the `ClusterManager` trait its `KindClusterManager` implements —
+# and `admissionlab-core` must never depend back on `admissionlab-cluster`.
+# That reverse edge is the one that would create a cycle: Task 1.10
+# places `LabRunner<C: ClusterManager>` inside `admissionlab-core` itself,
+# and `ClusterManager::create`'s own signature already takes
+# `admissionlab-core`'s `RunPaths` (with `ClusterSpec` holding a `Side`),
+# so the trait and its data types had to live in `admissionlab-core`
+# (Controller Ruling R22) rather than in `admissionlab-cluster`. Nothing
+# depends on this bin-only crate, so `admissionlab-cli`'s own two
+# dependency edges here can never themselves become part of a cycle
+# either way.
 admissionlab-cluster = { workspace = true }
 admissionlab-core = { workspace = true }
 clap = { workspace = true }

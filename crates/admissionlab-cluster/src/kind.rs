@@ -250,3 +250,55 @@ pub(crate) fn delete_argv(name: &str) -> Vec<OsString> {
 pub(crate) fn get_clusters_argv() -> Vec<OsString> {
     vec!["get".into(), "clusters".into()]
 }
+
+/// This crate's only inline test module: every other test lives in
+/// `tests/*.rs` (see `tests/lifecycle_unit.rs`'s own module
+/// documentation), but the one check here genuinely needs to be inline.
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::AUDIT_LOG_FILE_NAME;
+    use crate::config::{KindClusterConfigInput, render_kind_config};
+
+    /// Proves [`AUDIT_LOG_FILE_NAME`] stays in sync with what
+    /// `render_kind_config` actually configures kube-apiserver to write,
+    /// by referencing the real `pub(crate)` constant directly rather than
+    /// a second hardcoded copy of the same literal. This has to live
+    /// here, inline, rather than in `tests/lifecycle_unit.rs`: an
+    /// external test crate cannot see a `pub(crate)` item, so a copy of
+    /// this check living there could only ever hardcode the literal a
+    /// second time -- which would keep passing even if
+    /// `AUDIT_LOG_FILE_NAME` alone drifted out of sync, detecting
+    /// nothing. Only an inline test can name both
+    /// `AUDIT_LOG_FILE_NAME` and `render_kind_config`'s actual output at
+    /// once and so genuinely fail on drift.
+    #[test]
+    fn audit_log_file_name_matches_what_render_kind_config_actually_configures() {
+        let rendered = render_kind_config(&KindClusterConfigInput {
+            name: "adlab-baseline-couplingtest".to_owned(),
+            node_image: "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed".to_owned(),
+            audit_policy_host_path: PathBuf::from("/tmp/adlab-coupling/audit-policy.yaml"),
+            audit_log_host_dir: PathBuf::from("/tmp/adlab-coupling/audit"),
+        })
+        .expect("render_kind_config should succeed for valid input");
+
+        let doc: serde_norway::Value =
+            serde_norway::from_str(&rendered).expect("rendered config must be valid YAML");
+        let patch_text = doc["nodes"][0]["kubeadmConfigPatches"][0]
+            .as_str()
+            .expect("kubeadmConfigPatches[0] must be a string");
+        let patch: serde_norway::Value =
+            serde_norway::from_str(patch_text).expect("embedded patch must be valid YAML");
+        let audit_log_path = patch["apiServer"]["extraArgs"]["audit-log-path"]
+            .as_str()
+            .expect("apiServer.extraArgs.audit-log-path must be a string");
+
+        let basename = Path::new(audit_log_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("audit-log-path must have a file name");
+
+        assert_eq!(basename, AUDIT_LOG_FILE_NAME);
+    }
+}
