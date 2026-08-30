@@ -121,8 +121,10 @@ struct FakeClusterManager {
     baseline_create: CreatePlan,
     candidate_create: CreatePlan,
     fail_delete: HashSet<Side>,
+    fail_resolve: bool,
     created: Mutex<Vec<Side>>,
     deleted: Mutex<Vec<Side>>,
+    resolved: Mutex<Vec<String>>,
 }
 
 impl FakeClusterManager {
@@ -131,14 +133,23 @@ impl FakeClusterManager {
             baseline_create,
             candidate_create,
             fail_delete: HashSet::new(),
+            fail_resolve: false,
             created: Mutex::new(Vec::new()),
             deleted: Mutex::new(Vec::new()),
+            resolved: Mutex::new(Vec::new()),
         }
     }
 
     /// Configures `delete` to fail for `side`'s cluster.
     fn failing_delete_for(mut self, side: Side) -> Self {
         self.fail_delete.insert(side);
+        self
+    }
+
+    /// Configures `resolve_node_image` to fail for every version it is
+    /// asked to resolve (Controller Ruling R25).
+    fn failing_resolve(mut self) -> Self {
+        self.fail_resolve = true;
         self
     }
 
@@ -151,10 +162,33 @@ impl FakeClusterManager {
     fn deleted_sides(&self) -> Vec<Side> {
         self.deleted.lock().expect("deleted mutex poisoned").clone()
     }
+
+    /// The Kubernetes version strings `resolve_node_image` was actually
+    /// asked to resolve, in call order.
+    fn resolved_versions(&self) -> Vec<String> {
+        self.resolved
+            .lock()
+            .expect("resolved mutex poisoned")
+            .clone()
+    }
 }
 
 #[async_trait]
 impl ClusterManager for FakeClusterManager {
+    async fn resolve_node_image(&self, kubernetes_version: &str) -> Result<String, ClusterError> {
+        self.resolved
+            .lock()
+            .expect("resolved mutex poisoned")
+            .push(kubernetes_version.to_owned());
+        if self.fail_resolve {
+            Err(fake_error(format!(
+                "fake: cannot resolve Kubernetes version {kubernetes_version:?}"
+            )))
+        } else {
+            Ok(format!("fake-resolved-image:{kubernetes_version}"))
+        }
+    }
+
     async fn create(
         &self,
         spec: &ClusterSpec,
@@ -406,6 +440,87 @@ fn prepare_clusters_rejects_a_relative_run_root_before_creating_anything() {
         runner.cluster_manager.created_sides().is_empty(),
         "a rejected run root must fail before any cluster creation is attempted"
     );
+}
+
+// ---------------------------------------------------------------------
+// Node image resolution (Controller Ruling R25): an unresolvable
+// version must surface as a clear error, never be passed through to
+// `create` as a bogus image.
+// ---------------------------------------------------------------------
+
+#[test]
+fn prepare_clusters_reports_an_unresolvable_version_and_never_calls_create() {
+    let (runner, options, root) = runner_with(
+        "unresolvable-version",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed).failing_resolve(),
+    );
+    let lab = minimal_resolved_lab();
+
+    let result = test_runtime().block_on(runner.prepare_clusters(&lab, &options));
+
+    match result {
+        Err(RunError::NodeImageResolutionFailed { side, .. }) => {
+            assert_eq!(
+                side,
+                Side::Baseline,
+                "resolution is attempted baseline-first; the first failure is the one reported"
+            );
+        }
+        other => panic!("expected Err(NodeImageResolutionFailed), got {other:?}"),
+    }
+
+    // The whole point: a version that cannot be resolved must never
+    // reach `create` as an unvalidated, possibly-bogus image reference.
+    assert!(
+        runner.cluster_manager.created_sides().is_empty(),
+        "an unresolvable version must fail before any cluster creation is attempted"
+    );
+    // Resolution was attempted (and failed) for baseline; candidate's
+    // resolution is never even attempted once baseline's already failed
+    // -- there is nothing to roll back either way, since resolving
+    // creates no resource, so failing fast here (unlike `create`, which
+    // must never abandon the other side) loses nothing.
+    assert_eq!(
+        runner.cluster_manager.resolved_versions(),
+        vec![lab.baseline.kubernetes.clone()]
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn prepare_clusters_resolves_both_sides_node_images_before_creating_either() {
+    let (runner, options, root) = runner_with(
+        "resolve-both",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+
+    let prepared = test_runtime()
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("both sides succeeding must succeed overall");
+
+    assert_eq!(
+        runner.cluster_manager.resolved_versions(),
+        vec![
+            lab.baseline.kubernetes.clone(),
+            lab.candidate.kubernetes.clone(),
+        ]
+    );
+    // The resolved image -- not the bare requested version -- is what
+    // ends up in the `ClusterSpec` a real `ClusterManager::create` would
+    // receive; `kubernetes_version` still carries the original request,
+    // for provenance.
+    assert_eq!(
+        prepared.baseline.spec.node_image,
+        format!("fake-resolved-image:{}", lab.baseline.kubernetes)
+    );
+    assert_eq!(
+        prepared.baseline.spec.kubernetes_version,
+        lab.baseline.kubernetes
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 // ---------------------------------------------------------------------

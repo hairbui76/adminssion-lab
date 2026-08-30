@@ -36,6 +36,34 @@ fn testdata_config(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// Writes a minimal valid lab configuration requesting `kubernetes_version`
+/// for both sides into `dir`, returning its path.
+///
+/// Mirrors `testdata/configs/minimal-valid.yaml`'s exact shape, but with
+/// a caller-chosen version rather than that shared fixture's fixed
+/// `"1.29.4"` — `admissionlab-spec`'s own test suite asserts that exact
+/// literal, so it must not change, but a real (even if stubbed-`kind`)
+/// `admissionlab test` run now genuinely resolves the configured version
+/// against the real, compiled-in `compatibility/kubernetes.yaml`
+/// (Controller Ruling R25), so tests that exercise that path need a
+/// version actually present there.
+fn write_lab_config(dir: &Path, kubernetes_version: &str) -> PathBuf {
+    let path = dir.join("admissionlab.yaml");
+    let contents = format!(
+        "apiVersion: admissionlab.io/v1alpha1\n\
+         kind: Lab\n\
+         baseline:\n\
+         \x20\x20kubernetes: \"{kubernetes_version}\"\n\
+         candidate:\n\
+         \x20\x20kubernetes: \"{kubernetes_version}\"\n\
+         fixtures:\n\
+         \x20\x20include:\n\
+         \x20\x20\x20\x20- \"fixtures/**/*.yaml\"\n"
+    );
+    std::fs::write(&path, contents).expect("failed to write test lab configuration");
+    path
+}
+
 #[test]
 fn help_lists_core_commands() {
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
@@ -253,11 +281,12 @@ fn stub_kind_verbs(invocations_log: &Path) -> Vec<String> {
 #[test]
 fn deletes_both_clusters_and_honestly_reports_the_pipeline_gap() {
     let (dir, invocations_log) = kind_stub_dir("delete-both");
+    let config = write_lab_config(&dir, "1.36.4");
 
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.env("PATH", &dir)
         .arg("test")
-        .arg(testdata_config("minimal-valid.yaml"))
+        .arg(&config)
         .assert()
         // 6 is `RunDisposition::InternalError`'s discriminant: both
         // clusters genuinely came up and were torn down, but fixture
@@ -292,11 +321,12 @@ fn deletes_both_clusters_and_honestly_reports_the_pipeline_gap() {
 #[test]
 fn keep_clusters_preserves_both_and_prints_exact_delete_commands() {
     let (dir, invocations_log) = kind_stub_dir("keep-clusters");
+    let config = write_lab_config(&dir, "1.36.4");
 
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.env("PATH", &dir)
         .arg("test")
-        .arg(testdata_config("minimal-valid.yaml"))
+        .arg(&config)
         .arg("--keep-clusters")
         .assert()
         .code(6)
@@ -318,6 +348,38 @@ fn keep_clusters_preserves_both_and_prints_exact_delete_commands() {
     assert!(
         verbs.iter().all(|verb| verb != "delete"),
         "--keep-clusters must never call `kind delete`, got:\n{verbs:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn unsupported_kubernetes_version_exits_invalid_input_before_touching_kind() {
+    // A stub `PATH` that would fail loudly if `kind` were ever invoked
+    // (see `kind_stub_dir`'s own `*) exit 1` catch-all) -- this test's
+    // whole point is that it never gets that far, so this also proves
+    // the failure is caught at resolution time, not by a `kind` command
+    // failing.
+    let (dir, invocations_log) = kind_stub_dir("unsupported-version");
+    let config = write_lab_config(&dir, "0.1.0");
+
+    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
+    cmd.env("PATH", &dir)
+        .arg("test")
+        .arg(&config)
+        .assert()
+        // 2 is `RunDisposition::InvalidInput`'s discriminant (Controller
+        // Ruling R25): an unresolvable Kubernetes version is the user's
+        // configuration at fault, discovered before any cluster is
+        // created -- not `InfrastructureFailed`.
+        .code(2)
+        .stderr(predicates::str::contains("failed to prepare lab clusters"))
+        .stderr(predicates::str::contains("0.1.0"))
+        .stdout(predicates::str::contains("created baseline cluster").not());
+
+    assert!(
+        stub_kind_verbs(&invocations_log).is_empty(),
+        "an unresolvable version must be caught before `kind` is ever invoked"
     );
 
     let _ = std::fs::remove_dir_all(&dir);

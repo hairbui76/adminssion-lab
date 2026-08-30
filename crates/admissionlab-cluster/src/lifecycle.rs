@@ -1,11 +1,14 @@
 //! [`KindClusterManager`]: the `kind`-backed
 //! [`admissionlab_core::ClusterManager`] implementation. Everything that
-//! actually brings a `kind` cluster up or down — writing the files it
-//! needs, invoking `kind` through
+//! actually brings a `kind` cluster up or down — resolving a requested
+//! Kubernetes version to a pinned node image
+//! ([`ClusterManager::resolve_node_image`], Controller Ruling R25),
+//! writing the files it needs, invoking `kind` through
 //! [`admissionlab_core::ProcessRunner`], and rolling back a partial
 //! create — lives here. `kind.rs` supplies the pure facts (argv,
 //! timeouts, naming rules) this module drives; `kubeconfig.rs` supplies
-//! kubeconfig-specific path/verification logic.
+//! kubeconfig-specific path/verification logic; `version.rs` supplies
+//! the compatibility-matrix lookup `resolve_node_image` delegates to.
 //!
 //! # Per-run, per-side file layout
 //!
@@ -77,6 +80,7 @@ use crate::audit::render_audit_policy;
 use crate::config::{KindClusterConfigInput, render_kind_config};
 use crate::kind;
 use crate::kubeconfig;
+use crate::version::{load_matrix, resolve_node_image as resolve_node_image_against_matrix};
 
 /// Every path one cluster (one `(run, side)` pair) needs, derived from a
 /// run's shared [`RunPaths`]. See the module documentation's "Per-run,
@@ -245,6 +249,30 @@ impl KindClusterManager {
 
 #[async_trait]
 impl ClusterManager for KindClusterManager {
+    async fn resolve_node_image(&self, kubernetes_version: &str) -> Result<String, ClusterError> {
+        // Synchronous under the hood (`load_matrix` embeds
+        // `compatibility/kubernetes.yaml` into the binary at compile
+        // time via `include_str!` -- see `version.rs`'s own module
+        // documentation -- so this never touches the filesystem or
+        // network), but the trait method itself is `async` for
+        // consistency with every other `ClusterManager` method, and so
+        // a caller never needs to know that *this particular*
+        // implementation happens not to await anything.
+        let matrix =
+            load_matrix().map_err(|source| ClusterError::UnresolvableKubernetesVersion {
+                requested: kubernetes_version.to_owned(),
+                reason: source.to_string(),
+            })?;
+        let resolved =
+            resolve_node_image_against_matrix(kubernetes_version, &matrix).map_err(|source| {
+                ClusterError::UnresolvableKubernetesVersion {
+                    requested: kubernetes_version.to_owned(),
+                    reason: source.to_string(),
+                }
+            })?;
+        Ok(resolved.pinned_image)
+    }
+
     async fn create(
         &self,
         spec: &ClusterSpec,

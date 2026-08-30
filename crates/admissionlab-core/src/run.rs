@@ -50,22 +50,37 @@
 //! [`ClusterError::CreateFailedWithRollback`]'s own guarantee at this
 //! higher level).
 //!
-//! # Node image resolution: a deliberate Phase 1 scope boundary
+//! # Node image resolution (Controller Ruling R25)
 //!
-//! [`ClusterSpec::node_image`] is documented as "ideally already
-//! digest-pinned... for example via `admissionlab_cluster::resolve_node_image`".
-//! That resolution needs `admissionlab-cluster`'s compatibility matrix
-//! (`compatibility/kubernetes.yaml`), which this crate cannot depend on
-//! (see above). [`build_cluster_spec`] therefore passes the configured
-//! Kubernetes version straight through as `node_image` too, unresolved
-//! and unpinned. This is a real, known gap: wiring a real
-//! `KindClusterManager` through this code path today will fail cluster
-//! creation with an honest [`ClusterError`] (`kind` rejecting an invalid
-//! image reference) rather than silently guessing a plausible-looking
-//! `kindest/node:v<version>` tag this crate has no way to validate
-//! against the supported-version matrix `doctor --deep` already checks.
-//! See this task's report for the alternatives considered and why this
-//! one was chosen.
+//! [`ClusterSpec::node_image`] must be a concrete, resolved image
+//! reference before [`ClusterManager::create`] can use it — but
+//! resolving a requested Kubernetes version into one is genuinely
+//! implementation-specific (a `kind`-backed implementation resolves
+//! against a `kindest/node` compatibility matrix; a different backend
+//! would resolve differently), so `admissionlab-core` must not embed
+//! that knowledge itself without violating Global Constraint 6 (the
+//! core stays vendor-neutral) the same way depending on
+//! `admissionlab-cluster` directly would violate Controller Ruling R22.
+//! [`ClusterManager::resolve_node_image`] is the resolution: an
+//! additional trait method, alongside `create`/`delete`/`diagnostics`,
+//! that every [`ClusterManager`] implementation supplies. Adding it does
+//! not reopen the R22 cycle — the trait was already the injected
+//! abstraction `admissionlab-cli` wires a concrete backend through, and
+//! `ClusterSpec`'s `{side, name, kubernetes_version, node_image}` shape
+//! is unchanged.
+//!
+//! [`LabRunner::prepare_clusters`] therefore resolves each side's
+//! requested version through `resolve_node_image` *before* building
+//! that side's [`ClusterSpec`], sequentially rather than concurrently:
+//! unlike `create`, resolving allocates or provisions nothing that could
+//! be leaked by bailing out on the first failure, so there is no
+//! `try_join!`-style abandonment risk to guard against, and failing fast
+//! on baseline's own bad version is strictly simpler than describing a
+//! `Baseline`/`Candidate`/`Both` outcome space for a step that can never
+//! need a rollback. A version that cannot be resolved is reported as
+//! [`RunError::NodeImageResolutionFailed`] before any cluster is ever
+//! created — never silently passed through to a backend as an
+//! unvalidated, possibly-bogus image reference.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -198,6 +213,18 @@ pub enum RunError {
     /// Creating this run's on-disk workspace failed.
     #[error("failed to prepare run workspace: {0}")]
     Workspace(#[from] ArtifactError),
+    /// `side`'s configured Kubernetes version could not be resolved to a
+    /// node image (Controller Ruling R25) — reported before any cluster
+    /// is created. See this module's documentation ("Node image
+    /// resolution") for why only one side is ever named here.
+    #[error("failed to resolve a node image for the {side} cluster: {source}")]
+    NodeImageResolutionFailed {
+        /// Which side's configured version could not be resolved.
+        side: Side,
+        /// The underlying resolution failure.
+        #[source]
+        source: Box<ClusterError>,
+    },
     /// One or both clusters failed to create. `rollback` reports what
     /// happened when `prepare_clusters` attempted to delete whichever
     /// side(s) actually came up before returning this error — empty
@@ -217,16 +244,20 @@ pub enum RunError {
 }
 
 /// Assembles a [`ClusterSpec`] for `side` in `run_id`'s run, requesting
-/// `kubernetes_version`. See this module's documentation ("Node image
-/// resolution") for why `node_image` is the same unresolved string as
-/// `kubernetes_version`.
-fn build_cluster_spec(side: Side, run_id: &RunId, kubernetes_version: &str) -> ClusterSpec {
+/// `kubernetes_version` and using the already-resolved `node_image` (see
+/// [`ClusterManager::resolve_node_image`]).
+fn build_cluster_spec(
+    side: Side,
+    run_id: &RunId,
+    kubernetes_version: &str,
+    node_image: String,
+) -> ClusterSpec {
     let short_run_id: String = run_id.as_str().chars().take(SHORT_RUN_ID_LEN).collect();
     ClusterSpec {
         side,
         name: format!("adlab-{}-{short_run_id}", side.as_str()),
         kubernetes_version: kubernetes_version.to_owned(),
-        node_image: kubernetes_version.to_owned(),
+        node_image,
     }
 }
 
@@ -308,10 +339,12 @@ impl<C: ClusterManager> LabRunner<C> {
     /// Returns [`RunError::NonAbsoluteRunRoot`] if `options.run_root` is
     /// not absolute, before anything is created. Returns
     /// [`RunError::Workspace`] if this run's on-disk workspace could not
-    /// be created. Returns [`RunError::ClusterCreationFailed`] if either
-    /// cluster failed to create — see this module's documentation for
-    /// exactly how the other, successfully created side is handled in
-    /// that case.
+    /// be created. Returns [`RunError::NodeImageResolutionFailed`] if
+    /// either side's configured Kubernetes version cannot be resolved to
+    /// a node image — before any cluster is created. Returns
+    /// [`RunError::ClusterCreationFailed`] if either cluster failed to
+    /// create — see this module's documentation for exactly how the
+    /// other, successfully created side is handled in that case.
     pub async fn prepare_clusters(
         &self,
         lab: &ResolvedLab,
@@ -324,9 +357,39 @@ impl<C: ClusterManager> LabRunner<C> {
         let run_id = RunId::generate();
         let paths = self.artifact_store.create_run(&run_id).await?;
 
-        let baseline_spec = build_cluster_spec(Side::Baseline, &run_id, &lab.baseline.kubernetes);
-        let candidate_spec =
-            build_cluster_spec(Side::Candidate, &run_id, &lab.candidate.kubernetes);
+        // Resolved sequentially (not `tokio::join!`): resolving
+        // allocates or provisions nothing, so failing fast on baseline's
+        // own bad version loses nothing and needs no rollback — see this
+        // module's documentation ("Node image resolution").
+        let baseline_image = self
+            .cluster_manager
+            .resolve_node_image(&lab.baseline.kubernetes)
+            .await
+            .map_err(|source| RunError::NodeImageResolutionFailed {
+                side: Side::Baseline,
+                source: Box::new(source),
+            })?;
+        let candidate_image = self
+            .cluster_manager
+            .resolve_node_image(&lab.candidate.kubernetes)
+            .await
+            .map_err(|source| RunError::NodeImageResolutionFailed {
+                side: Side::Candidate,
+                source: Box::new(source),
+            })?;
+
+        let baseline_spec = build_cluster_spec(
+            Side::Baseline,
+            &run_id,
+            &lab.baseline.kubernetes,
+            baseline_image,
+        );
+        let candidate_spec = build_cluster_spec(
+            Side::Candidate,
+            &run_id,
+            &lab.candidate.kubernetes,
+            candidate_image,
+        );
 
         // `tokio::join!`, never `try_join!` — see this module's
         // documentation for why: baseline and candidate are isolated, so

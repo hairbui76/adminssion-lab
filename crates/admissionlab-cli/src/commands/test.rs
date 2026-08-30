@@ -24,22 +24,28 @@
 //! # Exit codes
 //!
 //! - [`RunDisposition::InvalidInput`] (2): `args.config` failed to load
-//!   or resolve ([`load_lab`]/[`resolve_lab`]). Distinct from an
-//!   infrastructure failure — this is the user's configuration, not the
-//!   lab's infrastructure.
+//!   or resolve ([`load_lab`]/[`resolve_lab`]), *or* a configured
+//!   Kubernetes version could not be resolved to a node image
+//!   ([`RunError::NodeImageResolutionFailed`] — Controller Ruling R25).
+//!   The latter is still the user's configuration at fault (they asked
+//!   for a version Admission Lab does not know how to provision), not
+//!   the lab's infrastructure, and it is always discovered before any
+//!   cluster is created — the same reason an empty or malformed
+//!   `kubernetes:` field is `InvalidInput` rather than
+//!   `InfrastructureFailed`.
 //! - [`RunDisposition::InfrastructureFailed`] (3): cluster creation
-//!   failed, or cleanup could not fully delete both clusters. A cluster
-//!   that might still be running is a more urgent, more specific problem
-//!   than "the rest of the pipeline isn't implemented," so it earns its
-//!   own distinct code rather than being folded into the generic
-//!   not-yet-implemented outcome below.
+//!   itself failed, or cleanup could not fully delete both clusters. A
+//!   cluster that might still be running is a more urgent, more specific
+//!   problem than "the rest of the pipeline isn't implemented," so it
+//!   earns its own distinct code rather than being folded into the
+//!   generic not-yet-implemented outcome below.
 //! - [`RunDisposition::InternalError`] (6): everything this phase
 //!   implements succeeded (configuration loaded, both clusters created,
 //!   then deleted or preserved as requested) but fixture execution and
 //!   comparison — required for any real pass/fail verdict — are not
 //!   implemented yet. This is deliberately *not* `0`: nothing this run
 //!   did amounts to a completed lab, so there is no result to call a
-//!   pass.
+//!   pass, even though both clusters genuinely existed for a moment.
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -135,13 +141,25 @@ async fn run_async(args: &TestArgs) -> ExitCode {
     let prepared = match runner.prepare_clusters(&lab, &options).await {
         Ok(prepared) => prepared,
         Err(error) => {
-            eprintln!("admissionlab test: failed to create lab clusters: {error}");
+            eprintln!("admissionlab test: failed to prepare lab clusters: {error}");
             if let RunError::ClusterCreationFailed { rollback, .. } = &error {
                 for diagnostic in rollback {
                     eprintln!("admissionlab test: {}", diagnostic.message);
                 }
             }
-            return exit::code_for_disposition(RunDisposition::InfrastructureFailed);
+            // An unresolvable Kubernetes version is the user's
+            // configuration at fault (see this module's documentation)
+            // — every other `prepare_clusters` failure is a genuine
+            // infrastructure problem. Matched exhaustively (no `_` arm)
+            // so a future `RunError` variant forces a deliberate choice
+            // here rather than silently falling into one bucket.
+            let disposition = match &error {
+                RunError::NodeImageResolutionFailed { .. } => RunDisposition::InvalidInput,
+                RunError::NonAbsoluteRunRoot(_)
+                | RunError::Workspace(_)
+                | RunError::ClusterCreationFailed { .. } => RunDisposition::InfrastructureFailed,
+            };
+            return exit::code_for_disposition(disposition);
         }
     };
 
@@ -150,12 +168,18 @@ async fn run_async(args: &TestArgs) -> ExitCode {
         prepared.baseline.spec.name, prepared.candidate.spec.name
     );
 
-    if options.keep_clusters {
+    // What became of the two clusters, folded into the disclaimer below
+    // so it reads accurately — and completely, on its own, without
+    // requiring the earlier stdout lines — regardless of which mode
+    // this run took.
+    let cluster_outcome = if options.keep_clusters {
         println!("{}", preserved_cluster_report(&prepared));
+        "left running, as requested by --keep-clusters"
     } else {
         let cleanup_diagnostics = runner.cleanup(&prepared).await;
         if cleanup_diagnostics.is_empty() {
             println!("admissionlab test: baseline and candidate clusters deleted.");
+            "destroyed"
         } else {
             for diagnostic in &cleanup_diagnostics {
                 eprintln!("admissionlab test: {}", diagnostic.message);
@@ -166,12 +190,20 @@ async fn run_async(args: &TestArgs) -> ExitCode {
             );
             return exit::code_for_disposition(RunDisposition::InfrastructureFailed);
         }
-    }
+    };
 
+    // Reachable only once both clusters genuinely existed — never on a
+    // configuration or infrastructure failure above, both of which
+    // already returned their own, more specific exit code. Stated
+    // plainly and unconditionally regardless: creating and destroying
+    // (or preserving) two clusters is real infrastructure work, but it
+    // is not a lab result, so this can never read as, or be mistaken
+    // for, a pass.
     eprintln!(
         "admissionlab test: fixture execution and comparison are not implemented in this phase \
-         of Admission Lab. No fixtures were replayed and no regression comparison was \
-         performed — this is not a pass or a fail."
+         of Admission Lab. Both clusters were created and {cluster_outcome}, but no fixtures \
+         were replayed against them and no baseline/candidate behavior was compared — this is \
+         not a pass or a fail."
     );
     exit::code_for_disposition(RunDisposition::InternalError)
 }

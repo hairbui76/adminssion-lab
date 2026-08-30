@@ -268,6 +268,24 @@ pub enum ClusterError {
         /// A human-readable explanation of what was wrong with it.
         reason: String,
     },
+    /// [`ClusterManager::resolve_node_image`] could not resolve
+    /// `requested` to a concrete node image (Controller Ruling R25).
+    /// Carries only a rendered message, not the concrete error type, for
+    /// the same reason [`ClusterError::KindConfigRender`] does: the
+    /// underlying error type (for a `kind`-backed implementation,
+    /// `admissionlab_cluster::VersionError`) is owned by the downstream
+    /// crate that actually knows how to resolve a version, which this
+    /// crate must not depend on — see the module documentation.
+    #[error("cannot resolve Kubernetes version {requested:?} to a node image: {reason}")]
+    UnresolvableKubernetesVersion {
+        /// The Kubernetes version [`ClusterManager::resolve_node_image`]
+        /// was asked to resolve (for example `"1.30.4"`).
+        requested: String,
+        /// A human-readable explanation from the concrete
+        /// implementation's own resolution logic (for a `kind`-backed
+        /// implementation, `VersionError`'s own `Display`).
+        reason: String,
+    },
     /// A create attempt failed after the cluster backend reported (or
     /// might have) created a node, so a best-effort deletion was
     /// attempted to avoid leaking it (PRODUCT.md §33: "no leaked cluster
@@ -299,6 +317,32 @@ pub enum ClusterError {
 /// each other.
 #[async_trait]
 pub trait ClusterManager: Send + Sync {
+    /// Resolves `kubernetes_version` (for example `"1.30.4"` or a bare
+    /// minor like `"1.30"`) to a concrete node image reference this
+    /// implementation's [`ClusterManager::create`] can use directly as
+    /// [`ClusterSpec::node_image`] (Controller Ruling R25).
+    ///
+    /// Version-to-image resolution is implementation-specific — a
+    /// `kind`-backed implementation resolves against a `kindest/node`
+    /// compatibility matrix; a hypothetical different backend would
+    /// resolve differently, or not need this at all — which is exactly
+    /// why this lives on the trait rather than in a caller that would
+    /// otherwise have to know which concrete backend it was talking to
+    /// (Global Constraint 6: the core stays vendor-neutral). A caller
+    /// (today, `crate::run::LabRunner::prepare_clusters`) calls this
+    /// once per side, before building that side's [`ClusterSpec`], so a
+    /// requested version that cannot be resolved is reported clearly
+    /// before any cluster is ever created — never passed through to a
+    /// backend as an unvalidated, possibly-bogus image reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ClusterError::UnresolvableKubernetesVersion`] if
+    /// `kubernetes_version` cannot be resolved — for a `kind`-backed
+    /// implementation, a version outside its compatibility matrix, or
+    /// one explicitly marked no longer supported.
+    async fn resolve_node_image(&self, kubernetes_version: &str) -> Result<String, ClusterError>;
+
     /// Creates one cluster for `spec`, using `paths` to derive every
     /// file this cluster needs (its kubeconfig, audit policy, audit log
     /// directory, and rendered configuration).
