@@ -43,6 +43,81 @@
 //! with [`InstallError::UnsupportedMethod`] — none of the three `helm`
 //! invocations above ever run for it.
 //!
+//! # Helm state isolation
+//!
+//! `helm repo add` and `helm upgrade --install` (which, for a
+//! `repo/chart`-shorthand reference like `helm.chart`, resolves that
+//! reference through the local repository config/cache rather than
+//! only talking to the cluster) both read and write **local, ambient
+//! Helm client state** — by default `~/.config/helm/repositories.yaml`
+//! and `~/.cache/helm/repository`, entirely independent of
+//! `--kubeconfig`. Passing `env: BTreeMap::new()` (this module's first
+//! shape, found in review) does not opt out of that default: per
+//! [`admissionlab_core::process`]'s own documented "inherited, not
+//! exclusive" semantics, the child still inherits *this process's own*
+//! environment, so on a real host `helm repo add` would add an entry to
+//! the operator's genuine personal `~/.config/helm/repositories.yaml` —
+//! the same shape of bug Phase 1 found and fixed for `kind delete` and
+//! `~/.kube/config` (see `admissionlab_cluster::kind::delete_argv`'s
+//! documentation), one layer up: a subprocess reaching for shared user
+//! state because nothing told it where its own state should live
+//! instead. PRODUCT.md §29's safe-by-default stance is the same
+//! principle applied here.
+//!
+//! The fix, verified empirically against a real `helm` v3.15.2 binary
+//! before being written here: setting exactly two environment
+//! variables, `HELM_REPOSITORY_CONFIG` and `HELM_REPOSITORY_CACHE`
+//! (from `helm env`'s full variable list — the others are either
+//! Kubernetes-connection overrides this module already bypasses by
+//! always passing `--kubeconfig`/`--namespace`/`--version` explicitly,
+//! or (`HELM_REGISTRY_CONFIG`) OCI registry auth this module never
+//! exercises, since every [`HelmInstallSpec::chart`] reference here is a
+//! plain `repo/chart` shorthand, not `oci://`), to paths inside this
+//! run's own workspace gives complete isolation: a real `helm repo add`
+//! run this way left the operator's actual
+//! `~/.config/helm/repositories.yaml` and `~/.cache/helm/repository`
+//! byte-for-byte/file-for-file unchanged (`sha256sum` before and after
+//! matched, and a directory listing of the real cache showed no new or
+//! modified files), never touched `~/.config/helm/registry/config.json`
+//! at all, and `helm repo list` run with the same two variables listed
+//! only the isolated repository just added — not any of the operator's
+//! real ones. The same run also proved `helm repo add` creates the
+//! *entire* directory chain for both variables itself when neither
+//! exists yet, so [`HelmInstaller`] never needs to `mkdir` this
+//! directory before invoking `helm`.
+//!
+//! **Per-side, not per-run.** [`helm_state_dir`] namespaces this
+//! directory by [`admissionlab_core::Side`] —
+//! `<run's logs dir>/<side>-helm/` — not merely by run. A single shared
+//! per-run file would still let a concurrent baseline/candidate install
+//! (the shape a later stack-orchestration task is expected to use, the
+//! same way Task 1.10 already creates both clusters concurrently) race
+//! two `helm repo add` processes on the same `repositories.yaml`; giving
+//! each side its own file removes that race entirely rather than merely
+//! narrowing its window, at no extra cost (the directory is created on
+//! demand by `helm` itself either way).
+//!
+//! **Lives under [`admissionlab_core::RunPaths::logs`], not a new
+//! `RunPaths` field.** `RunPaths` already has exactly this shape of
+//! precedent: `admissionlab_cluster::lifecycle::ClusterLayout` stores
+//! each side's *generated, non-secret, backend-scratch* files (its
+//! rendered `kind` configuration, its audit policy document) directly
+//! under `paths.logs()`, side-prefixed the same way
+//! (`<side>-kind-config.yaml`). Helm's repository config/cache is the
+//! same *kind* of thing — a backend's own working state, not a captured
+//! admission object (`raw`/`normalized`), not a rendered report
+//! (`reports`), and not cluster credential material (`kubeconfigs`,
+//! which is further mode-`0600`-restricted per file — appropriate for a
+//! kubeconfig, not for a public chart repository index). Reusing `logs`
+//! avoids adding a field to a type documented as canonical for what
+//! amounts to the same category of content it already holds.
+//!
+//! [`HelmInstaller::new`] therefore takes `&RunPaths` (not only a
+//! [`ProcessRunner`]) and stores `paths.logs()`; [`ComponentInstaller::install`]'s
+//! own signature is unchanged — the per-side directory is derived
+//! inside `install` from `cluster.spec.side`, which that (unmodified)
+//! signature already provides.
+//!
 //! # Two timeouts, deliberately different
 //!
 //! Every `helm` invocation gets both an outer
@@ -61,12 +136,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use admissionlab_core::{
-    ClusterHandle, CommandResult, CommandSpec, Diagnostic, ProcessRunner, RedactedValue,
+    ClusterHandle, CommandResult, CommandSpec, Diagnostic, ProcessRunner, RedactedValue, RunPaths,
+    Side,
 };
 use admissionlab_spec::component::HelmInstallSpec;
 use admissionlab_spec::{InstallMethod, ResolvedComponent};
@@ -143,18 +219,32 @@ const GET_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 const UNCONFIRMED_VERSION: &str = "unknown";
 
 /// Drives `helm` (via a shared [`ProcessRunner`]) to install a single
-/// resolved Helm component. Holds only the runner, so one instance is
-/// safe to reuse — behind an `Arc`, as a later stack-orchestration task
-/// does — across every component of every cluster of a run.
+/// resolved Helm component. Holds the runner plus this run's own `logs`
+/// directory (see the module documentation's "Helm state isolation"
+/// section for what that directory is used for and why), so one
+/// instance is safe to reuse across every component of both clusters
+/// (baseline and candidate) of the run it was built for — the per-side
+/// directory each `install` call actually uses is derived fresh each
+/// time from `cluster.spec.side`, not fixed at construction, so a
+/// single instance correctly serves both sides.
 pub struct HelmInstaller {
     runner: Arc<dyn ProcessRunner>,
+    /// This run's [`RunPaths::logs`] directory, captured once at
+    /// construction. [`helm_state_dir`] joins this with a per-side
+    /// subdirectory name on every `install` call.
+    logs_dir: PathBuf,
 }
 
 impl HelmInstaller {
-    /// Creates an installer that drives `helm` through `runner`.
+    /// Creates an installer that drives `helm` through `runner`, storing
+    /// Helm's own client-side state (repository config and cache; see
+    /// the module documentation) under `paths`'s `logs` directory.
     #[must_use]
-    pub fn new(runner: Arc<dyn ProcessRunner>) -> Self {
-        Self { runner }
+    pub fn new(runner: Arc<dyn ProcessRunner>, paths: &RunPaths) -> Self {
+        Self {
+            runner,
+            logs_dir: paths.logs().to_path_buf(),
+        }
     }
 
     /// Runs `spec` (one `helm` invocation for `component`) and maps its
@@ -203,8 +293,9 @@ impl HelmInstaller {
         component: &str,
         helm: &HelmInstallSpec,
         kubeconfig: &Path,
+        env: &BTreeMap<OsString, OsString>,
     ) -> (String, Vec<Diagnostic>) {
-        let spec = get_metadata_spec(helm, kubeconfig);
+        let spec = get_metadata_spec(helm, kubeconfig, env);
         let context = spec.context();
         let reason = match self.runner.run(spec).await {
             Ok(result) if result.status.success() => match parse_chart_version(&result.stdout) {
@@ -250,16 +341,19 @@ impl ComponentInstaller for HelmInstaller {
         let started_at = SystemTime::now();
         let start = Instant::now();
 
-        self.run_and_check(&component.name, repo_add_spec(helm))
+        let state_dir = helm_state_dir(&self.logs_dir, cluster.spec.side);
+        let env = helm_isolation_env(&state_dir);
+
+        self.run_and_check(&component.name, repo_add_spec(helm, &env))
             .await?;
         self.run_and_check(
             &component.name,
-            upgrade_install_spec(helm, &cluster.kubeconfig),
+            upgrade_install_spec(helm, &cluster.kubeconfig, &env),
         )
         .await?;
 
         let (resolved_version, diagnostics) = self
-            .capture_resolved_version(&component.name, helm, &cluster.kubeconfig)
+            .capture_resolved_version(&component.name, helm, &cluster.kubeconfig, &env)
             .await;
 
         Ok(InstallRecord {
@@ -274,8 +368,10 @@ impl ComponentInstaller for HelmInstaller {
 }
 
 /// Builds the argv for `helm repo add <repo_name> <repo_url>
-/// --force-update`.
-fn repo_add_spec(helm: &HelmInstallSpec) -> CommandSpec {
+/// --force-update`. `env` is this invocation's Helm state isolation
+/// environment (see the module documentation); every `helm` invocation
+/// this module makes carries it.
+fn repo_add_spec(helm: &HelmInstallSpec, env: &BTreeMap<OsString, OsString>) -> CommandSpec {
     CommandSpec {
         program: HELM_PROGRAM.into(),
         args: vec![
@@ -286,15 +382,20 @@ fn repo_add_spec(helm: &HelmInstallSpec) -> CommandSpec {
             "--force-update".into(),
         ],
         cwd: None,
-        env: BTreeMap::new(),
+        env: env.clone(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: REPO_ADD_TIMEOUT,
     }
 }
 
 /// Builds the argv for `helm upgrade --install`. See the module
-/// documentation for the exact flag set and ordering rules.
-fn upgrade_install_spec(helm: &HelmInstallSpec, kubeconfig: &Path) -> CommandSpec {
+/// documentation for the exact flag set and ordering rules, and for what
+/// `env` (this invocation's Helm state isolation environment) is for.
+fn upgrade_install_spec(
+    helm: &HelmInstallSpec,
+    kubeconfig: &Path,
+    env: &BTreeMap<OsString, OsString>,
+) -> CommandSpec {
     let mut args: Vec<OsString> = vec![
         "upgrade".into(),
         "--install".into(),
@@ -324,15 +425,22 @@ fn upgrade_install_spec(helm: &HelmInstallSpec, kubeconfig: &Path) -> CommandSpe
         program: HELM_PROGRAM.into(),
         args,
         cwd: None,
-        env: BTreeMap::new(),
+        env: env.clone(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: UPGRADE_PROCESS_TIMEOUT,
     }
 }
 
 /// Builds the argv for `helm get metadata <release> --namespace
-/// <namespace> --kubeconfig <kubeconfig> -o json`.
-fn get_metadata_spec(helm: &HelmInstallSpec, kubeconfig: &Path) -> CommandSpec {
+/// <namespace> --kubeconfig <kubeconfig> -o json`. `get metadata` does
+/// not itself need repository resolution, but `env` is applied anyway
+/// for the same reason every invocation gets it — see the module
+/// documentation.
+fn get_metadata_spec(
+    helm: &HelmInstallSpec,
+    kubeconfig: &Path,
+    env: &BTreeMap<OsString, OsString>,
+) -> CommandSpec {
     CommandSpec {
         program: HELM_PROGRAM.into(),
         args: vec![
@@ -347,10 +455,39 @@ fn get_metadata_spec(helm: &HelmInstallSpec, kubeconfig: &Path) -> CommandSpec {
             "json".into(),
         ],
         cwd: None,
-        env: BTreeMap::new(),
+        env: env.clone(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: GET_METADATA_TIMEOUT,
     }
+}
+
+/// Computes the per-side directory this run's `helm` invocations store
+/// their own client state under: `<run's logs dir>/<side>-helm/`. See
+/// the module documentation's "Helm state isolation" section for why
+/// this is per-side (not per-run) and why it lives under `logs`.
+///
+/// Pure: never touches the filesystem. The directory need not already
+/// exist — `helm repo add` creates the full chain itself (verified
+/// empirically; see the module documentation).
+fn helm_state_dir(logs_dir: &Path, side: Side) -> PathBuf {
+    logs_dir.join(format!("{}-helm", side.as_str()))
+}
+
+/// Builds the `HELM_REPOSITORY_CONFIG`/`HELM_REPOSITORY_CACHE`
+/// environment that isolates every `helm` invocation in this module from
+/// the real, ambient `~/.config/helm` and `~/.cache/helm` (see the
+/// module documentation's "Helm state isolation" section).
+fn helm_isolation_env(state_dir: &Path) -> BTreeMap<OsString, OsString> {
+    let mut env = BTreeMap::new();
+    env.insert(
+        OsString::from("HELM_REPOSITORY_CONFIG"),
+        state_dir.join("repositories.yaml").into_os_string(),
+    );
+    env.insert(
+        OsString::from("HELM_REPOSITORY_CACHE"),
+        state_dir.join("repository").into_os_string(),
+    );
+    env
 }
 
 /// Formats `timeout` the way Helm's Go `time.Duration` flag parser

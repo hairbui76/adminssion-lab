@@ -26,18 +26,27 @@
 //!   (`manifests_install_method_is_rejected_without_invoking_runner`),
 //!   and the three commands run in the documented order
 //!   (`calls_happen_in_order_repo_add_then_upgrade_then_get_metadata`).
+//! - Helm state isolation from the user's real `~/.config/helm` /
+//!   `~/.cache/helm` — `helm_state_env_vars_are_set_on_every_invocation_and_point_inside_the_run_workspace`
+//!   and `helm_state_directory_differs_between_baseline_and_candidate`
+//!   (found in review; see `helm.rs`'s module documentation for the
+//!   empirical verification this is based on).
+//!   `kubeconfig_is_always_the_clusters_own_and_never_layered_via_env`
+//!   is updated accordingly: it now asserts no `KUBECONFIG` override is
+//!   ever layered in, rather than that `env` is empty outright.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::io;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use admissionlab_core::{
-    ClusterHandle, ClusterSpec, CommandResult, CommandSpec, ProcessError, ProcessRunner, Side,
+    ClusterHandle, ClusterSpec, CommandResult, CommandSpec, ProcessError, ProcessRunner, RunId,
+    RunPaths, Side,
 };
 use admissionlab_installer::{ComponentInstaller, HelmInstaller, InstallError};
 use admissionlab_spec::component::HelmInstallSpec;
@@ -54,6 +63,13 @@ use async_trait::async_trait;
 /// `exit_status` helper.
 fn exit_status(code: i32) -> ExitStatus {
     ExitStatus::from_raw(code << 8)
+}
+
+/// A fresh, arbitrary [`RunPaths`] for one test. `RunPaths::new` performs
+/// no filesystem IO, so this never touches disk; each call gets its own
+/// [`RunId`] so two tests never accidentally compute the same path.
+fn test_run_paths() -> RunPaths {
+    RunPaths::new(Path::new("/fake-run-root"), &RunId::generate())
 }
 
 /// A representative, fully resolved Helm install spec, matching the
@@ -113,6 +129,21 @@ fn cluster_handle(kubeconfig: &str) -> ClusterHandle {
         },
         kubeconfig: PathBuf::from(kubeconfig),
         audit_log: PathBuf::from("/run/adlab/baseline-audit.log"),
+    }
+}
+
+/// Like [`cluster_handle`], but for an arbitrary [`Side`] — used to prove
+/// baseline and candidate get their own, distinct Helm state directories.
+fn cluster_handle_with_side(kubeconfig: &str, side: Side) -> ClusterHandle {
+    ClusterHandle {
+        spec: ClusterSpec {
+            side,
+            name: format!("adlab-{}-testcluster01", side.as_str()),
+            kubernetes_version: "1.36.4".to_owned(),
+            node_image: "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed".to_owned(),
+        },
+        kubeconfig: PathBuf::from(kubeconfig),
+        audit_log: PathBuf::from(format!("/run/adlab/{}-audit.log", side.as_str())),
     }
 }
 
@@ -251,7 +282,8 @@ fn find_all_flag_values<'a>(args: &'a [OsString], flag: &str) -> Vec<&'a OsStrin
 #[tokio::test]
 async fn repo_add_uses_exact_argv_with_force_update() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm.clone());
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -278,7 +310,8 @@ async fn repo_add_uses_exact_argv_with_force_update() {
 #[tokio::test]
 async fn upgrade_install_uses_exact_argv_with_required_flags() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm.clone());
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -327,7 +360,8 @@ async fn upgrade_install_uses_exact_argv_with_required_flags() {
 #[tokio::test]
 async fn multiple_values_files_each_produce_their_own_values_flag() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let mut helm = default_helm_spec();
     helm.values_files = vec![
         PathBuf::from("/config/base-values.yaml"),
@@ -361,7 +395,8 @@ async fn multiple_values_files_each_produce_their_own_values_flag() {
 #[tokio::test]
 async fn set_values_use_set_string_not_set_with_dotted_keys_intact() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let mut helm = default_helm_spec();
     helm.set_values = BTreeMap::from([
         (
@@ -407,7 +442,8 @@ async fn set_values_use_set_string_not_set_with_dotted_keys_intact() {
 #[tokio::test]
 async fn kubeconfig_is_always_the_clusters_own_and_never_layered_via_env() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let distinctive_kubeconfig = "/run/adlab/run-9f2c/candidate.kubeconfig";
@@ -420,10 +456,15 @@ async fn kubeconfig_is_always_the_clusters_own_and_never_layered_via_env() {
 
     let calls = runner.calls();
     for call in &calls {
+        // The only env this installer ever sets is its own Helm state
+        // isolation (HELM_REPOSITORY_CONFIG/HELM_REPOSITORY_CACHE, proven
+        // by `helm_state_env_vars_are_set_on_every_invocation_and_point_inside_the_run_workspace`
+        // below) -- kubeconfig selection must go through --kubeconfig
+        // alone, never a KUBECONFIG env override.
         assert!(
-            call.env.is_empty(),
-            "no helm invocation may layer env vars -- kubeconfig selection must go through \
-             --kubeconfig alone, never through a KUBECONFIG env override"
+            !call.env.contains_key(&OsString::from("KUBECONFIG")),
+            "no helm invocation may layer a KUBECONFIG env override -- kubeconfig \
+             selection must go through --kubeconfig alone"
         );
         assert!(call.sensitive_env_keys.is_empty());
     }
@@ -446,7 +487,8 @@ async fn kubeconfig_is_always_the_clusters_own_and_never_layered_via_env() {
 #[tokio::test]
 async fn values_file_path_with_space_stays_one_argv_element() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let mut helm = default_helm_spec();
     helm.values_files = vec![PathBuf::from("/config/needs quoting/values.yaml")];
     let component = component_with(helm);
@@ -490,7 +532,8 @@ async fn upgrade_install_nonzero_exit_surfaces_as_install_error_with_stderr() {
             b"Error: INSTALLATION FAILED: failed post-install: timed out waiting for the condition\n",
         ),
     ));
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -530,7 +573,8 @@ async fn repo_add_nonzero_exit_surfaces_as_install_error_and_skips_upgrade() {
             b"Error: looks like \"https://example.invalid\" is not a valid chart repository\n",
         ),
     ));
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -551,7 +595,8 @@ async fn repo_add_nonzero_exit_surfaces_as_install_error_and_skips_upgrade() {
 #[tokio::test]
 async fn helm_not_found_surfaces_as_install_error_process_variant() {
     let runner = Arc::new(FakeProcessRunner::new().with("repo add", FakeOutcome::Missing));
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -577,7 +622,8 @@ async fn helm_not_found_surfaces_as_install_error_process_variant() {
 #[tokio::test]
 async fn get_metadata_success_captures_resolved_version_with_no_diagnostic() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -604,7 +650,8 @@ async fn get_metadata_nonzero_exit_leaves_resolved_version_unknown_with_diagnost
                 FakeOutcome::Failure(b"Error: release: not found\n"),
             ),
     );
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let requested_version = helm.version.clone();
     let component = component_with(helm);
@@ -633,7 +680,8 @@ async fn get_metadata_malformed_json_leaves_resolved_version_unknown_with_diagno
             .with("upgrade", FakeOutcome::Success(b""))
             .with("get metadata", FakeOutcome::Success(b"not json at all")),
     );
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -658,7 +706,8 @@ async fn get_metadata_missing_version_field_leaves_resolved_version_unknown() {
                 FakeOutcome::Success(br#"{"name":"ingress-nginx","chart":"ingress-nginx"}"#),
             ),
     );
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -680,7 +729,8 @@ async fn get_metadata_process_error_leaves_resolved_version_unknown_with_diagnos
             .with("upgrade", FakeOutcome::Success(b""))
             .with("get metadata", FakeOutcome::TimedOut),
     );
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -697,7 +747,8 @@ async fn get_metadata_process_error_leaves_resolved_version_unknown_with_diagnos
 #[tokio::test]
 async fn get_metadata_uses_json_output_flag() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm.clone());
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -729,7 +780,8 @@ async fn get_metadata_uses_json_output_flag() {
 #[tokio::test]
 async fn manifests_install_method_is_rejected_without_invoking_runner() {
     let runner = Arc::new(FakeProcessRunner::new());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let component = manifests_component();
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
@@ -748,7 +800,8 @@ async fn manifests_install_method_is_rejected_without_invoking_runner() {
 #[tokio::test]
 async fn calls_happen_in_order_repo_add_then_upgrade_then_get_metadata() {
     let runner = Arc::new(happy_path_runner());
-    let installer = HelmInstaller::new(runner.clone());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
     let helm = default_helm_spec();
     let component = component_with(helm);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
@@ -763,4 +816,121 @@ async fn calls_happen_in_order_repo_add_then_upgrade_then_get_metadata() {
     assert_eq!(step_key(&calls[0].args), "repo add");
     assert_eq!(step_key(&calls[1].args), "upgrade");
     assert_eq!(step_key(&calls[2].args), "get metadata");
+}
+
+// ---------------------------------------------------------------------
+// Helm state isolation: never the user's real ~/.config/helm or
+// ~/.cache/helm (found in review after the initial Task 2.2 report --
+// see helm.rs's module documentation for the empirical verification
+// this fix is based on).
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn helm_state_env_vars_are_set_on_every_invocation_and_point_inside_the_run_workspace() {
+    let runner = Arc::new(happy_path_runner());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
+    let helm = default_helm_spec();
+    let component = component_with(helm);
+    let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
+
+    installer
+        .install(&cluster, &component)
+        .await
+        .expect("install should succeed");
+
+    let expected_config = run_paths
+        .logs()
+        .join("baseline-helm")
+        .join("repositories.yaml")
+        .into_os_string();
+    let expected_cache = run_paths
+        .logs()
+        .join("baseline-helm")
+        .join("repository")
+        .into_os_string();
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 3);
+    for call in &calls {
+        assert_eq!(
+            call.env.get(&OsString::from("HELM_REPOSITORY_CONFIG")),
+            Some(&expected_config),
+            "HELM_REPOSITORY_CONFIG must point inside this run's own workspace, never the \
+             user's real ~/.config/helm/repositories.yaml"
+        );
+        assert_eq!(
+            call.env.get(&OsString::from("HELM_REPOSITORY_CACHE")),
+            Some(&expected_cache),
+            "HELM_REPOSITORY_CACHE must point inside this run's own workspace, never the \
+             user's real ~/.cache/helm/repository"
+        );
+        // Exactly these two keys: nothing else is layered in, so nothing
+        // else (KUBECONFIG included) can be inherited by accident either.
+        assert_eq!(call.env.len(), 2);
+        assert!(call.sensitive_env_keys.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn helm_state_directory_differs_between_baseline_and_candidate() {
+    let runner = Arc::new(happy_path_runner());
+    let run_paths = test_run_paths();
+    // One installer instance, reused for both sides -- proving the
+    // per-side directory comes from each call's own `ClusterHandle`,
+    // not from anything fixed at construction time.
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
+
+    let baseline_cluster =
+        cluster_handle_with_side("/run/adlab/baseline.kubeconfig", Side::Baseline);
+    installer
+        .install(&baseline_cluster, &component_with(default_helm_spec()))
+        .await
+        .expect("baseline install should succeed");
+
+    let candidate_cluster =
+        cluster_handle_with_side("/run/adlab/candidate.kubeconfig", Side::Candidate);
+    installer
+        .install(&candidate_cluster, &component_with(default_helm_spec()))
+        .await
+        .expect("candidate install should succeed");
+
+    let calls = runner.calls();
+    assert_eq!(
+        calls.len(),
+        6,
+        "3 helm invocations per install, for two installs"
+    );
+
+    let baseline_config = calls[0]
+        .env
+        .get(&OsString::from("HELM_REPOSITORY_CONFIG"))
+        .expect("baseline repo add must set HELM_REPOSITORY_CONFIG");
+    let candidate_config = calls[3]
+        .env
+        .get(&OsString::from("HELM_REPOSITORY_CONFIG"))
+        .expect("candidate repo add must set HELM_REPOSITORY_CONFIG");
+
+    assert_ne!(
+        baseline_config, candidate_config,
+        "baseline and candidate must never share a Helm repository config file -- sharing \
+         one would race under concurrent installs the same way `kind delete` once raced on \
+         ~/.kube/config"
+    );
+    assert_eq!(
+        baseline_config,
+        &run_paths
+            .logs()
+            .join("baseline-helm")
+            .join("repositories.yaml")
+            .into_os_string()
+    );
+    assert_eq!(
+        candidate_config,
+        &run_paths
+            .logs()
+            .join("candidate-helm")
+            .join("repositories.yaml")
+            .into_os_string()
+    );
 }
