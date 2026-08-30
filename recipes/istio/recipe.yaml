@@ -1,0 +1,83 @@
+# Istio certified install recipe (Task 2.9). See README.md in this same
+# directory for the full pin rationale, the deliberate `istio/base`
+# omission, the Kubernetes certification story, and the sidecar-
+# injection/readiness notes this file only summarizes.
+#
+# Chart pin: istio/istiod 1.30.4 only, from
+# https://istio-release.storage.googleapis.com/charts -- NOT paired with
+# istio/base, unlike almost every Istio installation guide (including
+# this project's own prior research). Verified empirically against a
+# real cluster while writing this recipe: `istiod` reaches
+# Deployment.Available=True, serves working sidecar injection, and logs
+# zero `error`-level lines (two benign `warn`s about optional CRDs being
+# absent) with ONLY this one chart installed -- see README.md for the
+# full method and log excerpts. `istio/base` supplies cluster-wide Istio
+# CustomResourceDefinitions (VirtualService, Gateway, ...) that this
+# recipe's own scope (PRODUCT.md/brief: "the minimum Istio components
+# needed for admission/sidecar injection tests") never touches; omitting
+# it is this recipe's own minimal-install decision, not an oversight.
+#
+# Kubernetes certification: `compatibility/recipes.yaml`'s own `istio`
+# entry -- not this file -- is the source of truth for which Kubernetes
+# version(s) this recipe is certified against. Unlike Kyverno,
+# `documentedRange` is explicitly `null` (no vendor kubeVersion
+# constraint, no vendor support statement found), so `certified` is
+# Admission Lab's *entire* supported set: 1.35.8, 1.36.4 (Tier-1
+# primary), 1.37.0. `crates/admissionlab-recipes/tests/istio_recipe.rs`
+# reads that `certified` list at test time -- installing this recipe
+# once per listed version -- rather than hardcoding a copy of it here,
+# so this recipe and that test cannot silently drift apart. See
+# README.md.
+#
+# No `setValues`/`valuesFiles`: this crate's recipe schema does not
+# support either field -- see `RawHelmInstall`'s own documentation in
+# `crates/admissionlab-recipes/src/model.rs`. This recipe therefore
+# installs `istiod` entirely at its default values, including the
+# `HorizontalPodAutoscaler` its chart renders unconditionally (inert on
+# a metrics-server-less `kind` cluster -- harmless, left alone). See
+# README.md.
+name: istio
+version: "1.30.4"
+install:
+  type: helm
+  # "istio/istiod": <repo_name>/<chart_name>, matching helm's own
+  # required argv form for installing from a named repository -- the
+  # same convention `recipes/kyverno/recipe.yaml` and this crate's own
+  # `tests/load.rs` example already use. The first "istio" is this
+  # recipe's own `repo_name` default (recipe name, unset below); the
+  # second is the chart's own name within that repo.
+  chart: istio/istiod
+  repo: https://istio-release.storage.googleapis.com/charts
+  version: "1.30.4"
+  # Both `istio/base` and `istio/istiod` conventionally install into
+  # `istio-system`, never their own component/release name -- written
+  # explicitly (the recipe-name default would be "istio", wrong) so a
+  # reader does not have to trace that default. `--create-namespace`
+  # (always passed by `crates/admissionlab-installer/src/helm.rs`) is
+  # load-bearing here: this chart creates no `Namespace` object itself
+  # (verified by rendering it -- zero `kind: Namespace` in the output).
+  namespace: istio-system
+readiness:
+  # The Deployment that serves the sidecar-injection webhook
+  # (`/inject`, on the `istiod` Service, port 443). Verified on a live
+  # cluster that this becoming Available=True is sufficient, by a wide
+  # and repeatable margin (~3.3s in two independent trials), to also
+  # guarantee the injector webhook's `caBundle` (below) is already
+  # patched in -- see README.md's "Sequencing" section for the full
+  # method, numbers, and why no additional poll is needed here.
+  - type: deploymentAvailable
+    namespace: istio-system
+    name: istiod
+  # Rendered directly by this chart (unlike Kyverno's webhook configs,
+  # which its controller creates at runtime) -- so this is satisfied
+  # almost immediately after `helm upgrade --install` returns, well
+  # before `istiod` itself is Available. Kept anyway as a cheap,
+  # meaningful guard against a chart-rendering regression that stops
+  # producing this object at all. See README.md for why this recipe
+  # does not also gate on `istio-validator-istio-system` (the chart's
+  # other, `failurePolicy: Ignore` webhook, scoped to Istio custom
+  # resources this recipe never installs).
+  - type: webhookConfigurationPresent
+    name: istio-sidecar-injector
+capabilities:
+  - admission

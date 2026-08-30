@@ -67,3 +67,14 @@ admissionlab-spec = { workspace = true }
 # real child processes (`kind`, `helm`, `kubectl`) progressing
 # independently at the OS level, not multiple executor threads.
 tokio = { workspace = true, features = ["rt", "macros"] }
+# `tests/istio_recipe.rs` (Task 2.9) reads a fixture Pod back as
+# `kubectl get ... -o json` and parses its `spec.initContainers`/
+# `spec.containers`/`metadata.annotations` directly, rather than a
+# jsonpath filter expression (`[?(@.name=="istio-proxy")]`) that would be
+# harder to get right for a nested structure like this -- the same
+# `serde_json::Value`-based approach
+# `admissionlab_installer::readiness` itself already takes for every
+# real readiness check. Already a workspace-pinned version (root
+# `Cargo.toml`, used directly by `admissionlab-installer`); this is only
+# a new *dev*-dependency edge, not a new crate in the dependency graph.
+serde_json = { workspace = true }

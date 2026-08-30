@@ -34,18 +34,21 @@
 //!   at runtime.
 //!
 //! [`BUILTIN_RECIPES`] carried nothing at all through Task 2.5-2.7 (this
-//! crate's own `lib.rs` module documentation). Task 2.8 adds the first
+//! crate's own `lib.rs` module documentation). Task 2.8 added the first
 //! real entry, the certified Kyverno recipe
-//! (`recipes/kyverno/recipe.yaml`) — Task 2.9's Istio recipe is not yet
-//! implemented. Kyverno installs purely via Helm (no `install.paths` at
-//! all), so it never hits `model.rs`'s private `resolve_manifests`
-//! helper's relative-path rejection the way a manifests-based recipe
-//! embedded as a built-in would — `recipes/test-webhook/recipe.yaml`'s
-//! own header comment covers why a manifests-based built-in is a
-//! harder, still-open problem this recipe does not need to solve.
-//! Adding a further real entry is a one-line addition to
-//! [`BUILTIN_RECIPES`] plus the new `recipes/<name>/recipe.yaml` file it
-//! `include_str!`s — the loading mechanism itself does not change.
+//! (`recipes/kyverno/recipe.yaml`); Task 2.9 adds the second, the
+//! certified Istio recipe (`recipes/istio/recipe.yaml`, `istio/istiod`
+//! only — see that recipe's own README.md for why `istio/base` is
+//! deliberately not a second entry here). Both install purely via Helm
+//! (no `install.paths` at all), so neither ever hits `model.rs`'s
+//! private `resolve_manifests` helper's relative-path rejection the way
+//! a manifests-based recipe embedded as a built-in would —
+//! `recipes/test-webhook/recipe.yaml`'s own header comment covers why a
+//! manifests-based built-in is a harder, still-open problem neither
+//! recipe needs to solve. Adding a further real entry is a one-line
+//! addition to [`BUILTIN_RECIPES`] plus the new
+//! `recipes/<name>/recipe.yaml` file it `include_str!`s — the loading
+//! mechanism itself does not change.
 //! [`load_builtin_recipes`] was already fully exercised end-to-end
 //! before this task (see `tests/load.rs`): it parsed and resolved
 //! whatever [`BUILTIN_RECIPES`] held, which before Task 2.8 was nothing,
@@ -101,7 +104,10 @@ const BUILTIN_RECIPES: &[(&str, &str)] = &[
         "recipes/kyverno/recipe.yaml",
         include_str!("../../../recipes/kyverno/recipe.yaml"),
     ),
-    // Task 2.9: ("recipes/istio/recipe.yaml", include_str!("../../../recipes/istio/recipe.yaml")),
+    (
+        "recipes/istio/recipe.yaml",
+        include_str!("../../../recipes/istio/recipe.yaml"),
+    ),
 ];
 
 /// Loads every built-in recipe embedded into this binary (see this

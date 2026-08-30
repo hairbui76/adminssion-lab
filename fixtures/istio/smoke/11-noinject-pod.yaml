@@ -1,0 +1,23 @@
+# Negative counterweight (Controller supplement §8): identical Pod spec
+# to `10-inject-pod.yaml`, created in
+# `admissionlab-istio-smoke-noinject` -- which carries no
+# `istio-injection` label at all -- so the sidecar injector's
+# `namespaceSelector` must not match it and this Pod must be admitted
+# completely unmodified: no `istio-init`/`istio-proxy` in
+# `spec.initContainers` (verified on a live cluster while writing this
+# recipe: the created object's `spec.initContainers` is entirely
+# absent, and it carries no `sidecar.istio.io/status` annotation).
+# Without this fixture, an injection assertion that happened to pass for
+# the wrong reason (for example, a webhook that injects unconditionally
+# regardless of namespace) would look identical to one that works --
+# `crates/admissionlab-recipes/tests/istio_recipe.rs` applies this fixture
+# and asserts the opposite of what it asserts for `10-inject-pod.yaml`.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: admissionlab-smoke-noinject
+  namespace: admissionlab-istio-smoke-noinject
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

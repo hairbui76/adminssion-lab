@@ -718,18 +718,21 @@ fn relative_manifest_path_in_a_recipe_is_rejected() {
 
 #[test]
 fn builtin_recipes_load_without_touching_the_filesystem() {
-    // Task 2.8 adds the first real built-in recipe (kyverno) -- this
-    // proves load_builtin_recipes resolves it purely from its embedded
-    // include_str! text: succeeding here needs no filesystem setup at
-    // all (no directory created, no current directory changed), unlike
-    // every override-directory test below.
+    // Task 2.8 added the first real built-in recipe (kyverno); Task 2.9
+    // added the second (istio) -- this proves load_builtin_recipes
+    // resolves both purely from their embedded include_str! text:
+    // succeeding here needs no filesystem setup at all (no directory
+    // created, no current directory changed), unlike every
+    // override-directory test below.
     let recipes = load_builtin_recipes().expect("loading the embedded built-in set must not fail");
     assert_eq!(
         recipes.len(),
-        1,
-        "expected exactly the kyverno recipe as of Task 2.8; got {recipes:?}"
+        2,
+        "expected exactly the kyverno and istio recipes as of Task 2.9; got {recipes:?}"
     );
-    assert_eq!(recipes[0].name, "kyverno");
+    let mut names: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(names, vec!["istio", "kyverno"]);
 }
 
 // ---------------------------------------------------------------------
@@ -756,16 +759,17 @@ fn override_directory_is_never_consulted_via_the_current_working_directory() {
 
     let _guard = CwdGuard::change_to(&root);
     let recipes = load_recipes(None).expect("load_recipes(None) must succeed");
-    // Exactly the built-in set (the kyverno recipe, as of Task 2.8) --
+    // Exactly the built-in set (kyverno and istio, as of Task 2.9) --
     // never "demo-webhook", the name every seeded current-directory
     // candidate above declares.
     assert_eq!(
         recipes.len(),
-        1,
+        2,
         "load_recipes(None) must never discover a recipe via the current working directory; \
          got {recipes:?}"
     );
-    assert_eq!(recipes[0].name, "kyverno");
+    let names: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, vec!["istio", "kyverno"], "sorted by name");
 }
 
 #[test]
@@ -774,16 +778,20 @@ fn explicit_override_directory_is_loaded() {
 
     let recipes =
         load_recipes(Some(&dir)).expect("an explicitly named override directory must load");
-    // The built-in kyverno recipe, plus this override -- a distinct
-    // name, so it is added alongside rather than replacing anything;
-    // see `two_distinct_override_recipes_both_load_sorted_by_name`
+    // The built-in kyverno and istio recipes, plus this override -- a
+    // distinct name, so it is added alongside rather than replacing
+    // anything; see `two_distinct_override_recipes_both_load_sorted_by_name`
     // below for the multi-override case and `crate::load`'s own
     // `override_replaces_a_builtin_of_the_same_name` unit test for the
     // "replaces" half of this behavior, which needs a same-named
     // built-in this integration test does not have.
-    assert_eq!(recipes.len(), 2);
+    assert_eq!(recipes.len(), 3);
     let names: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
-    assert_eq!(names, vec!["demo-webhook", "kyverno"], "sorted by name");
+    assert_eq!(
+        names,
+        vec!["demo-webhook", "istio", "kyverno"],
+        "sorted by name"
+    );
 }
 
 #[test]
@@ -802,9 +810,12 @@ fn two_distinct_override_recipes_both_load_sorted_by_name() {
 
     let recipes = load_recipes(Some(&dir)).expect("two distinct override recipes must load");
     let names: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
-    // Both overrides, plus the built-in kyverno recipe (Task 2.8) --
-    // all three sorted by name together.
-    assert_eq!(names, vec!["another-webhook", "demo-webhook", "kyverno"]);
+    // Both overrides, plus the built-in kyverno and istio recipes (Task
+    // 2.8/2.9) -- all four sorted by name together.
+    assert_eq!(
+        names,
+        vec!["another-webhook", "demo-webhook", "istio", "kyverno"]
+    );
 }
 
 #[test]

@@ -67,10 +67,9 @@
 //!
 //! Stack installation orchestration (Task 2.6) that actually drives a
 //! resolved [`Recipe`]'s [`Recipe::install`]/[`Recipe::readiness`] lives
-//! in `admissionlab-installer`, not here. The certified Kyverno recipe
-//! (Task 2.8) is this crate's first real built-in content — see
-//! [`load`]'s own `BUILTIN_RECIPES`; Istio's (Task 2.9) is not yet
-//! implemented.
+//! in `admissionlab-installer`, not here. The certified Kyverno (Task
+//! 2.8) and Istio (Task 2.9) recipes are this crate's built-in content
+//! — see [`load`]'s own `BUILTIN_RECIPES`.
 
 mod capability;
 pub mod compat;

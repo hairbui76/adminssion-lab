@@ -1,0 +1,40 @@
+# Two dedicated namespaces, one per scenario -- never shared with the
+# test-webhook or Kyverno smoke fixtures (Controller supplement §3): the
+# injector's `failurePolicy: Fail` is scoped by namespaceSelector, not by
+# resource, so *any* Pod created in an `istio-injection: enabled`
+# namespace is subject to fail-closed behavior if `istiod` becomes
+# unavailable later -- an Istio-specific outage must not be able to
+# collaterally block an unrelated Admission Lab fixture's namespace.
+#
+# `istio-injection: enabled` is read from the rendered
+# `MutatingWebhookConfiguration/istio-sidecar-injector`'s own
+# `namespace.sidecar-injector.istio.io` webhook entry's namespaceSelector
+# (`helm template istio/istiod` at chart 1.30.4, then inspected
+# directly) -- not assumed from memory or from any tutorial. This is the
+# "legacy", non-revisioned opt-in label; the chart's three other webhook
+# entries additionally support a newer `istio.io/rev: default`-based
+# opt-in this recipe does not use.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-istio-smoke-inject
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: istio-smoke
+    istio-injection: enabled
+---
+# Deliberately carries no `istio-injection` label at all -- the negative
+# counterweight (Controller supplement §8): a Pod created here must NOT
+# be injected. Without this, a check that merely confirms injection
+# happened in the labelled namespace could still pass "for the wrong
+# reason" if, for example, cluster-wide injection were somehow on by
+# default. `crates/admissionlab-recipes/tests/istio_recipe.rs` applies
+# `11-noinject-pod.yaml` here and asserts the opposite of what it asserts
+# for `10-inject-pod.yaml`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-istio-smoke-noinject
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: istio-smoke

@@ -1,0 +1,29 @@
+# Positive case: created in `admissionlab-istio-smoke-inject` (labelled
+# `istio-injection: enabled`), so the sidecar injector must mutate this
+# Pod at admission time. Deterministic -- the outcome depends only on
+# the namespace's own label and this Pod carrying no
+# `sidecar.istio.io/inject: "false"` opt-out, never on cluster state,
+# ordering, or a variable/context lookup.
+#
+# What "injected" means here, verified on a live cluster while writing
+# this recipe (Controller Ruling R27; every Kubernetes version this
+# project supports -- 1.35.8/1.36.4/1.37.0 -- is >= 1.33, the minor
+# where native sidecar containers went stable, so `ENABLE_NATIVE_SIDECARS`
+# (default `"auto"`) resolves to enabled uniformly across the whole
+# matrix): the *created* object (not this file) gains two entries in
+# `spec.initContainers` -- `istio-init` (ordinary init container, runs
+# `istio-iptables`) then `istio-proxy` (`restartPolicy: Always`, the
+# Envoy sidecar) -- while `spec.containers` keeps only this file's own
+# `app` container. `crates/admissionlab-recipes/tests/istio_recipe.rs`
+# reads the created Pod back and asserts on `spec.initContainers` by
+# name -- asserting against `spec.containers` instead finds nothing and
+# reports "injection did not happen" on a cluster where it did.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: admissionlab-smoke-inject
+  namespace: admissionlab-istio-smoke-inject
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

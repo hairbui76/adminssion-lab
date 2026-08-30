@@ -22,51 +22,64 @@ concurrency:
 
 jobs:
   integration:
-    name: Real kind/Docker integration smoke test (${{ matrix.package }})
+    # `matrix.package` alone no longer names a matrix entry uniquely as of
+    # Task 2.9: `admissionlab-recipes` now has two (`kyverno_recipe`,
+    # `istio_recipe`), which would otherwise give both the identical job
+    # display name in the GitHub Actions UI -- `matrix.test` is the actual
+    # unique key across every entry (see the cache `key:` below, which has
+    # the same requirement for the same reason).
+    name: Real kind/Docker integration smoke test (${{ matrix.package }} / ${{ matrix.test }})
     runs-on: ubuntu-latest
     # Every `#[ignore]`d real-cluster test in this workspace runs here, one
     # matrix entry each -- `admissionlab-cluster`'s own `kind_smoke` (Task
-    # 1.9), the Kyverno recipe certification test (Task 2.8), and
-    # `admissionlab-test-webhook`'s `kind_smoke` (Task 2.7). All three used
-    # to exist only as a one-time check a human could run by hand; none of
-    # them were reachable from any CI workflow, so a real regression in any
-    # of them (a vendor chart's next patch release breaking enforcement, a
-    # dependency bump breaking cluster creation) would go undetected
-    # forever. `fail-fast: false` so one matrix entry failing does not
-    # cancel the other two -- with three independent real-cluster tests,
-    # losing signal on the other two the moment the first one fails would
-    # defeat the point of running all three.
+    # 1.9), the Kyverno recipe certification test (Task 2.8), the Istio
+    # recipe certification test (Task 2.9), and `admissionlab-test-webhook`'s
+    # `kind_smoke` (Task 2.7). These used to exist only as a one-time check
+    # a human could run by hand; none of them were reachable from any CI
+    # workflow, so a real regression in any of them (a vendor chart's next
+    # patch release breaking enforcement, a dependency bump breaking
+    # cluster creation) would go undetected forever. `fail-fast: false` so
+    # one matrix entry failing does not cancel the others -- with four
+    # independent real-cluster tests, losing signal on the rest the moment
+    # the first one fails would defeat the point of running all four.
     #
-    # Deliberately three parallel *jobs* (via matrix), not three sequential
-    # `run:` steps in one job: each of these tests creates and tears down
-    # its own real `kind` cluster (occasionally two, for the isolation
-    # test) plus, for `admissionlab-test-webhook`, a real `docker build` --
-    # running them as separate jobs means total wall-clock is bounded by
-    # the slowest single test, not their sum, and a failure in one cannot
-    # prevent the runner from even attempting the others (three sequential
-    # steps in one job would need `if: always()` on every step after the
-    # first just to get that same guarantee, and would still serialize
-    # wall-clock time). The one shared cost of separate jobs -- repeating
-    # checkout/kind-install per matrix entry -- is a few seconds each,
-    # negligible next to what each test itself takes.
+    # Deliberately parallel *jobs* (via matrix), not sequential `run:`
+    # steps in one job: each of these tests creates and tears down at least
+    # one real `kind` cluster (occasionally two, for the isolation test;
+    # once per certified Kubernetes version -- today three -- for the
+    # Istio recipe test) plus, for `admissionlab-test-webhook`, a real
+    # `docker build` -- running them as separate jobs means total
+    # wall-clock is bounded by the slowest single test, not their sum, and
+    # a failure in one cannot prevent the runner from even attempting the
+    # others (sequential steps in one job would need `if: always()` on
+    # every step after the first just to get that same guarantee, and
+    # would still serialize wall-clock time). The one shared cost of
+    # separate jobs -- repeating checkout/kind-install per matrix entry --
+    # is a few seconds each, negligible next to what each test itself
+    # takes.
     #
-    # timeout-minutes: 20, sized against `admissionlab-test-webhook`'s
-    # `kind_smoke` -- the heaviest of the three by a wide margin, since it
-    # is the only one that also does a real `docker build`. Its own source
-    # already budgets up to 600s for that build+`kind load` step
-    # (`BUILD_AND_LOAD_TIMEOUT`) plus ~105s for `kind create cluster` (the
-    # same figure the previous version of this comment measured) plus 120s
-    # for install-and-readiness (`COMPONENT_TIMEOUT`) -- roughly 14 minutes
-    # of the test's own internal, deliberately generous timeouts alone,
-    # before checkout/dependency-build/kind-install overhead. 20 minutes
-    # leaves real headroom above that combined worst case rather than
-    # merely matching it. The other two matrix entries (`kind_smoke` on
-    # `admissionlab-cluster`, `kyverno_recipe` on `admissionlab-recipes`)
+    # timeout-minutes: 30, sized against the Istio recipe certification
+    # test (`istio_recipe`) -- the heaviest matrix entry, since
+    # `compatibility/recipes.yaml`'s `istio` entry currently certifies
+    # three Kubernetes versions and this test creates one disposable `kind`
+    # cluster per certified version, sequentially. Measured end to end
+    # while writing this workflow entry: 222.00 seconds (~3m42s) total for
+    # all three certified-version iterations combined -- two of them a
+    # genuinely cold `kind` node pulling both the node image and
+    # `istiod`'s image for the first time -- on an unloaded machine. 30
+    # minutes leaves roughly 8x headroom above that measured figure for a
+    # slower/loaded GitHub-hosted runner, comfortably more margin than the
+    # previous version of this comment gave `admissionlab-test-webhook`'s
+    # `kind_smoke` (its own ~14 minutes of internal, deliberately generous
+    # timeouts, given 20 minutes of ceiling). The other matrix entries
+    # (`kind_smoke` on `admissionlab-cluster`, `kyverno_recipe` on
+    # `admissionlab-recipes`, `kind_smoke` on `admissionlab-test-webhook`)
     # finish well under this in practice -- `kyverno_recipe` measured
     # 113.97s end to end on a warm node-image cache while it was written --
-    # a generous shared ceiling costs nothing when a job ends the moment it
-    # completes rather than waiting out the timeout.
-    timeout-minutes: 20
+    # a generous shared ceiling
+    # costs nothing when a job ends the moment it completes rather than
+    # waiting out the timeout.
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -75,6 +88,8 @@ jobs:
             test: kind_smoke
           - package: admissionlab-recipes
             test: kyverno_recipe
+          - package: admissionlab-recipes
+            test: istio_recipe
           - package: admissionlab-test-webhook
             test: kind_smoke
     steps:
@@ -91,13 +106,16 @@ jobs:
         # `key` (verified against this exact pinned version's own
         # action.yml, not assumed): "An additional cache key that is added
         # alongside the automatic job-based cache key and can be used to
-        # further differentiate jobs" -- set to the matrix package so the
-        # three parallel matrix jobs (which otherwise share a workflow/job
-        # name and would contend for the same cache entry) each get their
-        # own.
+        # further differentiate jobs" -- set to the matrix package *and*
+        # test name so the parallel matrix jobs (which otherwise share a
+        # workflow/job name and would contend for the same cache entry)
+        # each get their own. `matrix.package` alone stopped being unique
+        # as of Task 2.9, which added a second `admissionlab-recipes` entry
+        # (`istio_recipe`, alongside `kyverno_recipe`) -- without `test`
+        # here too, those two jobs would silently share one cache entry.
         uses: Swatinem/rust-cache@v2.9.2
         with:
-          key: ${{ matrix.package }}
+          key: ${{ matrix.package }}-${{ matrix.test }}
 
       - name: Verify Docker is reachable
         # No install step: GitHub-hosted `ubuntu-latest` runners ship
@@ -144,7 +162,7 @@ jobs:
         # when the test fails, which fails this step, which fails this
         # matrix job, which fails the overall workflow run -- no swallowing
         # anywhere in this chain, and `fail-fast: false` above means that
-        # failure does not hide whether the other two matrix entries also
+        # failure does not hide whether the other matrix entries also
         # passed or failed.
         run: cargo test -p ${{ matrix.package }} --test ${{ matrix.test }} -- --ignored --nocapture
 
@@ -155,7 +173,7 @@ jobs:
         # step still catches a real cleanup regression while it is easy
         # to diagnose, and best-effort deletes anything found rather than
         # leaving it running for the rest of this job's lifetime. Applies
-        # unchanged to all three matrix entries: `cluster_name` (the one
+        # unchanged to every matrix entry: `cluster_name` (the one
         # function every one of these tests calls to name its own cluster,
         # `admissionlab-cluster/src/kind.rs`) always produces the
         # `adlab-<side>-<short-run-id>` form regardless of which crate

@@ -102,6 +102,7 @@ dependencies = [
  "admissionlab-installer",
  "admissionlab-spec",
  "serde",
+ "serde_json",
  "serde_norway",
  "thiserror",
  "tokio",
