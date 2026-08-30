@@ -6,6 +6,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod ids;
 pub mod process;
+pub mod run;
 pub mod side;
 pub mod tool;
 
@@ -18,6 +19,9 @@ pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};
 pub use process::{
     CommandContext, CommandResult, CommandSpec, ProcessError, ProcessRunner, TokioProcessRunner,
+};
+pub use run::{
+    ClusterCreationFailure, LabRunner, PreparedLab, RunError, RunOptions, preserved_cluster_report,
 };
 pub use side::Side;
 pub use tool::{

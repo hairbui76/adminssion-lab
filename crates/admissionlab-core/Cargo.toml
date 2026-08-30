@@ -10,6 +10,14 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+# `run.rs`'s `LabRunner::prepare_clusters` takes `&admissionlab_spec::ResolvedLab`
+# (Task 1.10 brief's own interface). This is a safe, one-way edge, unlike
+# the forbidden `admissionlab-cluster` one documented on `cluster.rs`:
+# `admissionlab-spec` depends on none of this workspace's other crates
+# (only `globset`/`schemars`/`serde`/`serde_json`/`serde_norway`/`thiserror`),
+# so there is no path back from it to `admissionlab-core` for this edge
+# to complete into a cycle.
+admissionlab-spec = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # Used by `artifact.rs`'s `ArtifactStore::write_json_atomic` in
 # production code (not only by tests), so it belongs here rather than
@@ -32,8 +40,13 @@ tracing = { workspace = true }
 # even though `cargo test` — which pulls in dev-dependencies for every
 # target in the same build — would not catch it. `fs` is required for
 # the same reason: `artifact.rs`'s `ArtifactStore` performs its
-# directory creation and atomic writes through `tokio::fs`.
-tokio = { workspace = true, features = ["fs", "io-util", "process", "rt", "time"] }
+# directory creation and atomic writes through `tokio::fs`. `macros` is
+# required in production (not only dev-dependencies) here too:
+# `run.rs`'s `LabRunner::prepare_clusters`/`cleanup` call `tokio::join!`
+# to create/delete the baseline and candidate clusters concurrently
+# (Task 1.10) — `tokio::join!` itself, not just `#[tokio::test]`, needs
+# this feature.
+tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 
 # `tool.rs`'s disk-space check needs `statvfs`, which has no safe std

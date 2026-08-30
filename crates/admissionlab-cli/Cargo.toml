@@ -30,11 +30,14 @@ path = "src/main.rs"
 # `admissionlab-core`'s `RunPaths` (with `ClusterSpec` holding a `Side`),
 # so the trait and its data types had to live in `admissionlab-core`
 # (Controller Ruling R22) rather than in `admissionlab-cluster`. Nothing
-# depends on this bin-only crate, so `admissionlab-cli`'s own two
-# dependency edges here can never themselves become part of a cycle
-# either way.
+# depends on this bin-only crate, so `admissionlab-cli`'s own dependency
+# edges here can never themselves become part of a cycle either way.
 admissionlab-cluster = { workspace = true }
 admissionlab-core = { workspace = true }
+# `commands::test::run` loads and resolves the lab configuration through
+# `admissionlab_spec::{load_lab, resolve_lab}` before handing the result
+# to `admissionlab_core::LabRunner::prepare_clusters` (Task 1.10).
+admissionlab-spec = { workspace = true }
 clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

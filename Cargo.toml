@@ -10,6 +10,7 @@ repository = "https://github.com/hairbui76/adminssion-lab"
 [workspace.dependencies]
 admissionlab-cluster = { path = "crates/admissionlab-cluster" }
 admissionlab-core = { path = "crates/admissionlab-core" }
+admissionlab-spec = { path = "crates/admissionlab-spec" }
 assert_cmd = "2.2.2"
 async-trait = "0.1.92"
 clap = { version = "4.6.6", features = ["derive"] }

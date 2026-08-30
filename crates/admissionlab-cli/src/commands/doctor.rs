@@ -30,11 +30,11 @@
 //! the user's current `kubectl` context (PRODUCT.md §34: diagnostic
 //! only, must not mutate production contexts). A `--deep` failure always
 //! maps to [`RunDisposition::InternalError`], regardless of whether the
-//! shallow checks above it passed — mirroring
-//! `commands::not_implemented`'s existing convention for "this did not
-//! do what was asked" — so a caller checking only the exit code can never
-//! mistake "shallow checks passed" for "the deep probe you asked for
-//! actually succeeded."
+//! shallow checks above it passed, so a caller checking only the exit
+//! code can never mistake "shallow checks passed" for "the deep probe
+//! you asked for actually succeeded" — the same honesty discipline
+//! `commands::test` applies to its own, larger surface (see that
+//! module's documentation).
 //!
 //! # Cleanup: explicit, with `Drop` only as a last-resort warning
 //!

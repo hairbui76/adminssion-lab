@@ -12,6 +12,7 @@ version = "0.1.0"
 dependencies = [
  "admissionlab-cluster",
  "admissionlab-core",
+ "admissionlab-spec",
  "assert_cmd",
  "async-trait",
  "clap",
@@ -37,6 +38,7 @@ dependencies = [
 name = "admissionlab-core"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-spec",
  "async-trait",
  "nix",
  "serde",
