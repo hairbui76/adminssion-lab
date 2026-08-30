@@ -242,6 +242,38 @@ fn helm_install_without_repo_is_rejected() {
 }
 
 #[test]
+fn helm_install_with_empty_chart_is_rejected() {
+    let path = write_config(
+        "helm-empty-chart",
+        r#"
+        apiVersion: admissionlab.io/v1alpha1
+        kind: Lab
+        baseline:
+          kubernetes: "1.29.4"
+          components:
+            - name: cert-manager
+              install:
+                type: helm
+                chart: ""
+                repo: https://charts.jetstack.io
+                version: "1.14.4"
+        candidate:
+          kubernetes: "1.29.4"
+        fixtures:
+          include: ["fixtures/**/*.yaml"]
+        "#,
+    );
+
+    let loaded = load_lab(&path).unwrap();
+    let err = resolve_lab(loaded).expect_err("an empty chart must be rejected");
+    let message = err.to_string();
+    assert!(
+        message.contains("baseline.components[0].install.chart"),
+        "error must locate the empty chart; got {message:?}"
+    );
+}
+
+#[test]
 fn helm_floating_versions_are_rejected() {
     // Every one of these fails the "exact major.minor.patch pin" grammar
     // `require_pinned_helm_version` enforces, each for a documented
@@ -401,9 +433,9 @@ fn helm_component_resolves_to_expected_shape_with_defaults() {
             assert_eq!(helm.chart, "cert-manager");
             assert_eq!(helm.repo_url, "https://charts.jetstack.io");
             assert_eq!(helm.version, "v1.14.4");
-            // `repoName`/`releaseName`/`namespace` have no YAML surface
-            // yet, so all three default to the component's own resolved
-            // name — see `component.rs`'s `resolve_helm`.
+            // `repoName`/`releaseName`/`namespace` were not set in this
+            // config, so all three default to the component's own
+            // resolved name — see `component.rs`'s `resolve_helm`.
             assert_eq!(helm.repo_name, "cert-manager");
             assert_eq!(helm.release_name, "cert-manager");
             assert_eq!(helm.namespace, "cert-manager");
@@ -411,6 +443,104 @@ fn helm_component_resolves_to_expected_shape_with_defaults() {
             assert_eq!(
                 helm.values_files,
                 vec![config_dir.join("values/cert-manager.yaml")]
+            );
+        }
+        InstallMethod::Manifests(_) => panic!("expected a Helm install"),
+    }
+}
+
+#[test]
+fn helm_install_overrides_repo_name_release_name_namespace_and_set_values() {
+    let path = write_config(
+        "helm-explicit-overrides",
+        r#"
+        apiVersion: admissionlab.io/v1alpha1
+        kind: Lab
+        baseline:
+          kubernetes: "1.29.4"
+          components:
+            - name: cert-manager
+              install:
+                type: helm
+                chart: cert-manager
+                repo: https://charts.jetstack.io
+                repoName: jetstack
+                version: "1.14.4"
+                releaseName: cert-manager-release
+                namespace: cert-manager-ns
+                setValues:
+                  installCRDs: "true"
+                  global.leaderElection.namespace: cert-manager-ns
+        candidate:
+          kubernetes: "1.29.4"
+        fixtures:
+          include: ["fixtures/**/*.yaml"]
+        "#,
+    );
+
+    let loaded = load_lab(&path).unwrap();
+    let resolved = resolve_lab(loaded).expect("explicit overrides must resolve");
+    let component = &resolved.baseline.components[0];
+
+    match &component.install {
+        InstallMethod::Helm(helm) => {
+            assert_eq!(helm.repo_name, "jetstack");
+            assert_eq!(helm.release_name, "cert-manager-release");
+            assert_eq!(helm.namespace, "cert-manager-ns");
+            assert_eq!(
+                helm.set_values.get("installCRDs").map(String::as_str),
+                Some("true")
+            );
+            assert_eq!(
+                helm.set_values
+                    .get("global.leaderElection.namespace")
+                    .map(String::as_str),
+                Some("cert-manager-ns")
+            );
+        }
+        InstallMethod::Manifests(_) => panic!("expected a Helm install"),
+    }
+}
+
+#[test]
+fn helm_install_namespace_override_resolves_correctly_for_istiod() {
+    // The motivating case: a component named `istiod` (matching the real
+    // `istio/istiod` chart's own name) must not silently default its
+    // namespace to `istiod` — the chart's real convention is
+    // `istio-system`, and getting this wrong would make the install
+    // *appear* to succeed while placing the control plane somewhere
+    // nothing expects it.
+    let path = write_config(
+        "helm-istiod-namespace",
+        r#"
+        apiVersion: admissionlab.io/v1alpha1
+        kind: Lab
+        baseline:
+          kubernetes: "1.29.4"
+          components:
+            - name: istiod
+              install:
+                type: helm
+                chart: istiod
+                repo: https://istio-release.storage.googleapis.com/charts
+                version: "1.21.0"
+                namespace: istio-system
+        candidate:
+          kubernetes: "1.29.4"
+        fixtures:
+          include: ["fixtures/**/*.yaml"]
+        "#,
+    );
+
+    let loaded = load_lab(&path).unwrap();
+    let resolved = resolve_lab(loaded).expect("an explicit namespace override must resolve");
+    let component = &resolved.baseline.components[0];
+
+    match &component.install {
+        InstallMethod::Helm(helm) => {
+            assert_eq!(
+                helm.namespace, "istio-system",
+                "an explicit namespace override must win over the component-name default"
             );
         }
         InstallMethod::Manifests(_) => panic!("expected a Helm install"),

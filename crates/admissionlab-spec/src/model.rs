@@ -21,7 +21,7 @@
 //! applied. [`crate::resolve_lab`] (see `resolve.rs`) is what turns a
 //! parsed [`LabSpec`] into a fully validated, path-resolved [`crate::ResolvedLab`].
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -205,17 +205,42 @@ pub struct HelmInstallSpec {
     /// must be set for every Helm install today.
     #[serde(default)]
     pub repo: Option<String>,
+    /// The local name to register `repo` under (`helm repo add
+    /// <repo_name> <repo_url>`). Defaults to the component's own
+    /// resolved name when omitted — see
+    /// [`crate::component::resolve_component`]'s documentation. Purely a
+    /// local bookkeeping label with no cluster-visible effect, so the
+    /// default is safe to leave unset in the common case.
+    #[serde(default)]
+    pub repo_name: Option<String>,
     /// The chart version passed to `helm install --version`. Required by
     /// [`crate::resolve_lab`] to be an exact pin, never a floating range
     /// — see [`crate::validate::require_pinned_helm_version`]'s
     /// documentation for exactly what counts as floating and why.
     #[serde(default)]
     pub version: Option<String>,
+    /// The Helm release name (`helm upgrade --install <release_name>
+    /// ...`). Defaults to the component's own resolved name when
+    /// omitted.
+    #[serde(default)]
+    pub release_name: Option<String>,
+    /// The namespace to install into. Defaults to the component's own
+    /// resolved name when omitted — **that default is not always
+    /// correct** and must be overridden whenever a chart's own
+    /// convention differs from the component's name: for example
+    /// `istio/istiod` and `istio/base` both conventionally install into
+    /// `istio-system`, not `istiod`/`base`.
+    #[serde(default)]
+    pub namespace: Option<String>,
     /// Values override files, resolved against the configuration file's
     /// own directory by [`crate::resolve_lab`] — see
     /// [`ComponentSpec::install`] and [`crate::resolve::config_directory`].
     #[serde(default)]
     pub values_files: Vec<PathBuf>,
+    /// Literal `--set-string` key/value overrides passed to `helm
+    /// upgrade --install`. Empty by default.
+    #[serde(default)]
+    pub set_values: BTreeMap<String, String>,
 }
 
 /// Install method: a fixed set of raw Kubernetes manifests.

@@ -137,6 +137,22 @@
               "description": "The chart reference passed to `helm install` (a repo-relative\nchart name, a local path, or an `oci://` reference). Only the\nrepo-relative form is resolvable today — see `repo`.",
               "type": "string"
             },
+            "namespace": {
+              "description": "The namespace to install into. Defaults to the component's own\nresolved name when omitted — **that default is not always\ncorrect** and must be overridden whenever a chart's own\nconvention differs from the component's name: for example\n`istio/istiod` and `istio/base` both conventionally install into\n`istio-system`, not `istiod`/`base`.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "releaseName": {
+              "description": "The Helm release name (`helm upgrade --install <release_name>\n...`). Defaults to the component's own resolved name when\nomitted.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
             "repo": {
               "description": "The Helm repository URL to add/use, if `chart` is a bare chart\nname rather than a path or `oci://` reference. Required by\n[`crate::resolve_lab`]: local path and `oci://` chart references\nremain syntactically valid in `chart` above, but resolution has no\nway to act on them without a registered repository, so `repo`\nmust be set for every Helm install today.",
               "type": [
@@ -144,6 +160,22 @@
                 "null"
               ],
               "default": null
+            },
+            "repoName": {
+              "description": "The local name to register `repo` under (`helm repo add\n<repo_name> <repo_url>`). Defaults to the component's own\nresolved name when omitted — see\n[`crate::component::resolve_component`]'s documentation. Purely a\nlocal bookkeeping label with no cluster-visible effect, so the\ndefault is safe to leave unset in the common case.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "setValues": {
+              "description": "Literal `--set-string` key/value overrides passed to `helm\nupgrade --install`. Empty by default.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
             },
             "type": {
               "type": "string",

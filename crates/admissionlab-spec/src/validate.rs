@@ -126,6 +126,31 @@ pub(crate) fn require_install_method<'a>(
     })
 }
 
+/// Requires a Helm install's chart reference to be non-empty, returning
+/// it trimmed.
+///
+/// Mirrors `require_helm_repo_url`/`require_pinned_helm_version`'s own
+/// shape: `chart` is a plain required `String` in
+/// [`crate::model::HelmInstallSpec`] (so it can never be entirely
+/// absent), but nothing at the type level stops it from being an empty
+/// string, which would otherwise sail through resolution and only fail
+/// later when something actually shells out to `helm` with it.
+pub(crate) fn require_helm_chart(
+    locator: &str,
+    chart: &str,
+    path: &Path,
+) -> Result<String, SpecError> {
+    let trimmed = chart.trim();
+    if trimmed.is_empty() {
+        return Err(SpecError::validation(
+            path,
+            format_args!("{locator}.install.chart"),
+            "must not be empty",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
 /// Requires a Helm install's repository URL to be set, returning it
 /// trimmed.
 ///

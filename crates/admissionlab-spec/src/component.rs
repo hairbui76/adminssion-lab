@@ -96,10 +96,12 @@ pub enum InstallMethod {
 /// Every field is a concrete, non-optional value — there is nothing left
 /// for the installer to default or guess:
 ///
-/// - `repo_name`/`release_name`/`namespace` default to the resolved
-///   component's own name when [`crate::model::HelmInstallSpec`] does not
-///   (yet) expose a way to override them; see [`resolve_helm`]'s
-///   documentation.
+/// - `repo_name`/`release_name`/`namespace` come from
+///   [`crate::model::HelmInstallSpec`]'s matching optional field when the
+///   user sets one, and otherwise default to the resolved component's
+///   own name — see [`resolve_helm`]'s documentation for why that
+///   default is a reasonable one to have, but not always a *correct*
+///   one, and must be overridden explicitly whenever it isn't.
 /// - `version` is guaranteed to be an exact pin, never a floating range —
 ///   see [`crate::validate::require_pinned_helm_version`]'s documentation
 ///   for exactly what counts as floating and why it is rejected.
@@ -107,8 +109,8 @@ pub enum InstallMethod {
 ///   directory, never the process's current working directory — the same
 ///   invariant [`crate::resolve::config_directory`] documents for every
 ///   other path in the document.
-/// - `set_values` has no YAML surface yet, so it is always empty; a
-///   future task can add one without changing this shape.
+/// - `set_values` is copied verbatim from
+///   [`crate::model::HelmInstallSpec::set_values`] (empty by default).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelmInstallSpec {
     /// The local name `helm repo add <repo_name> <repo_url>` registers
@@ -126,8 +128,7 @@ pub struct HelmInstallSpec {
     pub namespace: String,
     /// Values override files, resolved to absolute paths.
     pub values_files: Vec<PathBuf>,
-    /// Literal `--set-string` overrides. Always empty today — see this
-    /// type's documentation.
+    /// Literal `--set-string` overrides.
     pub set_values: BTreeMap<String, String>,
 }
 
@@ -240,10 +241,10 @@ pub enum Capability {
 ///   representation already makes it a load-time parse error (a `type:
 ///   helm` block that also carries a manifests-only field such as
 ///   `paths` is an unknown field for [`crate::model::HelmInstallSpec`]).
-/// - **An explicit, pinned Helm chart version and an explicit repository.**
-///   See [`validate::require_pinned_helm_version`] and
-///   [`validate::require_helm_repo_url`]. Local path and `oci://` chart
-///   references remain syntactically valid in
+/// - **A non-empty chart, an explicit repository, and a pinned version.**
+///   See [`validate::require_helm_chart`], [`validate::require_helm_repo_url`],
+///   and [`validate::require_pinned_helm_version`]. Local path and
+///   `oci://` chart references remain syntactically valid in
 ///   [`crate::model::HelmInstallSpec::chart`], but resolution has no way
 ///   to act on them without a registered repository, so `repo` is
 ///   required for every Helm install today.
@@ -297,14 +298,19 @@ pub(crate) fn resolve_component(
 
 /// Resolves a Helm install method.
 ///
-/// Defaults `repo_name`/`release_name`/`namespace` to `component_name`: a
-/// predictable, collision-free choice, since component names are already
-/// required to be unique within their environment (see
-/// [`crate::validate::unique_component_names`]), and
-/// [`crate::model::HelmInstallSpec`] does not expose a way to override
-/// any of the three today (there is deliberately no YAML key for this
-/// yet — see this module's [`HelmInstallSpec`] documentation; a future
-/// task can add one without changing the resolved shape).
+/// `repo_name`/`release_name`/`namespace` each come from
+/// [`crate::model::HelmInstallSpec`]'s matching optional field when the
+/// user sets one (via [`nonempty_or`]), and otherwise default to
+/// `component_name`. That default is a reasonable *starting point* —
+/// component names are already required to be unique within their
+/// environment (see [`crate::validate::unique_component_names`]), so it
+/// is at least collision-free — but it is not always a *correct* one:
+/// several real charts install into a namespace that does not match
+/// their component's own name (`istio/istiod` and `istio/base` both
+/// conventionally install into `istio-system`, not `istiod`/`base`).
+/// This is exactly why the override exists rather than making the
+/// default absolute; a user naming a component `istiod` must set
+/// `namespace: istio-system` explicitly.
 fn resolve_helm(
     locator: &str,
     raw: &RawHelmInstallSpec,
@@ -312,6 +318,7 @@ fn resolve_helm(
     config_dir: &Path,
     source_path: &Path,
 ) -> Result<HelmInstallSpec, SpecError> {
+    let chart = validate::require_helm_chart(locator, &raw.chart, source_path)?;
     let repo_url = validate::require_helm_repo_url(locator, raw.repo.as_deref(), source_path)?;
     let version =
         validate::require_pinned_helm_version(locator, raw.version.as_deref(), source_path)?;
@@ -324,15 +331,27 @@ fn resolve_helm(
         .collect();
 
     Ok(HelmInstallSpec {
-        repo_name: component_name.to_owned(),
+        repo_name: nonempty_or(raw.repo_name.as_deref(), component_name),
         repo_url,
-        chart: raw.chart.clone(),
+        chart,
         version,
-        release_name: component_name.to_owned(),
-        namespace: component_name.to_owned(),
+        release_name: nonempty_or(raw.release_name.as_deref(), component_name),
+        namespace: nonempty_or(raw.namespace.as_deref(), component_name),
         values_files,
-        set_values: BTreeMap::new(),
+        set_values: raw.set_values.clone(),
     })
+}
+
+/// Returns `override_value` trimmed, if present and non-empty; otherwise
+/// returns `default_value` as an owned `String`. An explicitly blank
+/// override (`namespace: ""`) is treated the same as an absent one,
+/// consistent with every other optional string this crate resolves (see
+/// [`crate::validate::require_component_version`], for example).
+fn nonempty_or(override_value: Option<&str>, default_value: &str) -> String {
+    match override_value.map(str::trim) {
+        Some(value) if !value.is_empty() => value.to_owned(),
+        _ => default_value.to_owned(),
+    }
 }
 
 /// Resolves a manifests install method: every path made absolute against
