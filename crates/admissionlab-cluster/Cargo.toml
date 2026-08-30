@@ -38,5 +38,13 @@ tokio = { workspace = true, features = ["fs"] }
 # directly, so it needs to build its own runtime (mirroring
 # `admissionlab-core`'s `tests/tool.rs` hand-rolled `Builder` rather than
 # `#[tokio::test]`, which would need the `macros` feature for no other
-# reason).
-tokio = { workspace = true, features = ["rt"] }
+# reason). `tests/kind_smoke.rs` (Task 1.9) is the exception: its single
+# `#[ignore]`d real-`kind` test uses `#[tokio::test]` directly (matching
+# the brief's own snippet), which needs `macros` on top of `rt` --
+# `rt-multi-thread` is not needed since `#[tokio::test]` defaults to a
+# current-thread runtime, and that default is enough for baseline and
+# candidate to be created concurrently (the concurrency comes from two
+# real child `kind` processes progressing independently at the OS level
+# while `tokio::join!` interleaves polling both futures, not from
+# multiple executor threads).
+tokio = { workspace = true, features = ["rt", "macros"] }

@@ -1,15 +1,14 @@
 //! Subcommand entry points for the Admission Lab CLI.
 //!
 //! Each submodule owns one subcommand's Clap argument struct and the
-//! function `main` dispatches into for it. `doctor`'s shallow
-//! host-prerequisite checks (`kind`/`kubectl`/`helm`/`docker`
-//! discovery, disk space) are implemented as of Task 1.4; only its real
-//! `--deep` cluster create/delete probe remains for Task 1.9 (see
-//! `doctor`'s own module documentation for how that flag stays honest
-//! about not being implemented yet in the meantime). `test`'s full
-//! pipeline still lands in Task 1.10 (cluster lifecycle) and Task 4.14
-//! (config through report); until then it reports [`not_implemented`]
-//! rather than doing — or claiming to do — anything.
+//! function `main` dispatches into for it. `doctor` implements both its
+//! shallow host-prerequisite checks (`kind`/`kubectl`/`helm`/`docker`
+//! discovery, disk space — Task 1.4) and its real `--deep` cluster
+//! create/verify/delete probe (Task 1.9); see `doctor`'s own module
+//! documentation for both. `test`'s full pipeline still lands in Task
+//! 1.10 (cluster lifecycle) and Task 4.14 (config through report); until
+//! then it reports [`not_implemented`] rather than doing — or claiming
+//! to do — anything.
 
 use std::process::ExitCode;
 

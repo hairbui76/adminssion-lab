@@ -191,58 +191,162 @@ fn doctor_never_touches_kubeconfig_or_other_user_state() {
 }
 
 // ---------------------------------------------------------------------
-// `--deep`: hidden by default, honest where reachable at all.
+// `--deep`: a real create/verify/delete cluster probe (Task 1.9). This
+// file's own charter (see its module documentation) is proving the
+// wiring from argument parsing down to the process exit code holds
+// together through the *real compiled binary* -- so these stub scripts
+// are sophisticated enough to carry a full create/health-check/delete
+// cycle, but the fully successful, real-audit-log path is exercised for
+// real (no stubs at all) by `admissionlab-cluster`'s
+// `tests/kind_smoke.rs`, run with `-- --ignored`.
 // ---------------------------------------------------------------------
 
-// These two are specifically about the default (`unstable-doctor-deep`
-// off) build's surface, so they only run in that configuration — with
-// the feature enabled (`cargo test --features unstable-doctor-deep`),
-// `--deep` is *supposed* to parse and appear in `--help`, which is
-// exactly what `deep_flag_is_honest_when_the_preview_feature_is_enabled`
-// below checks instead.
-#[cfg(not(feature = "unstable-doctor-deep"))]
 #[test]
-fn deep_flag_is_hidden_without_the_preview_feature() {
-    // No stub PATH needed: without `unstable-doctor-deep`, `--deep` is
-    // not on `DoctorArgs` at all, so Clap rejects it before any
-    // subprocess would ever be spawned.
-    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
-    cmd.arg("doctor")
-        .arg("--deep")
-        .assert()
-        .failure()
-        .stderr(predicates::str::contains("--deep"));
-}
-
-#[cfg(not(feature = "unstable-doctor-deep"))]
-#[test]
-fn help_does_not_advertise_deep_without_the_preview_feature() {
+fn help_advertises_the_deep_flag() {
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.arg("doctor")
         .arg("--help")
         .assert()
         .success()
-        .stdout(predicates::str::contains("--deep").not());
+        .stdout(predicates::str::contains("--deep"));
 }
 
-#[cfg(feature = "unstable-doctor-deep")]
+/// Writes `script` verbatim as an executable stand-in at `dir/name`,
+/// unlike [`write_stub`] (which only supports a single fixed
+/// stdout/stderr/exit code regardless of arguments) -- `--deep`'s
+/// `kind`/`kubectl` stand-ins need to branch on their own argv.
+fn write_raw_stub(dir: &Path, name: &str, script: &str) {
+    let path = dir.join(name);
+    std::fs::write(&path, script).expect("failed to write stub script");
+    let mut permissions = std::fs::metadata(&path)
+        .expect("failed to stat stub script")
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&path, permissions).expect("failed to make stub script executable");
+}
+
+/// Builds a stub `PATH` directory whose `kind`/`kubectl` stand-ins are
+/// sophisticated enough to carry a `--deep` invocation through a full
+/// create/health-check/delete cycle: `kind create` writes a dummy
+/// kubeconfig to its own `--kubeconfig` argument (as real `kind` does),
+/// `kubectl --raw=/healthz` succeeds, and every `kind` invocation is
+/// appended to the returned invocations-log path so a test can assert
+/// cleanup (`kind delete`) actually happened. `helm`/`docker` reuse the
+/// same fixed stand-ins `all_tools_stub_dir` uses.
+///
+/// The temporary cluster's audit log can never be real under a stub
+/// script (there is no real kube-apiserver to write one), so a test
+/// using this stub dir should expect `--deep` to fail honestly on the
+/// missing audit log.
+fn deep_capable_stub_dir(label: &str) -> (PathBuf, PathBuf) {
+    let dir = unique_stub_dir(label);
+    let invocations_log = dir.join("kind-invocations.log");
+    std::fs::write(&invocations_log, "").expect("create invocations log");
+
+    let kind_script = format!(
+        "#!/bin/sh\n\
+         echo \"$@\" >> \"{log}\"\n\
+         case \"$1\" in\n\
+         \x20\x20version)\n\
+         \x20\x20\x20\x20printf 'kind v0.33.0 go1.26.7 linux/amd64\\n'\n\
+         \x20\x20\x20\x20exit 0\n\
+         \x20\x20\x20\x20;;\n\
+         \x20\x20create)\n\
+         \x20\x20\x20\x20prev=\"\"\n\
+         \x20\x20\x20\x20for arg in \"$@\"; do\n\
+         \x20\x20\x20\x20\x20\x20if [ \"$prev\" = \"--kubeconfig\" ]; then\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20printf 'apiVersion: v1\\nkind: Config\\nclusters: []\\n' > \"$arg\"\n\
+         \x20\x20\x20\x20\x20\x20fi\n\
+         \x20\x20\x20\x20\x20\x20prev=\"$arg\"\n\
+         \x20\x20\x20\x20done\n\
+         \x20\x20\x20\x20exit 0\n\
+         \x20\x20\x20\x20;;\n\
+         \x20\x20delete)\n\
+         \x20\x20\x20\x20exit 0\n\
+         \x20\x20\x20\x20;;\n\
+         \x20\x20get)\n\
+         \x20\x20\x20\x20exit 0\n\
+         \x20\x20\x20\x20;;\n\
+         \x20\x20*)\n\
+         \x20\x20\x20\x20exit 1\n\
+         \x20\x20\x20\x20;;\n\
+         esac\n",
+        log = invocations_log.display(),
+    );
+    write_raw_stub(&dir, "kind", &kind_script);
+
+    let kubectl_script = "#!/bin/sh\n\
+         for arg in \"$@\"; do\n\
+         \x20\x20if [ \"$arg\" = \"--raw=/healthz\" ]; then\n\
+         \x20\x20\x20\x20printf 'ok'\n\
+         \x20\x20\x20\x20exit 0\n\
+         \x20\x20fi\n\
+         done\n\
+         printf '{\"clientVersion\":{\"gitVersion\":\"v1.36.4\"}}'\n\
+         exit 0\n";
+    write_raw_stub(&dir, "kubectl", kubectl_script);
+
+    write_stub(&dir, "helm", 0, "v3.15.2", "");
+    write_stub(&dir, "docker", 0, "\"27.5.0\"\n", "");
+
+    (dir, invocations_log)
+}
+
 #[test]
-fn deep_flag_is_honest_when_the_preview_feature_is_enabled() {
-    let dir = all_tools_stub_dir("deep-preview");
+fn deep_flag_runs_a_real_looking_create_check_delete_cycle_end_to_end() {
+    let (dir, invocations_log) = deep_capable_stub_dir("deep-lifecycle");
 
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.env("PATH", &dir)
         .arg("doctor")
         .arg("--deep")
         .assert()
-        // Task 1.4 must never let `--deep` look like it succeeded, even
-        // though every shallow check above still passes.
+        // Honest failure: the stub toolchain can never produce a real
+        // audit log (see `deep_capable_stub_dir`'s own documentation).
         .failure()
-        .stdout(predicates::str::contains("kind")) // shallow checks still ran and printed
-        .stderr(predicates::str::contains("not implemented"))
-        .stdout(predicates::str::contains("cluster created").not())
-        .stdout(predicates::str::contains("cluster deleted").not())
-        .stderr(predicates::str::contains("success").not());
+        .stdout(predicates::str::contains("deep check"))
+        .stdout(predicates::str::contains("audit log"));
+
+    let invocations =
+        std::fs::read_to_string(&invocations_log).expect("read stub kind invocations log");
+    assert!(
+        invocations.lines().any(|line| line.starts_with("create")),
+        "expected a `kind create ...` invocation, got:\n{invocations}"
+    );
+    assert!(
+        invocations.lines().any(|line| line.starts_with("delete")),
+        "expected a `kind delete ...` invocation (cleanup) even though the probe failed, \
+         got:\n{invocations}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn deep_flag_never_touches_the_users_kubeconfig() {
+    let (dir, _invocations_log) = deep_capable_stub_dir("deep-no-mutate");
+    let kubeconfig = std::env::temp_dir().join(format!(
+        "admissionlab-cli-doctor-deep-test-kubeconfig-{}",
+        admissionlab_core::RunId::generate().as_str()
+    ));
+    assert!(!kubeconfig.exists());
+
+    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
+    // The exit code itself is incidental here (the stub toolchain can
+    // never produce a real audit log, so `--deep` fails honestly, same
+    // as the lifecycle test above) -- what this test actually checks is
+    // that the user's own `$KUBECONFIG` is never touched.
+    cmd.env("PATH", &dir)
+        .env("KUBECONFIG", &kubeconfig)
+        .arg("doctor")
+        .arg("--deep")
+        .assert()
+        .failure();
+
+    assert!(
+        !kubeconfig.exists(),
+        "doctor --deep must never create or write the user's own kubeconfig"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
