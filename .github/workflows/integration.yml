@@ -163,7 +163,21 @@ jobs:
         # sees clusters created inside its own isolated runner VM.
         run: |
           set -euo pipefail
-          leaked="$(kind get clusters 2>/dev/null | grep '^adlab-' || true)"
+          # Distinguish "kind failed" from "kind reported zero clusters".
+          # `kind get clusters 2>/dev/null | grep ... || true` cannot: a
+          # broken kind/docker yields empty stdout, grep matches nothing,
+          # and `|| true` swallows the failure, so the check reports "no
+          # leaks" and passes. That makes this guard incapable of failing
+          # in exactly the situation it exists to police. Same defect and
+          # same fix as `scripts/verify-cleanup.sh`'s `fetch_clusters`.
+          clusters=""
+          status=0
+          clusters="$(kind get clusters 2>&1)" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::kind get clusters failed (exit $status): $clusters"
+            exit 1
+          fi
+          leaked="$(printf '%s\n' "$clusters" | grep '^adlab-' || true)"
           if [ -n "$leaked" ]; then
             echo "::error::leaked adlab-* cluster(s) after ${{ matrix.package }}::${{ matrix.test }}:"
             echo "$leaked"
