@@ -222,8 +222,9 @@ pub enum InstallError {
     /// its own variant rather than a plain [`InstallError::CommandFailed`].
     ///
     /// This never causes an automatic retry with `--server-side=true`:
-    /// Global Constraint 16 requires that Admission Lab never silently
-    /// change apply semantics, so the remedy (install this component a
+    /// silently switching which apply mode actually ran would make this
+    /// installer's behavior unpredictable in a way a user could not
+    /// detect from its output, so the remedy (install this component a
     /// different way, or reduce the manifest's size) is left to the
     /// user, with the original, unmodified `stderr` still attached below
     /// rather than hidden behind this variant's own plain-language

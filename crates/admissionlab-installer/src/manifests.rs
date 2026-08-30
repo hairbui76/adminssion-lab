@@ -207,7 +207,17 @@
 //! detecting that would need a `canonicalize`/inode comparison this
 //! task's brief does not ask for, and a real configuration is unlikely
 //! to produce that shape by accident the way a literal repeated line in
-//! a `paths:` list can happen.
+//! a `paths:` list can happen. Dropping a duplicate is silent only at
+//! the [`load_manifest_bundle`] layer, which has no component in scope
+//! to report through (see [`InstallError`]'s own module documentation
+//! for why); [`ManifestsInstaller::install`] does have one, and reports
+//! a [`duplicate_paths_dropped_diagnostic`] on
+//! [`InstallRecord::diagnostics`] whenever deduplication actually
+//! dropped something — [`InstallRecord::diagnostics`]'s own contract is
+//! "non-fatal findings ... empty when there is nothing to report," and a
+//! dropped duplicate is something to report by that definition, the
+//! same way the Helm installer already reports its own non-fatal
+//! finding (an unconfirmed chart version) rather than staying silent.
 //!
 //! **`source_hash`: SHA-256 of canonical source bytes, lowercase hex,
 //! never including the paths themselves.** For each deduplicated file,
@@ -279,11 +289,15 @@
 //! legible without a reader needing to already know about this
 //! Kubernetes limit and go research a raw "Too long" message themselves.
 //! This module never silently retries with `--server-side=true` on this
-//! (or any) failure: Global Constraint 16 requires Admission Lab to
-//! never silently change apply semantics, so the choice of remedy
-//! (install this component a different way, or shrink the manifest) is
-//! always the user's, made with the full, unmodified `stderr` still
-//! attached to the error.
+//! (or any) failure: automatically switching which apply mode actually
+//! ran, without telling the user, would mean the same declared
+//! manifests could be applied two structurally different ways from one
+//! run to the next with nothing in the output to show for it -- a tool
+//! whose apply behavior can silently change out from under its own
+//! results is not one whose results can be trusted. The choice of
+//! remedy (install this component a different way, or shrink the
+//! manifest) is therefore always the user's, made with the full,
+//! unmodified `stderr` still attached to the error.
 //!
 //! # Scope
 //!
@@ -316,7 +330,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use admissionlab_core::{ClusterHandle, CommandResult, CommandSpec, ProcessRunner, RunPaths};
+use admissionlab_core::{
+    ClusterHandle, CommandResult, CommandSpec, Diagnostic, ProcessRunner, RedactedValue, RunPaths,
+};
 use admissionlab_spec::{InstallMethod, ResolvedComponent};
 use async_trait::async_trait;
 use serde::Deserialize as _;
@@ -712,6 +728,20 @@ impl ComponentInstaller for ManifestsInstaller {
         // any of them is applied to the cluster.
         let loaded = load_manifests(&manifests.paths)?;
 
+        // A dropped exact duplicate (see the module documentation's
+        // "Duplicates" section) is non-fatal -- the install still
+        // proceeds against the deduplicated list -- but it is still a
+        // finding worth surfacing per `InstallRecord::diagnostics`'s
+        // own contract, not silence.
+        let mut diagnostics = Vec::new();
+        if loaded.paths.len() != manifests.paths.len() {
+            diagnostics.push(duplicate_paths_dropped_diagnostic(
+                &component.name,
+                manifests.paths.len(),
+                loaded.paths.len(),
+            ));
+        }
+
         // Step 3: apply, one file per invocation, in the same
         // deduplicated order `loaded.bundle` was hashed from.
         for path in &loaded.paths {
@@ -725,7 +755,7 @@ impl ComponentInstaller for ManifestsInstaller {
             resolved_version: component.version.clone(),
             started_at,
             elapsed: start.elapsed(),
-            diagnostics: Vec::new(),
+            diagnostics,
         })
     }
 }
@@ -745,4 +775,43 @@ fn apply_args(path: &Path) -> Vec<OsString> {
         "-f".into(),
         path.as_os_str().to_owned(),
     ]
+}
+
+/// Builds the [`Diagnostic`] recorded on [`InstallRecord::diagnostics`]
+/// when [`deduplicate_paths`] dropped one or more exact-duplicate paths
+/// from `component`'s declared manifest list -- see the module
+/// documentation's "Duplicates" section. `declared_count` and
+/// `deduplicated_count` are `manifests.paths.len()` before and after
+/// deduplication respectively; mirrors
+/// `helm::metadata_unavailable_diagnostic`'s shape for the Helm
+/// installer's own non-fatal, still-worth-reporting finding.
+fn duplicate_paths_dropped_diagnostic(
+    component: &str,
+    declared_count: usize,
+    deduplicated_count: usize,
+) -> Diagnostic {
+    let dropped = declared_count - deduplicated_count;
+    let mut context = BTreeMap::new();
+    context.insert(
+        "component".to_owned(),
+        RedactedValue::Public(component.to_owned()),
+    );
+    context.insert(
+        "declared_count".to_owned(),
+        RedactedValue::Public(declared_count.to_string()),
+    );
+    context.insert(
+        "deduplicated_count".to_owned(),
+        RedactedValue::Public(deduplicated_count.to_string()),
+    );
+    Diagnostic {
+        code: "installer.manifests.duplicate_paths_dropped".to_owned(),
+        message: format!(
+            "component {component:?} declared {declared_count} manifest path(s) but only \
+             {deduplicated_count} distinct path(s) remained after removing exact duplicates -- \
+             {dropped} duplicate declaration(s) were read and applied only once, at their first \
+             position; this is usually a copy-paste mistake in the configuration file"
+        ),
+        context,
+    }
 }

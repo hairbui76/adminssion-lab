@@ -697,7 +697,7 @@ async fn duplicate_paths_are_applied_only_once() {
     let component = manifests_component(vec![path.clone(), path]);
     let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
 
-    installer
+    let record = installer
         .install(&cluster, &component)
         .await
         .expect("install should succeed");
@@ -706,6 +706,25 @@ async fn duplicate_paths_are_applied_only_once() {
         runner.calls().len(),
         1,
         "a repeated path must be applied only once"
+    );
+
+    assert_eq!(
+        record.diagnostics.len(),
+        1,
+        "a dropped duplicate must be surfaced as a diagnostic, not silently absorbed; got \
+         {:?}",
+        record.diagnostics
+    );
+    let diagnostic = &record.diagnostics[0];
+    assert_eq!(
+        diagnostic.code,
+        "installer.manifests.duplicate_paths_dropped"
+    );
+    assert!(
+        diagnostic.message.contains("2 manifest path(s)")
+            && diagnostic.message.contains("1 distinct path(s)"),
+        "message must report both the declared and deduplicated counts; got {:?}",
+        diagnostic.message
     );
 }
 
@@ -955,5 +974,46 @@ async fn plain_nonzero_exit_without_annotation_limit_wording_stays_a_generic_com
         matches!(error, InstallError::CommandFailed { .. }),
         "an unrelated failure must not be misclassified as the annotation-size-limit case; got \
          {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn stderr_mentioning_annotations_without_the_size_limit_number_stays_a_generic_command_failed()
+ {
+    let dir = unique_temp_dir("annotations-word-only");
+    let path = write_manifest(
+        &dir,
+        "cm.yaml",
+        "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
+    );
+
+    // Contains "annotations" (a webhook rejecting for a reason of its
+    // own) but not the literal "262144" byte limit -- must not be
+    // misclassified as the annotation-size-limit case. This is what
+    // makes the detector's `&&` load-bearing rather than a check that
+    // cannot fail: a `&&` -> `||` mutation would misclassify this
+    // stderr as `ManifestExceedsAnnotationLimit`, and this test would
+    // catch it.
+    let runner = Arc::new(FakeProcessRunner::new().with(
+        &path,
+        FakeOutcome::Failure(
+            b"Error from server: admission webhook \"policy.example.com\" denied the request: \
+              annotations must include \"team\"\n",
+        ),
+    ));
+    let run_paths = test_run_paths();
+    let installer = ManifestsInstaller::new(runner.clone(), &run_paths);
+    let component = manifests_component(vec![path]);
+    let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
+
+    let error = installer
+        .install(&cluster, &component)
+        .await
+        .expect_err("a webhook rejection must still fail the install");
+
+    assert!(
+        matches!(error, InstallError::CommandFailed { .. }),
+        "stderr mentioning \"annotations\" alone, without the 262144 byte limit, must not be \
+         misclassified as the annotation-size-limit case; got {error:?}"
     );
 }
