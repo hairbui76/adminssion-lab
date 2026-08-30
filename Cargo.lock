@@ -101,6 +101,7 @@ dependencies = [
  "admissionlab-core",
  "admissionlab-installer",
  "admissionlab-spec",
+ "async-trait",
  "serde",
  "serde_json",
  "serde_norway",

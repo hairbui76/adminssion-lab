@@ -33,15 +33,16 @@ jobs:
     # Every `#[ignore]`d real-cluster test in this workspace runs here, one
     # matrix entry each -- `admissionlab-cluster`'s own `kind_smoke` (Task
     # 1.9), the Kyverno recipe certification test (Task 2.8), the Istio
-    # recipe certification test (Task 2.9), and `admissionlab-test-webhook`'s
-    # `kind_smoke` (Task 2.7). These used to exist only as a one-time check
+    # recipe certification test (Task 2.9), `admissionlab-test-webhook`'s
+    # `kind_smoke` (Task 2.7), and the Phase 2 Exit Gate sample lab
+    # (`exit_gate`, Task 2.11). These used to exist only as a one-time check
     # a human could run by hand; none of them were reachable from any CI
     # workflow, so a real regression in any of them (a vendor chart's next
     # patch release breaking enforcement, a dependency bump breaking
     # cluster creation) would go undetected forever. `fail-fast: false` so
-    # one matrix entry failing does not cancel the others -- with four
+    # one matrix entry failing does not cancel the others -- with five
     # independent real-cluster tests, losing signal on the rest the moment
-    # the first one fails would defeat the point of running all four.
+    # the first one fails would defeat the point of running all five.
     #
     # Deliberately parallel *jobs* (via matrix), not sequential `run:`
     # steps in one job: each of these tests creates and tears down at least
@@ -90,6 +91,8 @@ jobs:
             test: kyverno_recipe
           - package: admissionlab-recipes
             test: istio_recipe
+          - package: admissionlab-recipes
+            test: exit_gate
           - package: admissionlab-test-webhook
             test: kind_smoke
     steps:

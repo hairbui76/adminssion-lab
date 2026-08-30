@@ -55,6 +55,16 @@ thiserror = { workspace = true }
 admissionlab-cluster = { workspace = true }
 admissionlab-core = { workspace = true }
 admissionlab-installer = { workspace = true }
+# `tests/exit_gate.rs` (Task 2.11, the Phase 2 Exit Gate) is this
+# workspace's first concrete `admissionlab_core::run::StackInstaller`
+# implementation (`RealStackInstaller`) -- that trait, like every other
+# async trait in this workspace, is itself defined with `#[async_trait]`
+# (`admissionlab-core`'s own dependency), so implementing it here needs
+# the same macro. Already a workspace-pinned version, already a direct
+# dependency of `admissionlab-core`/`admissionlab-installer`; this is
+# only a new *dev*-dependency edge for this crate, not a new crate in
+# the dependency graph.
+async-trait = { workspace = true }
 # `tests/kyverno_recipe.rs` builds a `ResolvedComponent` directly (not
 # re-exported from this crate's own root -- see `lib.rs`) to hand to
 # `admissionlab_installer::install_stack`.
