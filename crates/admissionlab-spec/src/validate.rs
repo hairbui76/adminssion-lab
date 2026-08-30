@@ -12,7 +12,7 @@
 //! `serde_norway`'s own parse errors follow, so a validation failure and a
 //! parse failure read consistently.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::component::ResolvedComponent;
 use crate::error::SpecError;
@@ -96,6 +96,32 @@ pub(crate) fn fixture_include_nonempty(include: &[String], path: &Path) -> Resul
         return Err(SpecError::validation(
             path,
             "fixtures.include",
+            "must not be empty",
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects an empty manifests-install path list.
+///
+/// `locator` is the dotted locator of the enclosing component (for
+/// example `baseline.components[0]`), used to build the error's locator
+/// prefix -- mirrors [`fixture_include_nonempty`]'s shape (an empty,
+/// resolvable-but-meaningless list) applied to a component's `install`
+/// block instead of the top-level `fixtures` block. A manifests install
+/// naming no files would otherwise resolve cleanly, apply zero
+/// `kubectl` invocations, and report success: an install that installs
+/// nothing and calls that success is exactly the kind of quiet no-op
+/// this project exists to catch.
+pub(crate) fn manifests_paths_nonempty(
+    locator: &str,
+    paths: &[PathBuf],
+    path: &Path,
+) -> Result<(), SpecError> {
+    if paths.is_empty() {
+        return Err(SpecError::validation(
+            path,
+            format_args!("{locator}.install.paths"),
             "must not be empty",
         ));
     }

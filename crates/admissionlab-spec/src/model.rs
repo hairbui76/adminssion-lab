@@ -250,7 +250,8 @@ pub struct ManifestsInstallSpec {
     /// Manifest file or directory paths, resolved against the
     /// configuration file's own directory by [`crate::resolve_lab`] — see
     /// [`HelmInstallSpec::values_files`]'s documentation; the same
-    /// applies here.
+    /// applies here. Must not be empty — validated by
+    /// [`crate::resolve_lab`].
     pub paths: Vec<PathBuf>,
 }
 

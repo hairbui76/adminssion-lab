@@ -209,7 +209,7 @@
           "type": "object",
           "properties": {
             "paths": {
-              "description": "Manifest file or directory paths, resolved against the\nconfiguration file's own directory by [`crate::resolve_lab`] — see\n[`HelmInstallSpec::values_files`]'s documentation; the same\napplies here.",
+              "description": "Manifest file or directory paths, resolved against the\nconfiguration file's own directory by [`crate::resolve_lab`] — see\n[`HelmInstallSpec::values_files`]'s documentation; the same\napplies here. Must not be empty — validated by\n[`crate::resolve_lab`].",
               "type": "array",
               "items": {
                 "type": "string"

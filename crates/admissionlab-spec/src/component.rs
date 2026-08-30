@@ -270,9 +270,12 @@ pub(crate) fn resolve_component(
             config_dir,
             source_path,
         )?),
-        InstallMethodSpec::Manifests(manifests) => {
-            InstallMethod::Manifests(resolve_manifests(manifests, config_dir))
-        }
+        InstallMethodSpec::Manifests(manifests) => InstallMethod::Manifests(resolve_manifests(
+            &locator,
+            manifests,
+            config_dir,
+            source_path,
+        )?),
     };
 
     let install_version = match &install {
@@ -354,15 +357,22 @@ fn nonempty_or(override_value: Option<&str>, default_value: &str) -> String {
     }
 }
 
-/// Resolves a manifests install method: every path made absolute against
-/// `config_dir`.
-fn resolve_manifests(raw: &RawManifestsInstallSpec, config_dir: &Path) -> ManifestInstallSpec {
-    ManifestInstallSpec {
+/// Resolves a manifests install method: rejects an empty path list (see
+/// [`validate::manifests_paths_nonempty`]), then makes every remaining
+/// path absolute against `config_dir`.
+fn resolve_manifests(
+    locator: &str,
+    raw: &RawManifestsInstallSpec,
+    config_dir: &Path,
+    source_path: &Path,
+) -> Result<ManifestInstallSpec, SpecError> {
+    validate::manifests_paths_nonempty(locator, &raw.paths, source_path)?;
+    Ok(ManifestInstallSpec {
         paths: raw
             .paths
             .iter()
             .cloned()
             .map(|path| resolve_relative(config_dir, path))
             .collect(),
-    }
+    })
 }

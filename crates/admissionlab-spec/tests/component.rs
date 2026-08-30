@@ -656,6 +656,40 @@ fn manifests_component_resolves_to_expected_shape() {
     );
 }
 
+#[test]
+fn manifests_paths_must_not_be_empty() {
+    let path = write_config(
+        "manifests-empty-paths",
+        r#"
+        apiVersion: admissionlab.io/v1alpha1
+        kind: Lab
+        baseline:
+          kubernetes: "1.29.4"
+          components:
+            - name: raw-webhook
+              version: "1.0.0"
+              install:
+                type: manifests
+                paths: []
+        candidate:
+          kubernetes: "1.29.4"
+        fixtures:
+          include: ["fixtures/**/*.yaml"]
+        "#,
+    );
+
+    let loaded = load_lab(&path).unwrap();
+    let err = resolve_lab(loaded).expect_err(
+        "an empty manifests path list would install nothing and report success -- it must be \
+         rejected, not resolved",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("baseline.components[0].install.paths"),
+        "error must locate the offending field; got {message:?}"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Install-block path resolution: config directory, never the current
 // working directory
