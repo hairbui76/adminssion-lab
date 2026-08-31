@@ -36,6 +36,17 @@
 //! itself is Task 4.7's [`DivergenceEvidence`]-producing function; the
 //! evidence *types* are declared here because `SemanticChange` carries
 //! one and this crate must compile before that function exists.
+//!
+//! # Fixture attribution
+//!
+//! [`SemanticChange::fixture_id`] is *not* optional, because every
+//! change a report renders belongs to exactly one fixture. Not every
+//! comparison is handed that identity, though: the normalized object and
+//! trace types Tasks 4.5 and 4.6 compare carry none. Those comparisons
+//! emit changes stamped with [`unattributed_fixture_id`], and the caller
+//! that paired the two sides finishes the job with
+//! [`SemanticChange::attributed_to`]. See that method's documentation for
+//! the full argument, including why the sentinel is a loud one.
 
 use admissionlab_core::FixtureId;
 use serde::{Deserialize, Serialize};
@@ -280,6 +291,70 @@ pub struct SemanticChange {
     /// attempted or not possible for this change -- it never means "no
     /// divergence occurred". Filled in by Task 4.7.
     pub origin: Option<DivergenceEvidence>,
+}
+
+impl SemanticChange {
+    /// Returns this change with its [`SemanticChange::fixture_id`]
+    /// replaced by `fixture_id`.
+    ///
+    /// This is the seam every comparison whose *inputs carry no fixture
+    /// identity* uses. [`crate::admission::diff_admission_decision`]
+    /// needs nothing of the sort: an
+    /// `admissionlab_admission::AdmissionOutcome` has a `fixture_id`
+    /// field, so that function reads the identity straight off its own
+    /// input and its changes are attributed the moment they exist. The
+    /// two normalized types Tasks 4.5 and 4.6 compare --
+    /// `admissionlab_normalize::NormalizedObject` and
+    /// `NormalizedTrace` -- deliberately carry no identifier (§1.2 fixes
+    /// their fields, and normalization is a transformation of one
+    /// document, not a record of which fixture produced it), and both
+    /// tasks' signatures are frozen at two parameters. So those
+    /// functions emit changes stamped with
+    /// [`unattributed_fixture_id`], and the caller that *does* know
+    /// which fixture it paired -- the run loop, and ultimately
+    /// `admissionlab_report`'s `FixtureComparison`, which is keyed by
+    /// `fixture_id` -- stamps them here.
+    ///
+    /// Consuming `self` rather than mutating in place makes the stamping
+    /// visible at the call site (`changes.into_iter().map(|change|
+    /// change.attributed_to(&id))`), which is where a reviewer needs to
+    /// see it.
+    #[must_use]
+    pub fn attributed_to(mut self, fixture_id: &FixtureId) -> Self {
+        self.fixture_id = fixture_id.clone();
+        self
+    }
+}
+
+/// The [`FixtureId`] string a [`SemanticChange`] carries before a caller
+/// has attributed it to the fixture it was computed for.
+///
+/// A sentinel, and a deliberately recognizable one. It cannot collide
+/// with a real fixture identifier: `admissionlab_fixtures`' own
+/// `compute_fixture_id` always appends the document index, so every
+/// identifier it produces ends in a decimal digit, and this one does
+/// not. A report that renders this string is a report whose caller
+/// forgot to call [`SemanticChange::attributed_to`] -- which is exactly
+/// what a loud sentinel is for, as against a plausible-looking
+/// placeholder that would silently mislabel a change as belonging to
+/// some real fixture.
+pub const UNATTRIBUTED_FIXTURE: &str = "unattributed";
+
+/// Returns the [`UNATTRIBUTED_FIXTURE`] sentinel as a [`FixtureId`].
+///
+/// See [`SemanticChange::attributed_to`] for why comparisons over
+/// normalized objects and traces produce changes carrying this, and who
+/// is expected to replace it.
+///
+/// # Panics
+///
+/// Never. [`UNATTRIBUTED_FIXTURE`] is a non-empty string of ASCII
+/// lowercase letters, which is precisely what `FixtureId::parse`
+/// accepts.
+#[must_use]
+pub fn unattributed_fixture_id() -> FixtureId {
+    FixtureId::parse(UNATTRIBUTED_FIXTURE)
+        .expect("UNATTRIBUTED_FIXTURE is non-empty and ASCII lowercase, which FixtureId accepts")
 }
 
 /// Serializes a [`FixtureId`] as its bare string form

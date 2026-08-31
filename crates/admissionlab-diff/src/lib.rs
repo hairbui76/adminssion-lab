@@ -17,6 +17,24 @@
 //!   empty -- the verdict held, or the two sides were never comparable --
 //!   and why [`admission::DecisionComparability`] exists so a caller can
 //!   tell those apart.
+//! - [`workload`] compares two sides' *admitted objects*
+//!   ([`workload::diff_workload_objects`]): what did the webhook chain
+//!   leave behind? Containers, init containers, images, volumes, mounts,
+//!   environment, service account, security contexts, and resource
+//!   requirements -- all keyed by name, never by array index. Its module
+//!   documentation covers the subject-naming convention policy selectors
+//!   match on, why an unmodeled field never becomes a guessed category,
+//!   and why environment literals are the one thing it will not print.
+//!
+//! # Who fills in `fixture_id`
+//!
+//! [`SemanticChange::fixture_id`] is not optional, but not every
+//! comparison is handed one: an `AdmissionOutcome` carries its fixture
+//! identity, while a `NormalizedObject` and a `NormalizedTrace` do not.
+//! Comparisons over the latter emit
+//! [`unattributed_fixture_id`] and the caller that paired the two sides
+//! stamps the real one with [`SemanticChange::attributed_to`]. See that
+//! method's documentation for the full argument.
 //!
 //! # Two vocabularies, deliberately separate
 //!
@@ -48,9 +66,14 @@
 pub mod admission;
 pub mod raw;
 pub mod types;
+pub mod workload;
 
 pub use admission::{
     DecisionComparability, decision_comparability, diff_admission_decision, raw_decision_diff,
 };
 pub use raw::{RawChange, RawChangeOp, raw_object_diff};
-pub use types::{DivergenceConfidence, DivergenceEvidence, SemanticChange, SemanticChangeKind};
+pub use types::{
+    DivergenceConfidence, DivergenceEvidence, SemanticChange, SemanticChangeKind,
+    UNATTRIBUTED_FIXTURE, unattributed_fixture_id,
+};
+pub use workload::diff_workload_objects;

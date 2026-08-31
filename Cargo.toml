@@ -48,6 +48,17 @@ admissionlab-fixtures = { path = "crates/admissionlab-fixtures" }
 # first cross-crate consumer of this crate — drives a resolved recipe's
 # component through the real Task 2.6 install-and-wait pipeline.
 admissionlab-installer = { path = "crates/admissionlab-installer" }
+# `admissionlab-diff`'s `workload.rs`/`trace.rs` (Tasks 4.5/4.6) are the
+# first cross-crate consumers of this crate: `diff_workload_objects` and
+# `diff_admission_trace` take `&NormalizedObject` and `&NormalizedTrace`
+# on both sides -- the roadmap's own frozen signatures. This is the
+# `diff -> normalize` edge §1.1 draws explicitly, so it needs no
+# separate justification, only a workspace-level entry (nothing depended
+# on `admissionlab-normalize` before). Acyclic: `admissionlab-normalize`
+# depends on `admissionlab-admission`, `json-patch`, and `serde`, none of
+# which reach back to `admissionlab-diff`, and a `normalize -> diff` edge
+# must never be added.
+admissionlab-normalize = { path = "crates/admissionlab-normalize" }
 # `admissionlab-test-webhook`'s `tests/recipe_loads.rs` and
 # `tests/kind_smoke.rs` (Task 2.7) are the first cross-crate consumers of
 # this crate — loading `recipes/test-webhook/recipe.yaml` through Task

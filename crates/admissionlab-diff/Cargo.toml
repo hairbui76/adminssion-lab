@@ -26,6 +26,16 @@ admissionlab-admission = { workspace = true }
 # report reaches diff results through `admissionlab-report`, not through
 # `core`).
 admissionlab-core = { workspace = true }
+# `workload.rs`'s `diff_workload_objects` (Task 4.5) takes
+# `&admissionlab_normalize::NormalizedObject` on both sides -- the
+# roadmap's own frozen signature -- and compares the normalized objects
+# inside them. This is the `diff -> normalize` edge §1.1 draws
+# explicitly; see the root `Cargo.toml`'s own comment on this entry for
+# why it is acyclic. Comparing *normalized* objects rather than raw
+# captured ones is the whole point: the noise a comparison must not
+# report on has already been removed, and
+# `NormalizedObject::evidence` records what that removal was.
+admissionlab-normalize = { workspace = true }
 # `raw.rs` (Task 4.3) wraps `json_patch::diff` to produce this crate's
 # own RFC 6902 `RawChange` diagnostics. See the root `Cargo.toml`'s own
 # comment on this entry for the crate/library name mismatch and license

@@ -1,0 +1,97 @@
+[
+  {
+    "kind": "init_container_removed",
+    "fixture_id": "sidecar-injection-pod-checkout-0",
+    "object_path": "/spec/initContainers/0",
+    "subject": "init-config",
+    "baseline": {
+      "name": "init-config",
+      "image": "registry.example.com/init-config:1.4.0",
+      "volumeMounts": [
+        {
+          "name": "config",
+          "mountPath": "/etc/config"
+        }
+      ]
+    },
+    "candidate": null,
+    "origin": null
+  },
+  {
+    "kind": "volume_mount_changed",
+    "fixture_id": "sidecar-injection-pod-checkout-0",
+    "object_path": "/spec/containers/0/volumeMounts/1",
+    "subject": "app",
+    "baseline": null,
+    "candidate": {
+      "name": "istio-envoy",
+      "mountPath": "/var/run/secrets/istio",
+      "readOnly": true
+    },
+    "origin": null
+  },
+  {
+    "kind": "environment_changed",
+    "fixture_id": "sidecar-injection-pod-checkout-0",
+    "object_path": "/spec/containers/0/env/0",
+    "subject": "app",
+    "baseline": {
+      "name": "DB_PASSWORD",
+      "valueSource": "valueFrom",
+      "valueFrom": {
+        "secretKeyRef": {
+          "name": "checkout-db",
+          "key": "password"
+        }
+      }
+    },
+    "candidate": {
+      "name": "DB_PASSWORD",
+      "valueSource": "literal"
+    },
+    "origin": null
+  },
+  {
+    "kind": "container_added",
+    "fixture_id": "sidecar-injection-pod-checkout-0",
+    "object_path": "/spec/containers/1",
+    "subject": "istio-proxy",
+    "baseline": null,
+    "candidate": {
+      "name": "istio-proxy",
+      "image": "docker.io/istio/proxyv2:1.29.0",
+      "env": [
+        {
+          "name": "ISTIO_META_WORKLOAD_NAME",
+          "valueSource": "literal"
+        },
+        {
+          "name": "PROXY_CONFIG_TOKEN",
+          "valueSource": "literal"
+        }
+      ],
+      "volumeMounts": [
+        {
+          "name": "istio-envoy",
+          "mountPath": "/var/run/secrets/istio",
+          "readOnly": true
+        }
+      ]
+    },
+    "origin": null
+  },
+  {
+    "kind": "volume_added",
+    "fixture_id": "sidecar-injection-pod-checkout-0",
+    "object_path": "/spec/volumes/1",
+    "subject": "istio-envoy",
+    "baseline": null,
+    "candidate": {
+      "name": "istio-envoy",
+      "emptyDir": {
+        "medium": "Memory"
+      }
+    },
+    "origin": null
+  }
+]

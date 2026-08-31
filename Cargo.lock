@@ -77,6 +77,7 @@ version = "0.1.0"
 dependencies = [
  "admissionlab-admission",
  "admissionlab-core",
+ "admissionlab-normalize",
  "json-patch",
  "serde",
  "serde_json",
