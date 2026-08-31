@@ -209,7 +209,7 @@ async fn parses_the_typed_subset_and_keeps_the_annotation_map_raw() {
             .get("patch.webhook.admission.k8s.io/round_0_index_0")
             .map(String::as_str),
         Some(
-            r#"[{"op":"add","path":"/metadata/labels/admissionlab.dev~1mutated","value":"true"}]"#
+            r#"{"configuration":"admissionlab-test-webhook","webhook":"mutate.test-webhook.admissionlab.dev","patch":[{"op":"add","path":"/metadata/labels/admissionlab.dev~1mutated","value":"true"}],"patchType":"JSONPatch"}"#
         )
     );
     assert_eq!(
