@@ -24,6 +24,14 @@ repository = "https://github.com/hairbui76/adminssion-lab"
 admissionlab-admission = { path = "crates/admissionlab-admission" }
 admissionlab-cluster = { path = "crates/admissionlab-cluster" }
 admissionlab-core = { path = "crates/admissionlab-core" }
+# `admissionlab-policy`'s `severity.rs`/`evaluate.rs` (Task 4.8) are the
+# first cross-crate consumers of this crate: policy grades
+# `admissionlab_diff::SemanticChange` values and keys its default
+# severity table on `SemanticChangeKind`. This is the `policy -> diff`
+# edge §1.1 draws explicitly, so it needs no separate justification --
+# only a workspace-level entry, which it did not have before because
+# nothing depended on `admissionlab-diff` yet.
+admissionlab-diff = { path = "crates/admissionlab-diff" }
 # `admissionlab-admission`'s `execute.rs` (Task 3.4) is the first
 # cross-crate consumer of this crate: `AdmissionExecutor::execute_create`
 # takes `&admissionlab_fixtures::FixtureSource` and

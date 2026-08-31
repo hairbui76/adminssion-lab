@@ -275,11 +275,22 @@ pub struct FixtureSelectionSpec {
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema, Default)]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct PolicySpec {
-    /// Regression categories that fail the run when observed. A
-    /// [`BTreeSet`] rather than a `Vec` so a duplicated entry collapses
-    /// silently and the serialized/schema representation has a
-    /// deterministic order. Semantics of what belongs in this set (which
-    /// category names are meaningful) are Task 4.8's responsibility.
+    /// Regression categories that fail the run when observed, named by
+    /// their semantic-change wire name (`container_removed`,
+    /// `newly_denied`, ...). A [`BTreeSet`] rather than a `Vec` so a
+    /// duplicated entry collapses silently and the serialized/schema
+    /// representation has a deterministic order.
+    ///
+    /// A `String` rather than a typed enum, and unvalidated by this
+    /// crate: the set of meaningful names belongs to
+    /// `admissionlab-diff`, which §1.1 places *above* this crate, so
+    /// checking a name here would mean either an inverted dependency or
+    /// a second copy of the list that could drift from the first.
+    /// `admissionlab_policy::validate_policy_spec` performs that check
+    /// instead, and the orchestrator calls it right after
+    /// [`crate::resolve_lab`] — before any cluster is created — so an
+    /// unknown name still fails at load time rather than silently
+    /// matching nothing.
     pub fail_on: BTreeSet<String>,
     /// Targeted exceptions to the blanket `fail_on` policy.
     pub overrides: Vec<PolicyOverrideSpec>,
@@ -295,6 +306,13 @@ pub struct PolicySpec {
 /// `path` names a location *within* the compared object (for example a
 /// JSON-pointer-like field path), not a filesystem path, so it is never
 /// resolved against the configuration file's directory.
+///
+/// `kind` and `severity` are `String`s that this crate does not
+/// validate, for the reason [`PolicySpec::fail_on`] gives;
+/// `admissionlab_policy::validate_policy_spec` checks both names, checks
+/// that `fixtures` is a compilable glob, and rejects an
+/// empty-but-present `fixtures`/`subject`/`path` (a restriction nothing
+/// could ever satisfy).
 #[derive(Debug, Clone, PartialEq, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PolicyOverrideSpec {

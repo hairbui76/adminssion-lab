@@ -7,3 +7,48 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `SemanticChange::fixture_id` is an `admissionlab_core::FixtureId`, and
+# this crate matches fixture globs against its string form
+# (`ChangeSelector::fixture_glob`), so it names the type directly rather
+# than reaching it only through `admissionlab-diff`'s re-export. Same
+# one-way edge every other crate here has: `admissionlab-core` must never
+# depend back on this crate.
+admissionlab-core = { workspace = true }
+# The `policy -> diff` edge §1.1 names explicitly. This crate grades
+# `admissionlab_diff::SemanticChange` values; it never produces one.
+admissionlab-diff = { workspace = true }
+# `policy -> spec` is not drawn in §1.1's diagram, which lists only
+# `policy -> diff`. The edge is nonetheless real and intended: §1.2's
+# cross-task type registry assigns `PolicySpec`/`PolicyOverrideSpec` to
+# `admissionlab-spec` (they are user-authored `admissionlab.yaml`
+# sections, and that crate owns the configuration contract), while Task
+# 4.8 assigns *interpreting* them to this crate. Reading a type whose
+# canonical owner is another crate is exactly what the registry is for,
+# so this is resolved deliberately rather than by re-declaring a second
+# `PolicySpec` here -- the same way the root `Cargo.toml` documents
+# `diff -> admission`. It is acyclic: `admissionlab-spec` has no
+# workspace dependencies at all (see its own `Cargo.toml`), so nothing
+# can close a loop back through it, and nothing may ever add a
+# `spec -> policy` or `spec -> diff` edge (§1.1 keeps `spec` beneath
+# everything; that is also why the semantic-kind name validation Task
+# 4.8 step 3 asks for lives here and not in `spec/src/validate.rs` --
+# see `evaluate::validate_policy_spec`).
+admissionlab-spec = { workspace = true }
+# `ChangeSelector::fixture_glob` and `ExpectedChange::fixtures` are
+# globs over fixture identifiers, compiled with the same crate
+# `admissionlab-spec` already compiles `fixtures.include` with, so a
+# pattern means the same thing in both places.
+globset = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The tests build `PolicySpec` values by parsing the same YAML a user
+# would write, rather than by constructing the struct in Rust: a
+# hand-built struct cannot catch a policy section that fails to parse at
+# all, and the load-time validation seam this crate exposes is only
+# meaningful if it is exercised against parsed configuration.
+serde_norway = { workspace = true }
+serde_json = { workspace = true }

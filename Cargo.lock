@@ -145,6 +145,16 @@ dependencies = [
 [[package]]
 name = "admissionlab-policy"
 version = "0.1.0"
+dependencies = [
+ "admissionlab-core",
+ "admissionlab-diff",
+ "admissionlab-spec",
+ "globset",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "thiserror",
+]
 
 [[package]]
 name = "admissionlab-recipes"
