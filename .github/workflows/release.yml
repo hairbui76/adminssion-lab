@@ -1,0 +1,228 @@
+name: Release
+
+# Builds the `admissionlab` binary for the four platforms Admission Lab
+# supports, checksums them, signs the checksum file with a keyless
+# Sigstore certificate, and attaches everything to a **draft** GitHub
+# Release for a human to review and publish.
+#
+# Windows is deliberately absent. `kind` on native Windows behaves
+# differently enough from Linux/macOS that Admission Lab does not commit
+# to it for v1 (ROADMAP Task 4.16 Step 4); Windows users run Admission
+# Lab under WSL2 and use the Linux amd64 artifact. Publishing a Windows
+# binary here would imply a support commitment the project has not made.
+#
+# Nothing in this workflow can run outside a tag push, and nothing it
+# produces is public until a maintainer publishes the draft.
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Read-only by default. The one job that needs to write a release
+# (`release`) raises its own permissions, and only that job gets the
+# `id-token: write` scope keyless signing requires.
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Every entry builds on a runner whose own architecture matches
+          # the target, with one deliberate exception (below). Native
+          # builds are not a convenience here: `ring` (reached through
+          # `rustls` -> `kube`) ships per-architecture assembly and a C
+          # build script, so a cross-compile needs a full cross toolchain
+          # and sysroot rather than only `rustup target add`. Matrix
+          # runners keep the release path identical to the path
+          # `cargo build --release` takes on a contributor's machine.
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: aarch64-apple-darwin
+            runner: macos-14
+          # The exception: Apple's own toolchain on an Apple Silicon
+          # runner targets x86_64 macOS first-class (it is how universal
+          # binaries are built), so this one target is cross-built rather
+          # than given a separate Intel runner whose availability GitHub
+          # has been retiring.
+          - target: x86_64-apple-darwin
+            runner: macos-14
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Add the Rust target
+        run: rustup target add ${{ matrix.target }}
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: ${{ matrix.target }}
+
+      # Before the build, so a mistyped tag costs seconds rather than a
+      # full release compile on four runners.
+      - name: Verify the tag matches the crate version
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          crate_version="$(cargo metadata --format-version 1 --no-deps --locked \
+            | jq -r '.packages[] | select(.name == "admissionlab-cli") | .version')"
+          if [ "${tag}" != "v${crate_version}" ]; then
+            echo "::error::tag ${tag} does not match admissionlab-cli version ${crate_version}"
+            exit 1
+          fi
+          echo "version=${crate_version}" >> "${GITHUB_OUTPUT}"
+
+      # `--locked` refuses to update `Cargo.lock`: a released binary must
+      # be built from the dependency versions this repository has
+      # reviewed, never from whatever resolved at release time.
+      - name: Build the release binary
+        run: cargo build --release --locked -p admissionlab-cli --target ${{ matrix.target }}
+
+      # A tarball rather than a bare binary: it carries the licence and
+      # the README alongside the executable, and it preserves the
+      # executable bit, which a bare release asset download does not.
+      - name: Package the artifact
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          name="admissionlab-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          staging="$(mktemp -d)/${name}"
+          mkdir -p "${staging}"
+          cp "target/${{ matrix.target }}/release/admissionlab" "${staging}/"
+          cp LICENSE README.md "${staging}/"
+          tar --create --gzip --file "${name}.tar.gz" --directory "$(dirname "${staging}")" "${name}"
+          echo "archive=${name}.tar.gz" >> "${GITHUB_OUTPUT}"
+
+      - name: Upload the artifact
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: admissionlab-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      # Create the draft release and attach assets to it.
+      contents: write
+      # Mint the short-lived OIDC token `cosign` exchanges for a keyless
+      # Sigstore signing certificate. This is the whole reason the
+      # workflow needs no stored signing secret: the identity being
+      # attested is this workflow running on this repository at this tag,
+      # and GitHub issues it, so there is no private key to leak, rotate,
+      # or name here.
+      id-token: write
+    steps:
+      - name: Download every built artifact
+        uses: actions/download-artifact@v4.3.0
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # One `SHA256SUMS` covering every archive, generated on a single
+      # Linux runner so the checksum tool and its output format are the
+      # same for all four targets (macOS ships `shasum`, not
+      # `sha256sum`). Sorted so the file's contents depend only on the
+      # set of archives, not on download order.
+      - name: Generate SHA-256 checksums
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' \
+            | LC_ALL=C sort \
+            | xargs sha256sum > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3.9.2
+
+      # Signs the checksum file, not each archive: `SHA256SUMS` already
+      # commits to every archive's exact contents, so one signature
+      # covers all four and a verifier has one thing to check.
+      #
+      # Keyless: the signature is bound to a Sigstore certificate issued
+      # against this workflow's GitHub OIDC identity and recorded in the
+      # public Rekor transparency log. Verification instructions ship in
+      # the release notes below.
+      - name: Sign the checksum file
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          cosign sign-blob \
+            --yes \
+            --output-signature SHA256SUMS.sig \
+            --output-certificate SHA256SUMS.pem \
+            SHA256SUMS
+
+      - name: Create the draft release
+        working-directory: artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+          WORKFLOW_REF: ${{ github.workflow_ref }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Admission Lab \`${TAG}\` — Public Alpha."
+            echo
+            echo "Admission Lab is pre-1.0. The \`admissionlab.io/result/v1alpha1\`"
+            echo "result schema is experimental and may change without a"
+            echo "compatibility guarantee until Public Beta."
+            echo
+            echo "### Artifacts"
+            echo
+            echo "| Platform | Archive |"
+            echo "| --- | --- |"
+            echo "| Linux x86_64 | \`admissionlab-*-x86_64-unknown-linux-gnu.tar.gz\` |"
+            echo "| Linux aarch64 | \`admissionlab-*-aarch64-unknown-linux-gnu.tar.gz\` |"
+            echo "| macOS Apple Silicon | \`admissionlab-*-aarch64-apple-darwin.tar.gz\` |"
+            echo "| macOS Intel | \`admissionlab-*-x86_64-apple-darwin.tar.gz\` |"
+            echo
+            echo "There is no native Windows build. Run Admission Lab under WSL2"
+            echo "with the Linux x86_64 archive."
+            echo
+            echo "### Verifying a download"
+            echo
+            echo '```bash'
+            echo "sha256sum --check --ignore-missing SHA256SUMS"
+            echo
+            echo "cosign verify-blob \\"
+            echo "  --certificate SHA256SUMS.pem \\"
+            echo "  --signature SHA256SUMS.sig \\"
+            echo "  --certificate-identity '${WORKFLOW_REF}' \\"
+            echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
+            echo "  SHA256SUMS"
+            echo '```'
+          } > notes.md
+
+          # `--draft`: a maintainer reviews the assets and publishes.
+          # `--verify-tag`: refuses to invent a tag that does not exist.
+          gh release create "${TAG}" \
+            --repo "${REPO}" \
+            --draft \
+            --verify-tag \
+            --title "Admission Lab ${TAG}" \
+            --notes-file notes.md \
+            ./*.tar.gz SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem
