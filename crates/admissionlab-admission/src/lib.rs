@@ -78,6 +78,22 @@
 //!   [`metrics::WebhookMetricDelta::attributable_latency`] yields `Some`
 //!   only under the exactly-one-invocation rule that makes attributing a
 //!   duration to a single fixture sound at all.
+//! - [`capture`] implements Task 3.10, and is where all of the above
+//!   meet: [`capture::capture_fixture`] runs the whole pipeline for one
+//!   fixture on one side (checkpoint, one dry-run CREATE, wait for that
+//!   request's own audit event, reconstruct its trace, merge whatever
+//!   latency can soundly be attributed to it) and
+//!   [`capture::write_evidence`] writes the
+//!   `raw/<side>/<fixture-id>/` bundle Phase 4 reads.
+//!   [`capture::KubeFixtureCapture`] is this crate's implementation of
+//!   `admissionlab_core::FixtureCapture` -- the coarser, core-declared
+//!   trait described below. Read that module's documentation before
+//!   trusting any captured trace: it is where this project draws the
+//!   line between "this fixture failed" and "this evidence is absent",
+//!   and in particular why a correlation failure yields an outcome whose
+//!   trace is [`trace::TraceEvidence::Unavailable`] rather than either a
+//!   fixture failure or -- the fabrication Global Constraint 15 forbids
+//!   -- an observed empty chain.
 //!
 //! # Dependency direction (controller supplement §3, Task 3.3; §2, Task 3.4)
 //!
@@ -97,9 +113,14 @@
 //! trait declared in `core` (using only core-visible types) and
 //! implemented here -- the same shape `admissionlab_core::ClusterManager`
 //! and `admissionlab_core::StackInstaller` already use -- never by
-//! naming [`execute::AdmissionExecutor`] itself from `core`.
+//! naming [`execute::AdmissionExecutor`] itself from `core`. That trait
+//! is `admissionlab_core::FixtureCapture`, this crate implements it as
+//! [`capture::KubeFixtureCapture`], and the dependency direction is
+//! unchanged: `admission -> fixtures -> core`, with nothing pointing
+//! back.
 
 pub mod audit_reader;
+pub mod capture;
 pub mod correlate;
 pub mod execute;
 pub mod metrics;
@@ -109,6 +130,11 @@ pub mod trace;
 pub use audit_reader::{
     AuditCheckpoint, AuditError, AuditEvent, AuditLogReader, AuditObjectRef, AuditResponseStatus,
     DEFAULT_POLL_INTERVAL, FileAuditLogReader, STAGE_RESPONSE_COMPLETE,
+};
+pub use capture::{
+    AuditArtifact, CORRELATION_RETRY_INTERVAL, CapturedEvidence, DEFAULT_AUDIT_CORRELATION_TIMEOUT,
+    KubeFixtureCapture, ResponseArtifact, capture_fixture, capture_fixture_evidence,
+    write_evidence,
 };
 pub use correlate::{
     AUDIT_TIMESTAMP_RESOLUTION, CorrelationError, DRY_RUN_ALL, DRY_RUN_QUERY_PARAM,

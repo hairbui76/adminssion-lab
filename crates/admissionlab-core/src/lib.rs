@@ -22,8 +22,9 @@ pub use process::{
     env_key_looks_sensitive,
 };
 pub use run::{
-    ClusterCreationFailure, InstalledComponent, InstalledLab, LabRunner, PreparedLab, RunError,
-    RunOptions, SideInstall, StackInstallError, StackInstallFailure, StackInstaller,
+    CapturedFixture, CapturedLab, ClusterCreationFailure, FixtureCapture, FixtureCaptureError,
+    FixtureCaptureFailure, InstalledComponent, InstalledLab, LabRunner, PreparedLab, RunError,
+    RunOptions, SideCapture, SideInstall, StackInstallError, StackInstallFailure, StackInstaller,
     preserved_cluster_report,
 };
 pub use side::Side;

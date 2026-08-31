@@ -1,0 +1,35 @@
+# Init-container mutation, half 2 of 2: removing one that the fixture
+# itself declares.
+#
+# The pod below really does carry `spec.initContainers[0].name:
+# legacy-init`, so `crates/admissionlab-test-webhook/src/mutate.rs`
+# resolves that name to an index against the incoming object and emits
+#
+# ```json
+# [{"op": "remove", "path": "/spec/initContainers/0"}]
+# ```
+#
+# A removal is the one mutation shape that cannot be faked by a webhook
+# that merely adds things, and it is the shape the Phase 3 Exit Gate
+# names explicitly ("remove init container"): a candidate stack that
+# stopped removing something is a regression a corpus of pure additions
+# would never surface.
+#
+# Carries the `test.admissionlab.io/containers` gate label, like every
+# other `MutationScope::Workload` fixture here.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: remove-init-container
+  namespace: admissionlab-fixtures
+  labels:
+    test.admissionlab.io/containers: "enabled"
+  annotations:
+    test.admissionlab.io/remove-init-container: "legacy-init"
+spec:
+  initContainers:
+    - name: legacy-init
+      image: registry.k8s.io/pause:3.10
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

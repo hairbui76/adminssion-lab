@@ -130,6 +130,76 @@
 //! deterministic per-side order" rather than needing to hand-write its
 //! own `tokio::join!` over `admissionlab_installer::stack::install_stack`
 //! every time.
+//!
+//! # Fixture capture (Task 3.10): [`FixtureCapture`]
+//!
+//! [`LabRunner::capture_fixtures`] is the lifecycle stage after
+//! [`LabRunner::install_stacks`]: replaying every fixture through each
+//! side's installed stack and writing the raw evidence bundle Phase 4
+//! compares. It reaches that behavior through [`FixtureCapture`] — a
+//! third trait of exactly the same shape as [`ClusterManager`] and
+//! [`StackInstaller`], declared here and implemented downstream, for
+//! exactly the same Controller Ruling R22 reason spelled out above:
+//! `admissionlab-admission` (which owns the capture pipeline) already
+//! depends on `admissionlab-core` through
+//! `admissionlab-admission -> admissionlab-fixtures -> admissionlab-core`,
+//! so a `core -> admission` edge would close a cycle Cargo rejects
+//! outright. `admissionlab_admission::capture::KubeFixtureCapture` is the
+//! concrete implementation.
+//!
+//! ## Why the trait is one call per *side*, not one per fixture
+//!
+//! Global Constraint 17 makes fixture execution serial within a cluster,
+//! because that serialization is what makes audit-log correlation
+//! deterministic in the first place (see
+//! `admissionlab_admission::audit_reader`'s own documentation). A
+//! per-fixture trait method would put that ordering guarantee in this
+//! module — which cannot enforce it, since a caller could always drive
+//! the method concurrently — while a per-side method puts it inside the
+//! implementation that actually depends on it. So [`FixtureCapture`]
+//! takes a whole side and is contracted to run its fixtures one at a
+//! time; this module's own concurrency stops at the two sides, which are
+//! separate clusters and therefore separate audit logs (GC17's own
+//! explicit allowance).
+//!
+//! ## What [`CapturedFixture`] deliberately does not carry
+//!
+//! Unlike [`InstalledComponent`], which mirrors
+//! `admissionlab_installer::InstallRecord` field-for-field, this crate's
+//! capture result carries *no* copy of the admission decision, the
+//! response object, or the webhook trace. That is not an oversight and
+//! not a limitation of what `core` can name: those live in
+//! `admissionlab_admission::AdmissionOutcome`, whose JSON serialization
+//! is a report contract Phase 4 reads and compares. Duplicating that
+//! vocabulary here would create a second copy of it in a crate that has
+//! no use for it — free to drift, and impossible to keep honest about
+//! the tri-state "unknown" values that model exists to preserve
+//! (`TraceEvidence`, `WebhookInvocation::mutated`,
+//! `WebhookInvocation::latency`). [`CapturedFixture`] instead names
+//! *where the evidence is*: [`CapturedFixture::outcome_path`] is the
+//! `outcome.json` a [`FixtureCapture`] implementation wrote, and
+//! [`CapturedFixture::artifact_dir`] is the bundle around it.
+//!
+//! ## [`CapturedLab`] is Phase 4's seam, and says so
+//!
+//! A successful [`LabRunner::capture_fixtures`] means every fixture was
+//! replayed and its evidence written — and nothing more. Nothing has
+//! been normalized, nothing compared, no regression classified, no
+//! pass/fail reached. [`CapturedLab`] is that state as a type, so a
+//! caller cannot accidentally present it as a lab result: it holds no
+//! verdict field to misread, and
+//! [`crate::artifact::RunDisposition::Passed`] is not
+//! reachable from it. Phase 4 is what turns a [`CapturedLab`] into a
+//! comparison, by reading the `outcome.json` files it points at.
+//!
+//! As with [`StackInstaller`] before it, no caller in this workspace
+//! constructs a real [`FixtureCapture`] yet: `admissionlab test` still
+//! stops after cluster creation (see `admissionlab-cli`'s
+//! `commands::test` module documentation for the honesty constraint that
+//! keeps it from claiming otherwise), and wiring the full
+//! prepare → install → capture → compare chain into the CLI is Task
+//! 4.14's job. `admissionlab-admission`'s own `tests/kind_capture.rs`
+//! drives this method against a real `kind` cluster today.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -144,7 +214,7 @@ use thiserror::Error;
 use crate::artifact::{ArtifactError, ArtifactStore, RunPaths};
 use crate::cluster::{ClusterError, ClusterHandle, ClusterManager, ClusterSpec};
 use crate::diagnostic::{Diagnostic, RedactedValue};
-use crate::ids::RunId;
+use crate::ids::{FixtureId, RunId};
 use crate::side::Side;
 
 /// Number of leading [`RunId`] characters used as a cluster name's run
@@ -760,6 +830,250 @@ impl<C: ClusterManager> LabRunner<C> {
             (Err(error), Ok(candidate)) => Err(StackInstallFailure::Baseline { error, candidate }),
             (Ok(baseline), Err(error)) => Err(StackInstallFailure::Candidate { baseline, error }),
             (Err(baseline), Err(candidate)) => Err(StackInstallFailure::Both {
+                baseline,
+                candidate,
+            }),
+        }
+    }
+}
+
+// =========================================================================
+// Fixture capture (Task 3.10). See this module's documentation
+// ("Fixture capture (Task 3.10)") for why this abstraction lives here
+// rather than in `admissionlab-admission`, why it is one call per side,
+// and what `CapturedFixture` deliberately does not carry.
+// =========================================================================
+
+/// An abstraction over replaying every fixture through one side's
+/// already-installed stack and writing each one's raw evidence bundle.
+///
+/// Implemented by `admissionlab_admission::capture::KubeFixtureCapture`;
+/// see this module's documentation for why it cannot be named from here.
+///
+/// `Send + Sync` for the same reason [`ClusterManager`] and
+/// [`StackInstaller`] are: [`LabRunner::capture_fixtures`] drives one
+/// implementation for both sides at once.
+#[async_trait]
+pub trait FixtureCapture: Send + Sync {
+    /// Replays this run's fixtures against `cluster`, **one at a time**,
+    /// and writes each fixture's evidence under `paths`'
+    /// [`RunPaths::raw`] directory as `raw/<side>/<fixture-id>/`.
+    ///
+    /// Which fixtures those are is the implementation's own business:
+    /// fixture discovery (`admissionlab_fixtures::discover_fixtures`)
+    /// produces `admissionlab-fixtures` types this crate cannot name, so
+    /// an implementation is constructed with the discovered set already
+    /// in hand rather than receiving it here. Both sides are given the
+    /// same implementation and therefore the same fixtures, which is
+    /// what makes their results comparable at all.
+    ///
+    /// # Serial execution is part of this contract
+    ///
+    /// Global Constraint 17: an implementation must issue at most one
+    /// fixture request against `cluster` at a time. Audit-log
+    /// correlation is what depends on it — two concurrent requests
+    /// against one API server can write interleaved events that no
+    /// offset-plus-object-reference match can separate — so an
+    /// implementation that parallelizes within a side breaks correctness,
+    /// not merely determinism.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureCaptureError`] if any fixture could not be
+    /// replayed or its evidence could not be written. A fixture the API
+    /// server *rejected* is not a failure: that is an ordinary captured
+    /// outcome, and one of the two things this whole pipeline exists to
+    /// observe.
+    async fn capture_side(
+        &self,
+        cluster: &ClusterHandle,
+        side: Side,
+        paths: &RunPaths,
+    ) -> Result<SideCapture, FixtureCaptureError>;
+}
+
+/// One fixture's captured evidence, as a location on disk.
+///
+/// See this module's documentation ("What [`CapturedFixture`]
+/// deliberately does not carry") for why there is no decision, response
+/// object, or webhook trace here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedFixture {
+    /// Which fixture this evidence is for.
+    pub fixture_id: FixtureId,
+    /// Which side produced it.
+    pub side: Side,
+    /// The `raw/<side>/<fixture-id>/` directory holding this fixture's
+    /// whole evidence bundle (`request.json`, `response.json`,
+    /// `audit.json`, `outcome.json`, and the two `metrics-*.prom` pages
+    /// when metric collection was enabled).
+    pub artifact_dir: PathBuf,
+    /// The `outcome.json` inside [`CapturedFixture::artifact_dir`]: the
+    /// serialized `admissionlab_admission::AdmissionOutcome`, and Phase
+    /// 4's actual input.
+    pub outcome_path: PathBuf,
+    /// Non-fatal findings recorded while capturing this fixture — an
+    /// audit event that could not be correlated, a `/metrics` page that
+    /// could not be scraped, an unparsable audit-log line. Empty when
+    /// there is nothing to report. Never a substitute for the outcome
+    /// itself, which always states what *was* observed.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Every fixture captured on one side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SideCapture {
+    /// Which side these fixtures were replayed against.
+    pub side: Side,
+    /// One entry per fixture, in the order they were replayed — which is
+    /// fixture discovery's own deterministic order (see
+    /// `admissionlab_fixtures::discover`), not an arrival order.
+    pub fixtures: Vec<CapturedFixture>,
+}
+
+/// Both sides' captured evidence: the state a run reaches when every
+/// fixture has been replayed and nothing has been compared yet.
+///
+/// See this module's documentation ("[`CapturedLab`] is Phase 4's
+/// seam") for why this type deliberately carries no verdict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapturedLab {
+    /// The baseline side's captured fixtures.
+    pub baseline: SideCapture,
+    /// The candidate side's captured fixtures.
+    pub candidate: SideCapture,
+}
+
+/// [`FixtureCapture::capture_side`] could not capture every fixture it
+/// was given.
+///
+/// Renders its implementation's own richer error down to a `String`, the
+/// same way [`StackInstallError`] does for
+/// `admissionlab_installer::InstallError` and [`ClusterError::KindConfigRender`]
+/// does for `admissionlab-cluster`'s own errors — for the identical
+/// reason: this crate cannot name
+/// `admissionlab_admission::FixtureExecutionError` without the
+/// dependency edge this whole abstraction exists to avoid.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FixtureCaptureError {
+    /// The `FixtureId` (as a string) of the fixture that failed. `None`
+    /// only if an implementation fails before it can identify one.
+    pub fixture: Option<String>,
+    /// A human-readable, safe-to-print explanation.
+    pub message: String,
+}
+
+impl fmt::Display for FixtureCaptureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.fixture {
+            Some(fixture) => write!(f, "fixture {fixture:?} failed to capture: {}", self.message),
+            None => write!(f, "fixture capture failed: {}", self.message),
+        }
+    }
+}
+
+impl std::error::Error for FixtureCaptureError {}
+
+/// Which side(s) failed to capture its fixtures, and why. See
+/// [`LabRunner::capture_fixtures`].
+///
+/// Carries the successful side's [`SideCapture`] alongside a single
+/// side's failure, for exactly the reason [`StackInstallFailure`] does:
+/// the evidence that side did capture is already written to disk and
+/// still true, so discarding the record of it would throw away real
+/// information a user would otherwise have to rerun the whole lab to get
+/// back (PRODUCT.md §33).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FixtureCaptureFailure {
+    /// Only the baseline side failed.
+    Baseline {
+        /// The baseline side's failure.
+        error: FixtureCaptureError,
+        /// What the candidate side — which succeeded — captured.
+        candidate: SideCapture,
+    },
+    /// Only the candidate side failed.
+    Candidate {
+        /// What the baseline side — which succeeded — captured.
+        baseline: SideCapture,
+        /// The candidate side's failure.
+        error: FixtureCaptureError,
+    },
+    /// Both sides failed — neither has a [`SideCapture`] to carry.
+    Both {
+        /// The baseline side's failure.
+        baseline: FixtureCaptureError,
+        /// The candidate side's failure.
+        candidate: FixtureCaptureError,
+    },
+}
+
+impl fmt::Display for FixtureCaptureFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Baseline { error, .. } => {
+                write!(f, "baseline fixture capture failed: {error}")
+            }
+            Self::Candidate { error, .. } => {
+                write!(f, "candidate fixture capture failed: {error}")
+            }
+            Self::Both {
+                baseline,
+                candidate,
+            } => write!(
+                f,
+                "fixture capture failed on both sides: baseline: {baseline}; candidate: \
+                 {candidate}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for FixtureCaptureFailure {}
+
+impl<C: ClusterManager> LabRunner<C> {
+    /// Captures every fixture on both of `prepared`'s clusters,
+    /// concurrently across the two sides and serially within each one.
+    ///
+    /// Uses `tokio::join!`, never `try_join!`, for the same reason
+    /// [`LabRunner::install_stacks`] does: abandoning the other side's
+    /// in-flight future the instant one side fails would drop a capture
+    /// midway through writing its evidence bundle, and this module
+    /// cannot make that safe on behalf of every current and future
+    /// [`FixtureCapture`] implementation. Both sides always reach their
+    /// own natural conclusion.
+    ///
+    /// Running the two sides at once is explicitly allowed by Global
+    /// Constraint 17 ("Alpha fixture execution is serial within each
+    /// cluster") — baseline and candidate are separate clusters with
+    /// separate API servers and separate audit logs, so neither side's
+    /// requests can appear in the other's correlation window.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FixtureCaptureFailure`] if either side failed to
+    /// capture — carrying the other side's [`SideCapture`] too when only
+    /// one side failed.
+    pub async fn capture_fixtures(
+        &self,
+        prepared: &PreparedLab,
+        capture: &dyn FixtureCapture,
+    ) -> Result<CapturedLab, FixtureCaptureFailure> {
+        let (baseline_result, candidate_result) = tokio::join!(
+            capture.capture_side(&prepared.baseline, Side::Baseline, &prepared.paths),
+            capture.capture_side(&prepared.candidate, Side::Candidate, &prepared.paths),
+        );
+
+        match (baseline_result, candidate_result) {
+            (Ok(baseline), Ok(candidate)) => Ok(CapturedLab {
+                baseline,
+                candidate,
+            }),
+            (Err(error), Ok(candidate)) => {
+                Err(FixtureCaptureFailure::Baseline { error, candidate })
+            }
+            (Ok(baseline), Err(error)) => Err(FixtureCaptureFailure::Candidate { baseline, error }),
+            (Err(baseline), Err(candidate)) => Err(FixtureCaptureFailure::Both {
                 baseline,
                 candidate,
             }),

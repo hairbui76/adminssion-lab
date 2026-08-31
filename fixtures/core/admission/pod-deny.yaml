@@ -1,0 +1,27 @@
+# Deny: a webhook that ran, reached a verdict, and refused the object.
+#
+# `test.admissionlab.io/deny` is answered by the *validating*
+# configuration alone (`crates/admissionlab-test-webhook/src/validate.rs`),
+# which returns `allowed: false` carrying this exact message. The API
+# server turns that into a `403 Forbidden` whose `Status.message` embeds
+# the message below verbatim, so the captured
+# `AdmissionDecision::Rejected` is expected to carry
+# `code: Some(403)` and a message containing this text.
+#
+# Deliberately distinct from `pod-webhook-failure.yaml`: that fixture's
+# webhook never reaches a verdict at all. Telling a considered denial
+# apart from an unreachable webhook is exactly the distinction
+# `crates/admissionlab-admission/src/trace.rs`'s `WebhookOutcome` keeps
+# (`Denied` versus `Errored`), and a corpus that only exercised one of
+# them could not show that the distinction survives capture.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: deny
+  namespace: admissionlab-fixtures
+  annotations:
+    test.admissionlab.io/deny: "denied by the admissionlab test webhook"
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

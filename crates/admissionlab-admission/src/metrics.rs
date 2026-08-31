@@ -557,6 +557,35 @@ pub trait AdmissionMetricsSource: Send + Sync {
         &self,
         cluster: &ClusterHandle,
     ) -> Result<AdmissionMetricSnapshot, MetricsUnavailable>;
+
+    /// Scrapes `cluster` **once** and returns both the raw page and its
+    /// parsed form.
+    ///
+    /// Task 3.10 writes each scrape verbatim to
+    /// `raw/<side>/<fixture-id>/metrics-{before,after}.prom` *and* parses
+    /// it, and those two must be the same bytes: a `.prom` artifact from
+    /// a second scrape would describe a different instant than the delta
+    /// computed beside it, which is precisely the kind of plausible-but-
+    /// wrong evidence Global Constraint 15 forbids. Scraping twice would
+    /// also widen the attribution window the exactly-one rule depends on.
+    ///
+    /// The default implementation returns `None` for the text, delegating
+    /// to [`AdmissionMetricsSource::snapshot`]: an implementation with no
+    /// raw page to hand back (a test double, an in-memory source) reports
+    /// that honestly rather than reconstructing a page it never saw.
+    /// [`KubeMetricsSource`] overrides it.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`AdmissionMetricsSource::snapshot`], and with the same
+    /// Global Constraint 19 obligation on the caller: never a fixture or
+    /// run failure.
+    async fn snapshot_with_text(
+        &self,
+        cluster: &ClusterHandle,
+    ) -> Result<(Option<String>, AdmissionMetricSnapshot), MetricsUnavailable> {
+        Ok((None, self.snapshot(cluster).await?))
+    }
 }
 
 /// No `/metrics` page could be obtained from an API server.
@@ -654,6 +683,19 @@ impl AdmissionMetricsSource for KubeMetricsSource {
     ) -> Result<AdmissionMetricSnapshot, MetricsUnavailable> {
         let text = scrape_metrics_text(cluster, self.timeout).await?;
         Ok(parse_snapshot(&text))
+    }
+
+    /// One scrape, both forms -- see
+    /// [`AdmissionMetricsSource::snapshot_with_text`]'s own
+    /// documentation for why the parsed snapshot and the returned page
+    /// must come from the same request.
+    async fn snapshot_with_text(
+        &self,
+        cluster: &ClusterHandle,
+    ) -> Result<(Option<String>, AdmissionMetricSnapshot), MetricsUnavailable> {
+        let text = scrape_metrics_text(cluster, self.timeout).await?;
+        let snapshot = parse_snapshot(&text);
+        Ok((Some(text), snapshot))
     }
 }
 

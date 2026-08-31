@@ -1,0 +1,53 @@
+# Setup, not a fixture: the namespace every `pod-*.yaml` fixture in this
+# directory is created into.
+#
+# # Why this file is deliberately outside the `pod-*.yaml` include glob
+#
+# Every fixture in this directory is replayed as a Kubernetes *server-side
+# dry-run* CREATE (Global Constraint 16), which by definition persists
+# nothing. A namespace that only ever existed as a dry-run CREATE would
+# therefore not exist when the pod fixtures are replayed into it, and each
+# of them would come back `404 NotFound` -- an outcome about Admission
+# Lab's own setup rather than about the admission stack under test.
+#
+# So this document is named `00-namespace.yaml` while every replayable
+# fixture is named `pod-*.yaml`, and a lab configuration selecting this
+# corpus writes:
+#
+# ```yaml
+# fixtures:
+#   include:
+#     - "fixtures/core/admission/pod-*.yaml"
+# ```
+#
+# The caller is responsible for applying *this* file for real first
+# (`crates/admissionlab-admission/tests/kind_capture.rs` does exactly
+# that, through the same `kube` client it later replays fixtures with).
+# Fixture setup has no first-class representation in Alpha; when one is
+# added, this file is what it should apply.
+#
+# # The opt-in label is what makes any of this observable
+#
+# `recipes/test-webhook`'s three webhook configurations each carry
+#
+# ```yaml
+# namespaceSelector:
+#   matchLabels:
+#     admissionlab.dev/test-webhook: "enabled"
+# ```
+#
+# (see `recipes/test-webhook/manifests/20-webhook-configuration.yaml`'s
+# own comments for why that opt-in is structural rather than a denylist).
+# Without the label below, every fixture here would be admitted by an API
+# server that never called a single webhook -- and would look, in a
+# captured result, exactly like a stack whose webhooks stopped running.
+# That is the one confusion this corpus exists to make impossible, so the
+# label is load-bearing, not decoration.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-fixtures
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: core-admission
+    admissionlab.dev/test-webhook: "enabled"

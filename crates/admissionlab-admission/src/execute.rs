@@ -191,21 +191,80 @@ pub struct RawAdmissionResponse {
     pub request_finished_at: SystemTime,
 }
 
-/// [`AdmissionExecutor::execute_create`]'s failure mode: no real
-/// response could be obtained from the API server at all. Never
-/// constructed for an ordinary admission denial -- that is
-/// [`crate::outcome::AdmissionDecision::Rejected`], a successful `Ok`.
+/// One fixture could not be captured.
+///
+/// [`AdmissionExecutor::execute_create`] only ever produces
+/// [`FixtureExecutionError::Replay`]; the remaining variants belong to
+/// [`crate::capture::capture_fixture`], the whole-pipeline function that
+/// shares this error type because Task 3.10's frozen signature returns
+/// it.
+///
+/// Never constructed for an ordinary admission denial -- that is
+/// [`crate::outcome::AdmissionDecision::Rejected`], a successful `Ok`
+/// and one of the two answers this project exists to capture. Also never
+/// constructed for absent *evidence* about an otherwise successful
+/// capture: an audit event that could not be correlated leaves the
+/// outcome's trace [`crate::trace::TraceEvidence::Unavailable`], and an
+/// unavailable `/metrics` page leaves latency `None` (Global Constraints
+/// 15 and 19) -- see [`crate::capture`]'s own module documentation for
+/// exactly where that line is drawn and why.
 #[derive(Debug, Error)]
 pub enum FixtureExecutionError {
-    /// The dry-run CREATE itself could not be carried out. Wraps
-    /// [`admissionlab_fixtures::FixtureError`] (in practice always its
-    /// own [`admissionlab_fixtures::FixtureError::ReplayUnavailable`]
-    /// variant, since that is the only one
-    /// `admissionlab_fixtures::execute::dry_run_create` returns) rather
-    /// than re-deriving a second copy of the same reasons -- see that
-    /// variant's own documentation for exactly what it covers.
+    /// The dry-run CREATE itself could not be carried out, or the
+    /// fixture's `apiVersion`/`kind` could not be resolved against the
+    /// cluster's own API surface. Wraps
+    /// [`admissionlab_fixtures::FixtureError`] rather than re-deriving a
+    /// second copy of the same reasons -- in practice its
+    /// [`admissionlab_fixtures::FixtureError::ReplayUnavailable`],
+    /// [`admissionlab_fixtures::FixtureError::ResourceDiscoveryUnavailable`]
+    /// and [`admissionlab_fixtures::FixtureError::UnsupportedResource`]
+    /// variants, each documented on the variant itself.
     #[error(transparent)]
     Replay(#[from] admissionlab_fixtures::FixtureError),
+    /// The cluster's audit log could not be read at all.
+    ///
+    /// Fatal, unlike a *correlation* failure: Admission Lab writes the
+    /// audit policy and bind-mounts the log for every cluster it creates
+    /// (Global Constraint 18), so a reader-level failure is this
+    /// project's own infrastructure being broken, not a property of the
+    /// stack under test -- and it will be equally broken for every
+    /// remaining fixture. Degrading each one to "trace unavailable"
+    /// instead would fill a run with results Phase 4 cannot distinguish
+    /// from a stack whose webhooks stopped running.
+    #[error(transparent)]
+    Audit(#[from] crate::audit_reader::AuditError),
+    /// The fixture's own `ResponseComplete` audit event was found, but
+    /// its mutating-webhook annotations could not be read.
+    ///
+    /// Fatal by [`crate::correlate`]'s own documented design ("Why a
+    /// malformed annotation is fatal here, and not in the reader"):
+    /// dropping an unreadable invocation and reporting a shorter chain
+    /// would make Phase 4 report a behavioural difference that never
+    /// happened.
+    #[error(transparent)]
+    Trace(#[from] crate::correlate::TraceError),
+    /// The fixture's evidence bundle could not be written under the
+    /// run's `raw/` directory.
+    ///
+    /// Fatal because the bundle *is* the deliverable: a fixture whose
+    /// evidence was not written has not been captured, whatever the API
+    /// server said.
+    #[error(transparent)]
+    Artifact(#[from] admissionlab_core::ArtifactError),
+    /// A directory under the run's `raw/` root could not be created for
+    /// this fixture's bundle. Separate from
+    /// [`FixtureExecutionError::Artifact`] because
+    /// [`admissionlab_core::ArtifactStore`] deliberately never creates
+    /// directories itself (see its own documentation), so this failure
+    /// has no [`admissionlab_core::ArtifactError`] to wrap.
+    #[error("failed to create artifact directory {}: {source}", .path.display())]
+    ArtifactDirectory {
+        /// The directory that could not be created.
+        path: std::path::PathBuf,
+        /// The underlying OS error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 /// The one production [`AdmissionExecutor`]: replays a fixture against a

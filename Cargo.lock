@@ -6,9 +6,14 @@ version = 4
 name = "admissionlab-admission"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-cluster",
  "admissionlab-core",
  "admissionlab-fixtures",
+ "admissionlab-installer",
+ "admissionlab-recipes",
+ "admissionlab-spec",
  "async-trait",
+ "globset",
  "http",
  "http-body-util",
  "jiff",
@@ -17,6 +22,7 @@ dependencies = [
  "kube",
  "serde",
  "serde_json",
+ "serde_norway",
  "thiserror",
  "tokio",
  "tower-test",

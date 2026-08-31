@@ -95,6 +95,36 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "time"] }
 
 [dev-dependencies]
+# `tests/kind_capture.rs` (Task 3.10) drives the whole capture pipeline
+# against a real `kind` cluster: `admissionlab-cluster` creates and
+# deletes it (and resolves its node image from
+# `compatibility/kubernetes.yaml`), `admissionlab-recipes` loads
+# `recipes/test-webhook/recipe.yaml` from its own checked-in directory,
+# `admissionlab-installer` installs it through the real Task 2.4/2.6
+# pipeline, and `admissionlab-spec` supplies the
+# `ResolvedFixtureSelection`/`ResolvedComponent` those two take. Exactly
+# the same four crates `admissionlab-test-webhook`'s own
+# `tests/kind_smoke.rs` already uses for the same job -- all
+# `[dev-dependencies]`, so none of them enters this crate's own
+# dependency graph and none can affect the `admission -> fixtures ->
+# core` direction the library half is bound by.
+admissionlab-cluster = { workspace = true }
+admissionlab-installer = { workspace = true }
+admissionlab-recipes = { workspace = true }
+admissionlab-spec = { workspace = true }
+# `tests/kind_capture.rs` compiles the fixture corpus's own include
+# pattern (`pod-*.yaml`) into the `globset::Glob` that
+# `admissionlab_spec::ResolvedFixtureSelection::include` holds -- the
+# same type `admissionlab_spec::resolve_lab` would build from a real lab
+# file's `fixtures.include` list, so the test discovers the corpus
+# through exactly the production path rather than a hand-rolled walk.
+globset = { workspace = true }
+# `tests/kind_capture.rs` applies `fixtures/core/admission/00-namespace.yaml`
+# -- the corpus's own setup document, read from its real checked-in
+# location -- as a genuine (non-dry-run) CREATE, so the pod fixtures have
+# a namespace to be admitted into. Parsing that YAML file needs a YAML
+# reader; this is the same one every other crate in this workspace uses.
+serde_norway = { workspace = true }
 # `tests/audit_reader.rs` (Task 3.5) asserts parsed
 # `AuditEvent` timestamps against `jiff::Timestamp` values built from the
 # exact RFC 3339 strings in `testdata/audit/basic.jsonl`. Already a

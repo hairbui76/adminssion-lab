@@ -26,6 +26,41 @@
 //! cluster created concurrently for the same run (as a later task does)
 //! never contend on the same file.
 //!
+//! # Why the audit log file is pre-created (Task 3.10)
+//!
+//! [`KindClusterManager::create`] creates the audit log as an empty
+//! file, owned by this process, *before* `kind create cluster` runs.
+//! That is not tidiness: without it the audit log is unreadable by
+//! Admission Lab itself, which makes the whole Phase 3 capture pipeline
+//! impossible.
+//!
+//! kube-apiserver's log audit backend opens its `--audit-log-path` with
+//! `os.OpenFile(path, O_CREATE|O_APPEND|O_WRONLY, 0600)`. Inside the
+//! node container that call runs as root, so on a rootful Docker daemon
+//! the file appears on the *host* — through the bind mount — as
+//! `-rw------- root:root`. Confirmed live, not assumed: a first pass of
+//! `admissionlab-admission`'s `tests/kind_capture.rs` failed with
+//! `failed to open audit log ...: Permission denied (os error 13)`
+//! against exactly that file. `admissionlab_admission::FileAuditLogReader`
+//! reads the log as an ordinary host file (deliberately — it never
+//! shells out to `docker exec`), so an unreadable one would leave every
+//! fixture with no admission evidence at all.
+//!
+//! Pre-creating it fixes that at the only point where this project still
+//! controls the file's ownership. `O_CREATE` on an existing file changes
+//! neither its owner nor its mode, and the container's root can append
+//! to a file it does not own regardless of that mode, so kube-apiserver
+//! writes exactly as before while the file stays readable by the user
+//! who created it. This is also why no `--audit-log-maxsize`/
+//! `--audit-log-maxbackup` argument is set in [`crate::config`]: those
+//! switch the backend to `lumberjack`, whose rotation would replace this
+//! file with a fresh root-owned `0600` one mid-run.
+//!
+//! A second, smaller benefit: an
+//! `admissionlab_admission::AuditLogReader::checkpoint` taken before
+//! kube-apiserver has written its first event now finds an empty file
+//! rather than no file at all.
+//!
 //! # Absolute paths
 //!
 //! `kind`'s Docker bind mounts (used for the audit policy file and audit
@@ -320,6 +355,22 @@ impl ClusterManager for KindClusterManager {
             .map_err(|source| ClusterError::Io {
                 operation: "create audit log host directory",
                 path: layout.audit_log_dir.clone(),
+                source,
+            })?;
+
+        // Create the audit log file itself, empty, before the node
+        // exists — see the module documentation's "Why the audit log file
+        // is pre-created" section. Not `create_new`: a rerun against an
+        // existing layout must not fail here, and an existing file is
+        // exactly what this is trying to produce.
+        tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&layout.audit_log_file)
+            .await
+            .map_err(|source| ClusterError::Io {
+                operation: "create audit log host file",
+                path: layout.audit_log_file.clone(),
                 source,
             })?;
 

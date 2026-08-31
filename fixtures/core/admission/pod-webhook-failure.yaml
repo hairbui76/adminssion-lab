@@ -1,0 +1,40 @@
+# Webhook failure: the call itself fails, and `failurePolicy: Fail`
+# turns that into a rejection.
+#
+# `test.admissionlab.io/fail: "true"` makes the validating webhook answer
+# HTTP 500 instead of an admission response
+# (`crates/admissionlab-test-webhook/src/validate.rs`, `Decision::Fail`),
+# so the API server never receives a verdict at all. Because
+# `recipes/test-webhook/manifests/20-webhook-configuration.yaml` sets
+# `failurePolicy: Fail`, the request is rejected -- but for a categorically
+# different reason from `pod-deny.yaml`, and the two must stay
+# distinguishable in a captured result:
+#
+# - `pod-deny.yaml` produces `Status.reason: "Forbidden"` (`403`) and a
+#   message quoting the webhook's own denial text.
+# - this fixture produces a *call* failure, whose message says the
+#   webhook could not be called rather than that it refused the object.
+#
+# Both are `AdmissionDecision::Rejected` -- the API server did reject the
+# object in both cases, and claiming otherwise would be a fabrication --
+# so the difference lives in the observed message and status code, which
+# `crates/admissionlab-admission/tests/kind_capture.rs` asserts on
+# directly rather than assuming.
+#
+# This is also, deliberately, *not* `UnsupportedDryRun`: that variant
+# means Admission Lab could not evaluate the fixture in dry-run mode at
+# all, whereas here dry-run worked exactly as intended and observed a
+# real rejection -- see `crates/admissionlab-admission/src/execute.rs`'s
+# own module documentation for the live investigation behind that
+# distinction.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: webhook-failure
+  namespace: admissionlab-fixtures
+  annotations:
+    test.admissionlab.io/fail: "true"
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

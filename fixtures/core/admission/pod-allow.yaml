@@ -1,0 +1,27 @@
+# Allow: the baseline case every other fixture here is read against.
+#
+# Carries no `test.admissionlab.io/*` annotation at all, so
+# `crates/admissionlab-test-webhook/src/behavior.rs` parses it to
+# `Behavior::default()` -- no mutation, no delay, no denial. The expected
+# capture is `AdmissionDecision::Accepted` with the API server's own
+# dry-run response object.
+#
+# It is *not* a fixture that bypasses admission. The namespace opts in
+# (`00-namespace.yaml`), so the validating webhook and the
+# `...-mutate-labels` mutating webhook are both genuinely called; only
+# `...-mutate-containers` is skipped, because its `objectSelector`
+# requires the `test.admissionlab.io/containers` gate label this pod
+# deliberately does not carry. So the observed mutating trace is expected
+# to hold exactly one invocation -- `mutate-labels.test-webhook.admissionlab.dev`,
+# reporting `mutated: false` -- which is the difference between "webhooks
+# ran and changed nothing" and "no webhook ran at all" that Global
+# Constraint 15 requires stay visible.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: allow
+  namespace: admissionlab-fixtures
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

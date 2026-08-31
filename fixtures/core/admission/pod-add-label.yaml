@@ -1,0 +1,40 @@
+# Label mutation: the smallest real mutating-webhook patch this corpus
+# can produce.
+#
+# `test.admissionlab.io/add-label` is served by the `...-mutate-labels`
+# configuration (`crates/admissionlab-test-webhook/src/mutate.rs`,
+# `MutationScope::Labels`), which has no `objectSelector`, so no gate
+# label is needed here. The webhook answers with a one-operation RFC 6902
+# patch:
+#
+# ```json
+# [{"op": "add", "path": "/metadata/labels/admissionlab.dev~1mutated", "value": "true"}]
+# ```
+#
+# The `~1` is RFC 6901's escape for the `/` inside the label key, and
+# getting that form (rather than the whole-map one below) is exactly why
+# this pod carries a label of its own. `mutate.rs`'s `label_ops` emits a
+# pointer into `metadata.labels` only when that map already exists; for a
+# pod with no labels at all it emits `add /metadata/labels` with the
+# whole map as the value instead, and never exercises the escaping.
+# Confirmed live, not assumed: a first pass of this fixture carried no
+# labels and produced exactly that whole-map patch.
+#
+# The API server records the patch in the request's own
+# `patch.webhook.admission.k8s.io/round_0_index_<i>` audit annotation --
+# which Global Constraint 18's `Request` audit level is what makes
+# visible at all -- so the capture is expected to show `mutated:
+# Some(true)` and a patch whose single operation adds that label.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: add-label
+  namespace: admissionlab-fixtures
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+  annotations:
+    test.admissionlab.io/add-label: "admissionlab.dev/mutated=true"
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

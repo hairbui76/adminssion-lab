@@ -1,0 +1,31 @@
+# Latency: a webhook that answers correctly, 250 milliseconds late.
+#
+# `test.admissionlab.io/delay-ms` is the validating configuration's
+# alone (`crates/admissionlab-test-webhook/src/validate.rs`), deliberately
+# -- so a fixture's delay is applied exactly once per request no matter
+# how many mutating configurations happen to be installed. The webhook
+# sleeps first and decides second, so the expected capture is a perfectly
+# ordinary `Accepted`, only slower: the delay must not manufacture a
+# rejection.
+#
+# 250 ms is well inside the validating webhook's own `timeoutSeconds: 10`
+# (`recipes/test-webhook/manifests/20-webhook-configuration.yaml`), so
+# this fixture measures latency rather than manufacturing a timeout. It
+# is also comfortably above the sub-millisecond noise floor of an
+# unloaded `kind` API server, which is what makes it usable as the
+# per-webhook latency signal Global Constraint 19 describes -- when the
+# optional `/metrics` scrape is enabled *and* the exactly-one attribution
+# rule holds (`crates/admissionlab-admission/src/metrics.rs`). When it
+# does not, the captured latency stays `None`; that is the honest answer,
+# never a fabricated zero.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: delay
+  namespace: admissionlab-fixtures
+  annotations:
+    test.admissionlab.io/delay-ms: "250"
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

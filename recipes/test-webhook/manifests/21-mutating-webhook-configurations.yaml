@@ -11,27 +11,50 @@
 #
 # # Why two, and how the reinvocation chain works
 #
-# Kubernetes reinvokes a mutating webhook only when *another* admission
-# plugin changed the object after it ran, so a single webhook can never
+# Kubernetes reinvokes a mutating webhook only when something changed the
+# object *after* that webhook already ran, so a single webhook can never
 # exercise `reinvocationPolicy` at all. Two are the minimum, and they
-# have to be able to affect each other. That is what the
-# `objectSelector` on `...-mutate-containers` is for:
+# have to be able to affect each other:
 #
-#   - `...-mutate-containers` only matches pods labelled
-#     `test.admissionlab.io/containers: "enabled"`.
-#   - `...-mutate-labels` can *add* that label, because adding a label
-#     is what it does, and the label to add is chosen by the fixture:
-#     `test.admissionlab.io/add-label: "test.admissionlab.io/containers=enabled"`.
+#   - `...-mutate-containers` sorts first (configurations are evaluated
+#     in lexicographic name order) and mutates `spec`.
+#   - `...-mutate-labels` runs after it and mutates `metadata.labels`.
 #
-# So the dedicated reinvocation fixture is a pod that carries the
-# container/volume annotations but *not* the gate label, plus that
-# `add-label` annotation. The containers webhook cannot match it on the
-# first pass; the labels webhook adds the gate label; the object has now
-# changed, so the API server reinvokes the containers webhook, whose
-# selector now matches, and the sidecar is added on the second round.
-# An ordinary fixture that just wants a sidecar sets the gate label in
-# its own manifest and is mutated on the first pass with no reinvocation
-# at all.
+# So the dedicated reinvocation fixture
+# (`fixtures/core/admission/pod-reinvocation.yaml`) is a pod that carries
+# the gate label in its own manifest *and* asks both webhooks to act: the
+# containers webhook appends a volume, the labels webhook then adds a
+# label, and because the object changed after the containers webhook ran,
+# the API server calls the containers webhook a second time. Its action
+# is idempotent, so the round-1 evidence is an invocation record with no
+# patch — which is exactly the observable this project needs.
+#
+# ## What the `objectSelector` cannot do (corrected in Task 3.10)
+#
+# Task 3.9 wrote this section claiming the opposite chain: a pod with no
+# gate label, the labels webhook adding it, and the containers webhook
+# then matching on reinvocation. That is not how kube-apiserver works,
+# and its own mutating dispatcher says so in as many words
+# (`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go`,
+# read at `release-1.36`):
+#
+#   // This means that during reinvocation, a webhook will not be
+#   // called for the first time. For example, if the webhook is
+#   // skipped in the first round because of mismatching labels,
+#   // even if the labels become matching, the webhook does not
+#   // get called during reinvocation.
+#
+# Only webhooks that were already invoked before the mutation are
+# reinvoked — `reinvocationcontext.go`'s
+# `RequireReinvokingPreviouslyInvokedPlugins` moves the
+# previously-invoked set into the reinvoke set, and
+# `ShouldReinvokeWebhook` consults only that set. Confirmed live against
+# `kind` v1.36.4: the label-gated fixture produced one round-0 invocation
+# of the labels webhook, no round-1 annotation at all, and an admitted
+# object the containers webhook never touched. Nothing about *these
+# manifests* changed as a result — the `objectSelector` still does its
+# real job of keeping the two webhooks' fixtures independent — only this
+# description of what it can be used for.
 #
 # # Correctness does not depend on the invocation order
 #
@@ -40,15 +63,10 @@
 #
 # First, `reinvocationPolicy: IfNeeded` is set on *both* webhooks, not
 # only on the one the chain happens to need. Whichever the API server
-# calls first, the other's output can still reach it. Kubernetes'
-# documented ordering (configurations in lexicographic name order) means
-# `...-mutate-containers` is in practice evaluated before
-# `...-mutate-labels`, which is what makes the reinvocation round
-# reliably *happen* rather than being skipped because the gate label was
-# already there — but that is about exercising the machinery, not about
-# the result. If that ordering ever changed, the reinvocation fixture
-# would simply be mutated in one round instead of two, with the same
-# final object.
+# calls first, the other's output can still reach it: if the ordering
+# ever reversed, the labels webhook would run first and the *labels*
+# webhook would be the one reinvoked, with the same final object either
+# way.
 #
 # Second, every action the server performs is idempotent: an add whose
 # target is already present emits no patch at all
@@ -84,10 +102,10 @@
 apiVersion: admissionregistration.k8s.io/v1
 kind: MutatingWebhookConfiguration
 metadata:
-  # Sorts before `...-mutate-labels`, which is what makes the
-  # reinvocation round actually occur for the dedicated fixture — see
-  # this file's own comments on why nothing about the *result* depends
-  # on that.
+  # Sorts before `...-mutate-labels`, so this is the webhook that runs
+  # first and therefore the one the reinvocation fixture observes being
+  # called again — see this file's own comments on why nothing about the
+  # *result* depends on that ordering.
   name: admissionlab-test-webhook-mutate-containers
   labels:
     app.kubernetes.io/name: admissionlab-test-webhook
@@ -102,10 +120,12 @@ webhooks:
     namespaceSelector:
       matchLabels:
         admissionlab.dev/test-webhook: "enabled"
-    # The gate the chain turns on — see this file's own comments. A pod
-    # that does not carry this label is never sent to
-    # `/mutate-containers` at all, which is what lets the labels webhook
-    # below decide (per fixture) whether this one runs.
+    # Scopes this webhook to the fixtures that opt into it: a pod
+    # without this label is never sent to `/mutate-containers` at all,
+    # so a fixture exercising the labels webhook alone is never also
+    # mutated by this one. Note that a label added *during* admission
+    # cannot bring a pod in here — see this file's own comments on what
+    # the `objectSelector` cannot do.
     objectSelector:
       matchLabels:
         test.admissionlab.io/containers: "enabled"

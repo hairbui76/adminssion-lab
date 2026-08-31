@@ -1,0 +1,34 @@
+# Container mutation: a sidecar appended to `spec.containers`.
+#
+# `test.admissionlab.io/add-container` is served by the
+# `...-mutate-containers` configuration
+# (`crates/admissionlab-test-webhook/src/mutate.rs`,
+# `MutationScope::Workload`), whose `objectSelector` requires
+# `test.admissionlab.io/containers: "enabled"`. This pod carries that
+# label in its own manifest, so it is mutated on the first pass.
+#
+# `spec.containers` is already present here, so the emitted operation is
+# an append (`/spec/containers/-`) rather than the create-the-array form
+# `pod-add-init-container.yaml` produces.
+#
+# Observed live, and worth knowing before reading a capture of this
+# fixture: it *also* produces a round-1 invocation of both mutating
+# webhooks, neither of which patches anything. Adding a container makes
+# the in-tree ServiceAccount admission plugin mount the api-access volume
+# into the new container on the next pass, which changes the object
+# between rounds and makes every already-invoked webhook eligible for
+# reinvocation. That is incidental here; `pod-reinvocation.yaml` is the
+# fixture that demonstrates a reinvocation caused by another *webhook*.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: add-container
+  namespace: admissionlab-fixtures
+  labels:
+    test.admissionlab.io/containers: "enabled"
+  annotations:
+    test.admissionlab.io/add-container: "sidecar=registry.k8s.io/pause:3.10"
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

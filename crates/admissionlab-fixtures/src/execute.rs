@@ -304,7 +304,17 @@ pub async fn dry_run_create_with_client(
 /// `"default"` if absent/empty/not-a-string. See this module's
 /// documentation ("Namespace") for why this is a *read*, not a write --
 /// `fixture.object` itself is never mutated to add one.
-fn namespace_of(fixture: &FixtureSource) -> String {
+///
+/// `pub` as of Task 3.10, for one reason: `admissionlab_admission::capture`
+/// has to build the audit `objectRef` key it correlates this request
+/// against, and an audit event's `objectRef.namespace` is whatever
+/// namespace the request *URL* named -- which is exactly what this
+/// function decides, `"default"` fallback included. Re-deriving that
+/// rule at the correlation site would put the same fallback in two
+/// places, where a change to one silently stops every fixture that omits
+/// `metadata.namespace` from correlating at all.
+#[must_use]
+pub fn namespace_of(fixture: &FixtureSource) -> String {
     fixture
         .object
         .get("metadata")

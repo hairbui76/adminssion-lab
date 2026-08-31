@@ -1,0 +1,69 @@
+# Reinvocation: a webhook called a second time because a *later* webhook
+# changed the object after it ran.
+#
+# This is the only fixture in the corpus whose evidence contains a
+# mutating invocation at `round > 0`, and the chain that produces it is
+# narrower than it looks. Both configurations
+# (`recipes/test-webhook/manifests/21-mutating-webhook-configurations.yaml`)
+# set `reinvocationPolicy: IfNeeded`, and `...-mutate-containers` sorts
+# before `...-mutate-labels`, so within one request:
+#
+# 1. `...-mutate-containers` matches (this pod carries the
+#    `test.admissionlab.io/containers` gate label in its own manifest)
+#    and appends the `scratch` volume.
+# 2. `...-mutate-labels` runs next and adds
+#    `admissionlab.dev/reinvoked`. The object has now changed *after* the
+#    containers webhook already ran, which is precisely the condition
+#    kube-apiserver reinvokes for.
+# 3. The API server runs a second round and calls the containers webhook
+#    again. The volume is already there, so it emits no patch: the
+#    round-1 evidence is an invocation record (`mutated: false`), not a
+#    second mutation.
+#
+# # Why the gate label is in this manifest rather than added by the chain
+#
+# An earlier version of this fixture left the gate label off and asked
+# the labels webhook to add it, on the theory that the containers webhook
+# would then match on the second round. That does not work, and cannot:
+# kube-apiserver's own mutating dispatcher says so in as many words
+# (`staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/mutating/dispatcher.go`,
+# read at `release-1.36`):
+#
+#   // This means that during reinvocation, a webhook will not be
+#   // called for the first time. For example, if the webhook is
+#   // skipped in the first round because of mismatching labels,
+#   // even if the labels become matching, the webhook does not
+#   // get called during reinvocation.
+#
+# Only webhooks already invoked *before* the mutation are reinvoked
+# (`reinvocationcontext.go`: `RequireReinvokingPreviouslyInvokedPlugins`
+# moves the previously-invoked set into the reinvoke set). Confirmed live
+# against `kind` v1.36.4 before this fixture was rewritten: the
+# label-gated version produced a single round-0 invocation of the labels
+# webhook, no round-1 annotation of any kind, and an admitted object with
+# no sidecar.
+#
+# # Why a volume rather than a container
+#
+# `pod-add-container.yaml` also shows a round-1 invocation, but for a
+# different and less interesting reason: adding a container makes the
+# in-tree ServiceAccount plugin mount the api-access volume into it on
+# the next pass, so the object changes between rounds and every eligible
+# webhook is reinvoked. Appending a volume needs no such follow-up work,
+# so the round-1 invocation here is attributable to the labels webhook's
+# own mutation -- the "one webhook adds a field that makes the second
+# reinvoke" shape this fixture exists to demonstrate.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: reinvocation
+  namespace: admissionlab-fixtures
+  labels:
+    test.admissionlab.io/containers: "enabled"
+  annotations:
+    test.admissionlab.io/add-volume: "scratch"
+    test.admissionlab.io/add-label: "admissionlab.dev/reinvoked=true"
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

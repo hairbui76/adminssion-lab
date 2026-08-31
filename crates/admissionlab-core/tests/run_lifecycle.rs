@@ -24,6 +24,13 @@
 //! (never `try_join!`) means a slow side is never abandoned when the
 //! other fails, and a failure on either/both sides is reported through
 //! [`StackInstallFailure`] naming the right side(s).
+//!
+//! The `capture_fixtures_*` tests (Task 3.10) do the same for
+//! [`LabRunner::capture_fixtures`], against [`FakeFixtureCapture`] —
+//! including the one property the real, single-cluster
+//! `admissionlab-admission/tests/kind_capture.rs` deliberately does not
+//! spend a second cluster proving: baseline and candidate evidence can
+//! never land in the same `raw/<side>/<fixture-id>/` directory.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -31,10 +38,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use admissionlab_core::{
-    ArtifactStore, ClusterCreationFailure, ClusterDiagnostics, ClusterError, ClusterHandle,
-    ClusterManager, ClusterSpec, InstalledComponent, LabRunner, RunError, RunId, RunOptions,
-    RunPaths, Side, SideInstall, StackInstallError, StackInstallFailure, StackInstaller,
-    preserved_cluster_report,
+    ArtifactStore, CapturedFixture, ClusterCreationFailure, ClusterDiagnostics, ClusterError,
+    ClusterHandle, ClusterManager, ClusterSpec, FixtureCapture, FixtureCaptureError,
+    FixtureCaptureFailure, FixtureId, InstalledComponent, LabRunner, RunError, RunId, RunOptions,
+    RunPaths, Side, SideCapture, SideInstall, StackInstallError, StackInstallFailure,
+    StackInstaller, preserved_cluster_report,
 };
 use admissionlab_spec::{
     InstallMethod, ManifestInstallSpec, ResolvedComponent, ResolvedLab, load_lab, resolve_lab,
@@ -1130,6 +1138,325 @@ fn install_stacks_does_not_abandon_a_still_installing_side_when_the_other_fails_
         sorted(stack_installer.called_sides()),
         vec![Side::Baseline, Side::Candidate],
         "candidate's slower install must have been awaited to completion (tokio::join!, not \
+         try_join!), never abandoned the instant baseline failed"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------
+// FakeFixtureCapture: a whole-trait `FixtureCapture` test double
+// (Task 3.10).
+// ---------------------------------------------------------------------
+
+/// How [`FakeFixtureCapture::capture_side`] behaves for one side.
+#[derive(Clone)]
+enum CapturePlan {
+    /// Succeed immediately (no `.await` point ever yields).
+    Succeed,
+    /// Sleep for the given duration, then succeed. Used to prove the
+    /// *other* side's capture is never abandoned when this side takes
+    /// longer.
+    SucceedAfter(Duration),
+    /// Fail immediately.
+    Fail,
+}
+
+/// Any [`FixtureCaptureError`] works as this file's fake failure; `side`
+/// only makes the fake, synthetic failure identifiable in assertions.
+fn fake_capture_error(side: Side) -> FixtureCaptureError {
+    FixtureCaptureError {
+        fixture: Some(format!("fake-{}-fixture", side.as_str())),
+        message: format!("fake {side} capture failure"),
+    }
+}
+
+/// The two fixture ids [`FakeFixtureCapture`] claims to have captured.
+/// Two, not one, so an assertion about per-fixture directories cannot
+/// pass by accident on a single-element list.
+const FAKE_FIXTURE_IDS: [&str; 2] = ["fixture-a", "fixture-b"];
+
+/// A plausible [`SideCapture`] for `side`, with its artifact paths built
+/// exactly the way a real implementation must build them — under
+/// `paths.raw()/<side>/<fixture-id>/` — so a test can assert the two
+/// sides' evidence can never land in the same directory.
+fn fake_side_capture(side: Side, paths: &RunPaths) -> SideCapture {
+    SideCapture {
+        side,
+        fixtures: FAKE_FIXTURE_IDS
+            .iter()
+            .map(|id| {
+                let fixture_id = FixtureId::parse(id).expect("fake fixture ids are valid");
+                let artifact_dir = paths.raw().join(side.as_str()).join(fixture_id.as_str());
+                CapturedFixture {
+                    fixture_id,
+                    side,
+                    outcome_path: artifact_dir.join("outcome.json"),
+                    artifact_dir,
+                    diagnostics: Vec::new(),
+                }
+            })
+            .collect(),
+    }
+}
+
+/// A [`FixtureCapture`] test double. Never issues a request or touches a
+/// real cluster: `capture_side` is a plain, configurable, in-memory
+/// outcome. Records which sides it was called for, and with which
+/// cluster name, in call order.
+struct FakeFixtureCapture {
+    baseline_plan: CapturePlan,
+    candidate_plan: CapturePlan,
+    calls: Mutex<Vec<(Side, String)>>,
+}
+
+impl FakeFixtureCapture {
+    fn new(baseline_plan: CapturePlan, candidate_plan: CapturePlan) -> Self {
+        Self {
+            baseline_plan,
+            candidate_plan,
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// The sides `capture_side` was actually invoked for, in call order.
+    fn called_sides(&self) -> Vec<Side> {
+        self.calls
+            .lock()
+            .expect("calls mutex poisoned")
+            .iter()
+            .map(|(side, _)| *side)
+            .collect()
+    }
+
+    /// The exact `(side, cluster name)` pairs `capture_side` was invoked
+    /// with, in call order.
+    fn calls(&self) -> Vec<(Side, String)> {
+        self.calls.lock().expect("calls mutex poisoned").clone()
+    }
+}
+
+#[async_trait]
+impl FixtureCapture for FakeFixtureCapture {
+    async fn capture_side(
+        &self,
+        cluster: &ClusterHandle,
+        side: Side,
+        paths: &RunPaths,
+    ) -> Result<SideCapture, FixtureCaptureError> {
+        self.calls
+            .lock()
+            .expect("calls mutex poisoned")
+            .push((side, cluster.spec.name.clone()));
+
+        let plan = match side {
+            Side::Baseline => &self.baseline_plan,
+            Side::Candidate => &self.candidate_plan,
+        };
+        match plan {
+            CapturePlan::Succeed => Ok(fake_side_capture(side, paths)),
+            CapturePlan::SucceedAfter(duration) => {
+                tokio::time::sleep(*duration).await;
+                Ok(fake_side_capture(side, paths))
+            }
+            CapturePlan::Fail => Err(fake_capture_error(side)),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// capture_fixtures (Task 3.10): both sides, concurrently.
+// ---------------------------------------------------------------------
+
+#[test]
+fn capture_fixtures_captures_both_sides_against_their_own_clusters_and_disjoint_artifact_trees() {
+    let (runner, options, root) = runner_with(
+        "capture-both",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let capture = FakeFixtureCapture::new(CapturePlan::Succeed, CapturePlan::Succeed);
+
+    let captured = runtime
+        .block_on(runner.capture_fixtures(&prepared, &capture))
+        .expect("both sides succeeding must succeed overall");
+
+    assert_eq!(captured.baseline.side, Side::Baseline);
+    assert_eq!(captured.candidate.side, Side::Candidate);
+    assert_eq!(
+        sorted(capture.called_sides()),
+        vec![Side::Baseline, Side::Candidate]
+    );
+    for (side, cluster_name) in capture.calls() {
+        let expected = match side {
+            Side::Baseline => &prepared.baseline.spec.name,
+            Side::Candidate => &prepared.candidate.spec.name,
+        };
+        assert_eq!(
+            &cluster_name, expected,
+            "{side} must be captured against its own cluster, never the other side's"
+        );
+    }
+
+    // The property a two-cluster integration test would otherwise be
+    // needed to prove: no fixture's evidence directory is shared between
+    // the two sides, so one side's capture can never overwrite the
+    // other's.
+    let baseline_dirs: HashSet<PathBuf> = captured
+        .baseline
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.artifact_dir.clone())
+        .collect();
+    let candidate_dirs: HashSet<PathBuf> = captured
+        .candidate
+        .fixtures
+        .iter()
+        .map(|fixture| fixture.artifact_dir.clone())
+        .collect();
+    assert_eq!(baseline_dirs.len(), FAKE_FIXTURE_IDS.len());
+    assert_eq!(candidate_dirs.len(), FAKE_FIXTURE_IDS.len());
+    assert!(
+        baseline_dirs.is_disjoint(&candidate_dirs),
+        "baseline and candidate evidence must never share a directory: {baseline_dirs:?} vs \
+         {candidate_dirs:?}"
+    );
+    for fixture in &captured.baseline.fixtures {
+        assert!(
+            fixture.artifact_dir.starts_with(prepared.paths.raw()),
+            "captured evidence must live under the run's own raw/ root"
+        );
+        assert!(
+            fixture.outcome_path.starts_with(&fixture.artifact_dir),
+            "outcome.json must live inside its own fixture's bundle"
+        );
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn capture_fixtures_reports_a_baseline_only_failure_and_carries_the_successful_candidate_capture() {
+    let (runner, options, root) = runner_with(
+        "capture-baseline-fails",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let capture = FakeFixtureCapture::new(CapturePlan::Fail, CapturePlan::Succeed);
+
+    let result = runtime.block_on(runner.capture_fixtures(&prepared, &capture));
+
+    match result {
+        Err(FixtureCaptureFailure::Baseline { error, candidate }) => {
+            assert_eq!(error.fixture.as_deref(), Some("fake-baseline-fixture"));
+            assert_eq!(candidate.side, Side::Candidate);
+            assert_eq!(
+                candidate.fixtures.len(),
+                FAKE_FIXTURE_IDS.len(),
+                "the candidate side's own successful SideCapture must be carried through, not \
+                 discarded or fabricated as empty"
+            );
+        }
+        other => panic!("expected Err(FixtureCaptureFailure::Baseline), got {other:?}"),
+    }
+    assert_eq!(
+        sorted(capture.called_sides()),
+        vec![Side::Baseline, Side::Candidate],
+        "candidate must still be attempted even though baseline fails"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn capture_fixtures_reports_a_candidate_only_failure_and_carries_the_successful_baseline_capture() {
+    let (runner, options, root) = runner_with(
+        "capture-candidate-fails",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let capture = FakeFixtureCapture::new(CapturePlan::Succeed, CapturePlan::Fail);
+
+    let result = runtime.block_on(runner.capture_fixtures(&prepared, &capture));
+
+    match result {
+        Err(FixtureCaptureFailure::Candidate { baseline, error }) => {
+            assert_eq!(error.fixture.as_deref(), Some("fake-candidate-fixture"));
+            assert_eq!(baseline.side, Side::Baseline);
+            assert_eq!(baseline.fixtures.len(), FAKE_FIXTURE_IDS.len());
+        }
+        other => panic!("expected Err(FixtureCaptureFailure::Candidate), got {other:?}"),
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn capture_fixtures_reports_both_sides_failing() {
+    let (runner, options, root) = runner_with(
+        "capture-both-fail",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let capture = FakeFixtureCapture::new(CapturePlan::Fail, CapturePlan::Fail);
+
+    let result = runtime.block_on(runner.capture_fixtures(&prepared, &capture));
+
+    assert!(
+        matches!(result, Err(FixtureCaptureFailure::Both { .. })),
+        "expected Err(FixtureCaptureFailure::Both), got {result:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn capture_fixtures_does_not_abandon_a_still_capturing_side_when_the_other_fails_immediately() {
+    // The same `tokio::join!`, never `try_join!` property the two tests
+    // above it assert for cluster creation and stack installation, one
+    // lifecycle stage later: `try_join!` would return the instant
+    // baseline's future resolves to `Err`, dropping candidate's
+    // still-sleeping capture midway through writing its evidence.
+    let (runner, options, root) = runner_with(
+        "capture-concurrency",
+        FakeClusterManager::new(CreatePlan::Succeed, CreatePlan::Succeed),
+    );
+    let lab = minimal_resolved_lab();
+    let runtime = test_runtime();
+    let prepared = runtime
+        .block_on(runner.prepare_clusters(&lab, &options))
+        .expect("setup: both sides must succeed");
+    let capture = FakeFixtureCapture::new(
+        CapturePlan::Fail,
+        CapturePlan::SucceedAfter(Duration::from_millis(75)),
+    );
+
+    let result = runtime.block_on(runner.capture_fixtures(&prepared, &capture));
+
+    assert!(
+        result.is_err(),
+        "baseline failed, so capture_fixtures must fail overall"
+    );
+    assert_eq!(
+        sorted(capture.called_sides()),
+        vec![Side::Baseline, Side::Candidate],
+        "candidate's slower capture must have been awaited to completion (tokio::join!, not \
          try_join!), never abandoned the instant baseline failed"
     );
 
