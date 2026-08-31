@@ -36,6 +36,16 @@ admissionlab-core = { workspace = true }
 # report on has already been removed, and
 # `NormalizedObject::evidence` records what that removal was.
 admissionlab-normalize = { workspace = true }
+# `trace.rs`'s `diff_admission_trace` (Task 4.6) takes
+# `&admissionlab_spec::LatencyPolicy` -- again the roadmap's own frozen
+# signature, and §1.2 gives that type to `admissionlab-spec` because it
+# is a `policy.latency` section of a user's lab file. This crate reads
+# the two configured thresholds and decides nothing about where they
+# came from. A `diff -> spec` edge is acyclic for the same reason every
+# other edge out of this crate is: `admissionlab-spec` depends only on
+# `admissionlab-core` and third-party crates, and nothing may ever add a
+# `spec -> diff` edge back.
+admissionlab-spec = { workspace = true }
 # `raw.rs` (Task 4.3) wraps `json_patch::diff` to produce this crate's
 # own RFC 6902 `RawChange` diagnostics. See the root `Cargo.toml`'s own
 # comment on this entry for the crate/library name mismatch and license

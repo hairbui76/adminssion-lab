@@ -25,6 +25,15 @@
 //!   documentation covers the subject-naming convention policy selectors
 //!   match on, why an unmodeled field never becomes a guessed category,
 //!   and why environment literals are the one thing it will not print.
+//! - [`trace`] compares two sides' *webhook chains*
+//!   ([`trace::diff_admission_trace`]): which webhooks ran, in what
+//!   order, with what patches and outcomes, and which of them got
+//!   materially slower. Its module documentation covers why invocations
+//!   are matched by webhook and round rather than by position, why a
+//!   dimension is compared only where both sides observed it, and why
+//!   [`trace::trace_comparability`] exists -- the trace-side twin of
+//!   [`admission::decision_comparability`], with a third state for
+//!   partial evidence, under which an absence stops being proof.
 //!
 //! # Who fills in `fixture_id`
 //!
@@ -65,6 +74,7 @@
 
 pub mod admission;
 pub mod raw;
+pub mod trace;
 pub mod types;
 pub mod workload;
 
@@ -72,6 +82,7 @@ pub use admission::{
     DecisionComparability, decision_comparability, diff_admission_decision, raw_decision_diff,
 };
 pub use raw::{RawChange, RawChangeOp, raw_object_diff};
+pub use trace::{TraceComparability, diff_admission_trace, trace_comparability};
 pub use types::{
     DivergenceConfidence, DivergenceEvidence, SemanticChange, SemanticChangeKind,
     UNATTRIBUTED_FIXTURE, unattributed_fixture_id,

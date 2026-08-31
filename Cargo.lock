@@ -78,6 +78,7 @@ dependencies = [
  "admissionlab-admission",
  "admissionlab-core",
  "admissionlab-normalize",
+ "admissionlab-spec",
  "json-patch",
  "serde",
  "serde_json",
