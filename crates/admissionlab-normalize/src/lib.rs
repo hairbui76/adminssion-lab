@@ -10,13 +10,26 @@
 //! comparison. This crate removes exactly that class of noise, and
 //! nothing else.
 //!
-//! # Entry point
+//! # Two entry points
 //!
-//! [`normalize_object`] (Task 4.1) normalizes one Kubernetes object —
-//! for Alpha, the final admitted/mutated object of a server-side dry-run
-//! `CREATE` — under a [`NormalizationProfile`]. It returns the
-//! transformed value together with a [`NormalizationEvidence`] record of
-//! what was done to it, and never mutates its input.
+//! - [`normalize_object`] (Task 4.1) normalizes one Kubernetes object —
+//!   for Alpha, the final admitted/mutated object of a server-side
+//!   dry-run `CREATE` — under a [`NormalizationProfile`], returning the
+//!   transformed value plus a [`NormalizationEvidence`] record of what
+//!   was done to it.
+//! - [`normalize_trace`] (Task 4.2) canonicalizes the webhook-invocation
+//!   evidence captured alongside that object: JSON Patch *values* get
+//!   canonical object-key order, and nothing else about the trace
+//!   changes.
+//!
+//! Neither ever mutates its input.
+//!
+//! The asymmetry between them is deliberate. Object normalization is
+//! rule-driven and configurable because what counts as noise in an
+//! object depends on the resource and the stack under test; trace
+//! canonicalization is fixed and unconfigurable because a webhook chain
+//! has exactly one presentation-only degree of freedom, and every other
+//! part of it is behavior.
 //!
 //! # What this crate must never do
 //!
@@ -31,15 +44,19 @@
 //!
 //! The second rule follows from Global Constraint 15: normalization may
 //! never invent a value. It removes fields and reorders arrays; it does
-//! not fill in a value that was not observed, and it does not delete one
-//! that was.
+//! not fill in a missing `latency` with a plausible number, collapse an
+//! unknown `mutated` to `false`, or blank a patch it believes to be
+//! redundant. [`crate::trace`] documents each of those cases, since it
+//! is where they would be tempting.
 
 #![forbid(unsafe_code)]
 
 pub mod object;
 pub mod pointer;
 pub mod rules;
+pub mod trace;
 
 pub use object::{NormalizationEvidence, NormalizeError, NormalizedObject, normalize_object};
 pub use pointer::{JsonPointer, PointerError};
 pub use rules::{NormalizationProfile, NormalizeRule, RuleTier, built_in_rules};
+pub use trace::{NormalizedTrace, NormalizedWebhookInvocation, normalize_trace};

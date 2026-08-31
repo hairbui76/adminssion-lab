@@ -9,6 +9,44 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# `trace.rs` (Task 4.2): `normalize_trace(trace: &AdmissionTrace) ->
+# NormalizedTrace` is the roadmap's own frozen signature, and
+# `NormalizedTrace`/`NormalizedWebhookInvocation` carry that crate's
+# `TraceEvidence` and `WebhookOutcome` directly (cross-task type
+# registry, §1.2).
+#
+# This is a real `normalize -> admission` edge, and it is worth naming
+# the tension it resolves. §1.1's layering list reads "normalize -> core
+# domain types only", which taken literally would forbid it. But Task
+# 4.2's frozen interface is stated in terms of an
+# `admissionlab-admission` type, and the observed webhook-invocation
+# model lives there (Task 3.3) -- there is no `admissionlab-core`
+# counterpart to normalize against, and inventing a parallel one in
+# `core` purely to satisfy the arrow would duplicate an evidence model
+# whose whole value is that exactly one type says what was observed.
+# So the edge is deliberate, taken the same way
+# `admissionlab-admission`'s own `Cargo.toml` documents its
+# `admission -> fixtures` edge and the root `Cargo.toml` documents
+# `diff -> admission`.
+#
+# It is acyclic: `admissionlab-admission` depends on
+# `admissionlab-fixtures` and `admissionlab-core`, neither of which
+# depends on this crate, and nothing in the workspace depends on
+# `admissionlab-normalize` at all yet. What must never be added is an
+# `admission -> normalize` edge back.
+admissionlab-admission = { workspace = true }
+# `NormalizedWebhookInvocation::patch` is
+# `Option<Vec<json_patch::PatchOperation>>` -- the same type
+# `admissionlab_admission::WebhookInvocation::patch` already holds, since
+# Task 4.2 canonicalizes those operations' values rather than re-encoding
+# them. `trace.rs` names `PatchOperation` and its
+# `Add`/`Replace`/`Test` variant structs directly (those three are the
+# ones carrying a `value`), so this is a direct dependency rather than a
+# reach through `admissionlab-admission`, which does not re-export them.
+# Already resolved at this exact version via that crate -- a promotion,
+# not a new dependency; see the root `Cargo.toml`'s own comment on this
+# entry.
+json-patch = { workspace = true }
 # `NormalizedObject`/`NormalizationEvidence` (Task 4.1) are what the
 # golden files under `testdata/objects/normalization/` are written as,
 # and what a later task's JSON report renders, so both derive

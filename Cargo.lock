@@ -135,6 +135,8 @@ dependencies = [
 name = "admissionlab-normalize"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-admission",
+ "json-patch",
  "serde",
  "serde_json",
  "thiserror",
