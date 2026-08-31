@@ -34,6 +34,11 @@ async-trait = { workspace = true }
 # `WebhookInvocation::patch` (Task 3.3) is `Option<Vec<json_patch::PatchOperation>>`
 # -- see the root `Cargo.toml`'s own comment on this entry for why.
 json-patch = { workspace = true }
+# `audit_reader.rs` (Task 3.5): `AuditEvent`'s
+# `request_received_timestamp`/`stage_timestamp` are `Option<jiff::Timestamp>`
+# -- see the root `Cargo.toml`'s own comment on this entry for why a real
+# parsed instant (and why `jiff`, not `chrono`).
+jiff = { workspace = true }
 # `execute.rs` (Task 3.4) classifies the `kube::core::Status` object
 # `admissionlab_fixtures::execute::dry_run_create` returns for a
 # non-2xx dry-run CREATE response into this crate's own
@@ -63,16 +68,41 @@ serde = { workspace = true, features = ["derive"] }
 # `serde_json::Value`/`serde_json::to_string` directly, not only through
 # `serde`'s generic (de)serialize traits.
 serde_json = { workspace = true }
-# `execute.rs`'s `FixtureExecutionError` (Task 3.4).
+# `execute.rs`'s `FixtureExecutionError` (Task 3.4), and
+# `audit_reader.rs`'s `AuditError` (Task 3.5).
 thiserror = { workspace = true }
+# `audit_reader.rs` (Task 3.5) reads a live, concurrently appended audit
+# log: `fs` for `tokio::fs::{metadata, File}`, `io-util` for the
+# `AsyncSeekExt::seek`/`AsyncReadExt::read_to_end` pair that resumes a
+# read at a checkpoint's byte offset, and `time` for the
+# `tokio::time::sleep` between poll passes while an unfinished trailing
+# line completes. No `rt` here: this crate's library code never spawns a
+# task or builds a runtime of its own -- it only awaits inside whatever
+# runtime its caller already has (the `[dev-dependencies]` entry below
+# adds `rt`/`macros` for the test harness itself).
+tokio = { workspace = true, features = ["fs", "io-util", "time"] }
 
 [dev-dependencies]
+# `tests/audit_reader.rs` (Task 3.5) asserts parsed
+# `AuditEvent` timestamps against `jiff::Timestamp` values built from the
+# exact RFC 3339 strings in `testdata/audit/basic.jsonl`. Already a
+# `[dependencies]` entry above; named again here only because
+# `[dev-dependencies]` does not inherit `[dependencies]` entries
+# automatically -- no new version added to the resolved graph.
+jiff = { workspace = true }
 # `tests/execute_unit.rs` drives `KubeAdmissionExecutor::execute_create`
 # (an `async fn`) against a `tower_test::mock`-backed `kube::Client`, the
 # same technique `admissionlab-installer/src/readiness.rs` and
 # `admissionlab-fixtures/src/resources.rs` already use (see either
 # module's own documentation).
-tokio = { workspace = true, features = ["rt", "macros"] }
+#
+# `tests/audit_reader.rs` (Task 3.5) additionally needs `rt` for the
+# `tokio::spawn`ed task that finishes writing a partial audit-log line
+# mid-wait, and `time` for its own short `tokio::time::sleep`s. `time`
+# is already enabled by the `[dependencies]` entry above and would
+# unify anyway; it is named here so this entry states what the test
+# binaries actually use rather than relying on that unification.
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
 tower-test = "0.4.0"
 # `tests/execute_unit.rs`'s body-integrity test reads the request body
 # the mock actually received (`BodyExt::collect`) to assert it is

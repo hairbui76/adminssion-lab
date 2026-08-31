@@ -27,6 +27,20 @@
 //!   [`trace::TraceEvidence`], [`trace::WebhookInvocation`], and
 //!   [`trace::WebhookOutcome`] -- what was observed about the chain of
 //!   webhooks a fixture passed through.
+//! - [`audit_reader`] implements Task 3.5:
+//!   [`audit_reader::AuditLogReader`] reads the window of a real
+//!   kube-apiserver audit log that belongs to one fixture request,
+//!   between an offset [`audit_reader::AuditCheckpoint`] taken before
+//!   the request and the request's own `ResponseComplete` event. Its
+//!   module documentation covers the four things it refuses to guess --
+//!   an unfinished trailing line is waited on rather than called
+//!   corruption, an unparsable complete line becomes an
+//!   [`admissionlab_core::Diagnostic`] rather than a fixture failure, a
+//!   rotated/truncated file is an explicit
+//!   [`audit_reader::AuditError::Truncated`] rather than a silent reread
+//!   from `0`, and an expired deadline is a partial `Ok` rather than an
+//!   error (Global Constraint 15 in all four cases). The raw
+//!   `annotations` map it preserves untouched is Task 3.6's input.
 //! - [`execute`] implements Task 3.4:
 //!   [`execute::AdmissionExecutor::execute_create`] replays a fixture
 //!   through a real API server as a server-side dry-run CREATE (via
@@ -58,10 +72,15 @@
 //! and `admissionlab_core::StackInstaller` already use -- never by
 //! naming [`execute::AdmissionExecutor`] itself from `core`.
 
+pub mod audit_reader;
 pub mod execute;
 pub mod outcome;
 pub mod trace;
 
+pub use audit_reader::{
+    AuditCheckpoint, AuditError, AuditEvent, AuditLogReader, AuditObjectRef, AuditResponseStatus,
+    DEFAULT_POLL_INTERVAL, FileAuditLogReader, STAGE_RESPONSE_COMPLETE,
+};
 pub use execute::{
     AdmissionExecutor, FixtureExecutionError, KubeAdmissionExecutor, RawAdmissionResponse,
     execute_create_with_client,

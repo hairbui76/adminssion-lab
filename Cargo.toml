@@ -67,6 +67,43 @@ hyper-util = { version = "0.1.20", features = ["tokio"] }
 # (verified by reading `json-patch-4.2.0/src/lib.rs` directly), which is
 # exactly what this field's own model tests round-trip.
 json-patch = "4.2.0"
+# `admissionlab-admission`'s `audit_reader.rs` (Task 3.5) parses each
+# audit event's `requestReceivedTimestamp`/`stageTimestamp` (RFC 3339,
+# microsecond precision) into a real instant rather than keeping the raw
+# string, because Task 3.7 compares those against the
+# `std::time::SystemTime` request window `RawAdmissionResponse` already
+# records -- and `jiff::Timestamp` converts to `SystemTime` infallibly
+# via `From` (verified by reading `jiff-0.2.35/src/timestamp.rs`'s own
+# `impl From<Timestamp> for std::time::SystemTime`, which is gated on
+# jiff's `std` feature).
+#
+# **Not `chrono`**: `chrono` is not in this workspace's dependency graph
+# at all (`grep chrono Cargo.lock` finds nothing), so adding it would be
+# a genuinely new dependency. `jiff` *is* already resolved at exactly
+# this version, because `k8s-openapi` 0.28 depends on it directly (its
+# own manifest: `jiff = { version = "0.2", default-features = false,
+# features = ["alloc", "serde"] }`) and uses it for the generated
+# `Time`/`MicroTime` Kubernetes timestamp types -- so this entry is a
+# promotion of an already-fetched transitive dependency to a direct one,
+# and it parses Kubernetes timestamps with the same library the
+# Kubernetes API types in this graph already use.
+#
+# `default-features = false` is load-bearing: jiff's *default* feature
+# set is `["std", "tz-system", "tz-fat", "tzdb-bundle-platform",
+# "tzdb-zoneinfo", "tzdb-concatenated", "perf-inline"]`, and the `tzdb-*`
+# ones pull in `jiff-tzdb-platform`/`jiff-tzdb` -- a bundled IANA time
+# zone database this project has no use for, since audit timestamps are
+# always UTC instants and are never rendered in a local time zone. The
+# two features requested here are exactly `k8s-openapi`'s own set plus
+# `std`: `serde` for `Timestamp`'s `Serialize`/`Deserialize` (how audit
+# events are parsed and how Task 3.10 writes `audit.json`), and `std`
+# for the `SystemTime` conversion above. `std` enables only
+# `jiff-core/std`, `serde_core/std`, and `log?/std` -- all already-
+# resolved crates, so no new package enters `Cargo.lock`.
+jiff = { version = "0.2.35", default-features = false, features = [
+    "serde",
+    "std",
+] }
 # `admissionlab-installer`'s readiness probes (Task 2.4) read `Deployment`/
 # `DaemonSet`/`Job`/webhook-configuration objects through `k8s-openapi`'s
 # generated types. `k8s-openapi` requires *exactly one* `v1_*` Kubernetes
