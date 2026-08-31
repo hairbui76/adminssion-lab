@@ -59,7 +59,7 @@ pub mod manifests;
 pub mod readiness;
 pub mod stack;
 
-pub use helm::HelmInstaller;
+pub use helm::{HelmInstaller, UNCONFIRMED_VERSION};
 pub use manifests::{ManifestBundle, ManifestsInstaller, load_manifest_bundle};
 pub use readiness::{KubeReadinessProbe, ReadinessEvidence, ReadinessProbe};
 pub use stack::{CompositeInstaller, InstalledStack, install_stack};

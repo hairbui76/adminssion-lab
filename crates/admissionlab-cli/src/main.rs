@@ -10,6 +10,7 @@ use admissionlab_cli::output;
 use clap::{Parser, Subcommand};
 
 use commands::doctor::DoctorArgs;
+use commands::reproduce::ReproduceArgs;
 use commands::test::TestArgs;
 
 /// Admission Lab: creates baseline and candidate ephemeral Kubernetes
@@ -37,6 +38,10 @@ enum Commands {
     /// Create baseline/candidate clusters, replay fixtures, and report
     /// behavioral regressions for one lab configuration.
     Test(TestArgs),
+    /// Re-run a recorded run from its run manifest, against the same
+    /// source files, Kubernetes versions, node images, and component
+    /// versions it used.
+    Reproduce(ReproduceArgs),
 }
 
 fn main() -> ExitCode {
@@ -47,5 +52,6 @@ fn main() -> ExitCode {
     match cli.command {
         Commands::Doctor(args) => commands::doctor::run(&args),
         Commands::Test(args) => commands::test::run(&args),
+        Commands::Reproduce(args) => commands::reproduce::run(&args),
     }
 }

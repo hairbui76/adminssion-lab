@@ -109,14 +109,21 @@ pub struct TestArgs {
 /// probe). `--report-dir` is the escape hatch that matters in practice:
 /// it puts the artifacts a user actually reads wherever they want them,
 /// without moving the workspace `kind` bind-mounts into.
-fn default_run_root() -> PathBuf {
+#[must_use]
+pub fn default_run_root() -> PathBuf {
     std::env::temp_dir().join("admissionlab-runs")
 }
 
 /// The production [`LabBackend`]: real `kind` clusters, real
 /// `helm`/`kubectl` installs, real server-side dry-run capture against
 /// real API servers (Global Constraints 2, 3, and 16).
-struct KindBackend {
+///
+/// `pub` because `commands::reproduce` runs the *same* world with one
+/// thing added — the recorded environment pin (ROADMAP Task 5.3) — and a
+/// second, separately-constructed production backend would be a second
+/// place for "which cluster/install/capture implementations are real" to
+/// be answered, and eventually to be answered differently.
+pub struct KindBackend {
     /// Every external command — `kind`, `helm`, `kubectl`, `docker` —
     /// goes through this one runner, so every invocation inherits its
     /// timeout, separate stdout/stderr capture, and structured error
@@ -133,7 +140,8 @@ struct KindBackend {
 
 impl KindBackend {
     /// Builds the production backend for a run rooted at `run_root`.
-    fn new(run_root: &std::path::Path) -> Self {
+    #[must_use]
+    pub fn new(run_root: &std::path::Path) -> Self {
         let process_runner: Arc<dyn ProcessRunner> = Arc::new(TokioProcessRunner::new());
         Self {
             cluster_manager: Arc::new(KindClusterManager::new(Arc::clone(&process_runner))),

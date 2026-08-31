@@ -573,6 +573,30 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+/// Returns the SHA-256 digest of `path`'s bytes as lowercase hex.
+///
+/// **The one implementation of "a digest over a file" in this
+/// workspace.** Rule 1 of this module's "Canonical serialization" section
+/// says a file-derived digest hashes that file's own bytes exactly as
+/// read from disk; this is that rule as a function, so the code that
+/// *writes* `config_sha256`/`expectations_sha256` into a manifest
+/// (`admissionlab-cli`'s `pipeline::provenance::input_digests`) and the
+/// code that *checks* them back on a reproduction
+/// ([`crate::reproduce::plan_reproduction`]) cannot drift apart. A second
+/// `sha256_hex(&fs::read(..)?)` anywhere would be two implementations of
+/// one rule, and the pair that must agree is exactly the pair that would
+/// stop agreeing.
+///
+/// # Errors
+///
+/// Returns the underlying [`std::io::Error`] if `path` could not be
+/// read. Never degraded to an absent digest: a caller that could not read
+/// an input has not verified it, and reporting "no digest" would let a
+/// vanished file read as an honest absence.
+pub fn file_sha256(path: &Path) -> std::io::Result<String> {
+    Ok(sha256_hex(&std::fs::read(path)?))
+}
+
 /// Returns the SHA-256 digest, as lowercase hex, of `value`'s canonical
 /// JSON encoding.
 ///

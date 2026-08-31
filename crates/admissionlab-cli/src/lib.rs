@@ -12,8 +12,9 @@
 //! shell would; `tests/test_command.rs` exercises the pipeline's
 //! decisions without needing Docker.
 //!
-//! - [`commands`] holds one module per subcommand (`doctor`, `test`):
-//!   argument parsing, the production backends, and terminal wording.
+//! - [`commands`] holds one module per subcommand (`doctor`, `test`,
+//!   `reproduce`): argument parsing, the production backends, and
+//!   terminal wording.
 //! - [`pipeline`] holds the `admissionlab test` assembly itself — config
 //!   through report — and its module documentation is the authoritative
 //!   description of the stage order and of why this half of the product

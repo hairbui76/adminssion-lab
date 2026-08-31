@@ -10,6 +10,14 @@
 //! comparison, policy, reports, and cleanup. That assembly itself lives
 //! in [`crate::pipeline`]; this module owns only the command's argument
 //! surface, its production backends, and its exit code.
+//!
+//! `reproduce` (Task 5.3) is that same pipeline run against a recorded
+//! run manifest: it verifies the source tree against the digests the
+//! manifest recorded, pins both sides' node images and component
+//! versions to what that run actually used, and then calls
+//! [`crate::pipeline::run_lab`] through `test`'s own production backend.
+//! See its module documentation for the plan-time/run-time split.
 
 pub mod doctor;
+pub mod reproduce;
 pub mod test;

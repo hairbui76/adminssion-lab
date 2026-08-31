@@ -240,7 +240,15 @@ const GET_METADATA_TIMEOUT: Duration = Duration::from_secs(30);
 /// module could not parse: an honest "not confirmed" value, never the
 /// requested/pinned version reused as a guess (Global Constraint 15).
 /// See [`HelmInstaller::capture_resolved_version`].
-const UNCONFIRMED_VERSION: &str = "unknown";
+///
+/// `pub` because reproduction has to recognize it: a run manifest records
+/// this value in `ComponentProvenance::version` exactly as it records a
+/// real one, and `admissionlab_core::reproduce` must treat it as "no
+/// recorded pin" rather than install `--version unknown`. That module
+/// duplicates the literal (it sits below this crate and cannot import
+/// it) and `admissionlab-cli`'s `tests/reproduce_command.rs` asserts the
+/// two are equal, which is what keeps the duplication honest.
+pub const UNCONFIRMED_VERSION: &str = "unknown";
 
 /// Drives `helm` (via a shared [`ProcessRunner`]) to install a single
 /// resolved Helm component. Holds the runner plus this run's own `logs`

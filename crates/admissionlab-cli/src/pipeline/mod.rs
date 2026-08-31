@@ -122,6 +122,18 @@
 //! or have its failure replaced, because a Markdown file could not be
 //! written.
 //!
+//! ## A reproduction is this same pipeline, with its environment pinned
+//!
+//! ROADMAP Task 5.3. `admissionlab reproduce` does not have a second
+//! engine: it verifies a source tree against a recorded manifest, builds
+//! an `admissionlab_core::ReproductionPin` from that manifest, and then
+//! runs *this* function. [`LabBackend::reproduction_pin`] is the whole of
+//! the difference, and it changes exactly two things — the resolved lab's
+//! versions, and where both sides' node images come from. Every other
+//! stage, every failure mapping, and every artifact is identical, which
+//! is the only way a reproduction and the run it reproduces can be
+//! compared at all.
+//!
 //! Only the *first* manifest write is fatal: at that moment nothing has
 //! been provisioned, and a run workspace that cannot be written to is one
 //! whose later evidence would be untrustworthy anyway. Every later
@@ -143,8 +155,8 @@ use std::time::{Duration, SystemTime};
 use admissionlab_admission::AdmissionOutcome;
 use admissionlab_core::{
     ArtifactStore, ClusterManager, Diagnostic, DoctorReport, InstalledLab, LabRunner, PreparedLab,
-    RedactedValue, RunDisposition, RunError, RunManifestWriter, RunOptions, RunPaths, RunStage,
-    StackInstaller, preserved_cluster_report,
+    RedactedValue, ReproductionPin, ResolvedNodeImages, RunDisposition, RunError,
+    RunManifestWriter, RunOptions, RunPaths, RunStage, StackInstaller, preserved_cluster_report,
 };
 use admissionlab_fixtures::{FixtureSource, discover_fixtures};
 use admissionlab_policy::{
@@ -214,10 +226,17 @@ pub struct Console<'a> {
 
 impl Console<'_> {
     /// Prefix every progress and problem line carries, so a line from
-    /// this command is recognizable in a CI log interleaved with other
-    /// tools' output. Matches the wording `commands::test` has used
-    /// since Task 1.10.
-    const PREFIX: &'static str = "admissionlab test:";
+    /// Admission Lab is recognizable in a CI log interleaved with other
+    /// tools' output.
+    ///
+    /// The command name is deliberately *not* part of it. It was
+    /// `"admissionlab test:"` until Task 5.3, when a second command
+    /// started driving this same pipeline: `admissionlab reproduce`
+    /// printing "admissionlab test:" on every line would be a small,
+    /// constant lie about which command the user ran. Naming the tool
+    /// rather than the subcommand is what makes one prefix correct for
+    /// both — and for whatever third command drives [`run_lab`] next.
+    const PREFIX: &'static str = "admissionlab:";
 
     /// Reports progress on the output stream.
     fn say(&mut self, message: &str) {
@@ -288,6 +307,33 @@ pub trait LabBackend: Send + Sync {
     fn component_timeout(&self) -> Duration {
         DEFAULT_COMPONENT_TIMEOUT
     }
+
+    /// The recorded environment this run is reproducing (ROADMAP Task
+    /// 5.3), or `None` — the default — for an ordinary
+    /// `admissionlab test`.
+    ///
+    /// This belongs on the backend rather than on [`RunRequest`] because
+    /// it *is* a statement about the world the run executes against: a
+    /// reproduction's node images come from a recorded manifest instead
+    /// of from the compatibility matrix, and its component versions from
+    /// what a previous run installed instead of from what the
+    /// configuration resolves to today. A backend is already the seam
+    /// through which "which world does this run happen in" is answered,
+    /// and defaulting to `None` means every existing backend — the
+    /// production one and every fake — keeps its current behavior
+    /// untouched.
+    ///
+    /// [`run_lab`] does two things with it and nothing else: it applies
+    /// the pin to the resolved lab (before any cluster exists, after the
+    /// input digests have been computed from the source as written), and
+    /// it uses [`ReproductionPin::node_images`] *instead of*
+    /// `LabRunner::resolve_node_images`. That second half is what makes
+    /// ROADMAP Task 5.3 step 4 structural: with a pin present the
+    /// compatibility matrix is never consulted, so there is no code path
+    /// by which a newer node image digest could be substituted.
+    fn reproduction_pin(&self) -> Option<&ReproductionPin> {
+        None
+    }
 }
 
 /// Everything the run validated out of the user's own input, before any
@@ -340,7 +386,7 @@ pub async fn run_lab<B: LabBackend>(
     console: &mut Console<'_>,
 ) -> RunDisposition {
     let started_at = SystemTime::now();
-    let inputs = match prepare_inputs(request, console) {
+    let mut inputs = match prepare_inputs(request, console) {
         Ok(inputs) => inputs,
         Err(disposition) => {
             return no_verdict(
@@ -355,6 +401,34 @@ pub async fn run_lab<B: LabBackend>(
             .await;
         }
     };
+    // Applied *after* `prepare_inputs`, deliberately: the digests it
+    // computed describe the source tree as written, which is the thing a
+    // reproduction verified against the manifest and the thing this
+    // run's own manifest should record. Pinning first would make those
+    // digests describe a lab no file on disk contains.
+    if let Some(pin) = backend.reproduction_pin() {
+        match pin.apply(&mut inputs.lab) {
+            Ok(notes) => {
+                for note in &notes {
+                    console.problem(&note.message);
+                }
+            }
+            Err(error) => {
+                console.problem(&format!("cannot reproduce the recorded run: {error}"));
+                let failure = error.to_string();
+                return no_verdict(
+                    request,
+                    console,
+                    None,
+                    "reproduction",
+                    &failure,
+                    RunDisposition::InvalidInput,
+                )
+                .await;
+            }
+        }
+    }
+
     let doctor = match check_prerequisites(backend, console).await {
         Ok(report) => report,
         Err(disposition) => {
@@ -375,11 +449,21 @@ pub async fn run_lab<B: LabBackend>(
         cluster_manager: backend.cluster_manager(),
         artifact_store: ArtifactStore::new(&request.run_root),
     };
-    let (prepared, mut manifest) =
-        match provision(request, console, &runner, &inputs, &doctor, started_at).await {
-            Ok(provisioned) => provisioned,
-            Err(disposition) => return disposition,
-        };
+    let pinned_images = backend.reproduction_pin().map(ReproductionPin::node_images);
+    let (prepared, mut manifest) = match provision(
+        request,
+        console,
+        &runner,
+        &inputs,
+        &doctor,
+        started_at,
+        pinned_images,
+    )
+    .await
+    {
+        Ok(provisioned) => provisioned,
+        Err(disposition) => return disposition,
+    };
 
     // Exactly one path from here to this function's return, and
     // `finish` is on it — see this module's documentation.
@@ -425,6 +509,11 @@ pub async fn run_lab<B: LabBackend>(
 /// Returns the two values the rest of the run needs: the prepared
 /// clusters and the manifest writer, already advanced past cluster
 /// creation.
+///
+/// `pinned_images` is `Some` only for a reproduction (ROADMAP Task 5.3),
+/// and when it is, [`LabRunner::resolve_node_images`] is not called at
+/// all — see [`LabBackend::reproduction_pin`] for why that bypass is the
+/// mechanism rather than a shortcut.
 async fn provision<C: ClusterManager>(
     request: &RunRequest<'_>,
     console: &mut Console<'_>,
@@ -432,6 +521,7 @@ async fn provision<C: ClusterManager>(
     inputs: &Inputs,
     doctor: &DoctorReport,
     started_at: SystemTime,
+    pinned_images: Option<ResolvedNodeImages>,
 ) -> Result<(PreparedLab, RunManifestWriter), RunDisposition> {
     let options = RunOptions {
         keep_clusters: request.keep_clusters,
@@ -448,15 +538,20 @@ async fn provision<C: ClusterManager>(
         }
     };
     let run = Some(run_id.as_str());
-    let images = match runner.resolve_node_images(&inputs.lab).await {
-        Ok(images) => images,
-        Err(error) => {
-            let disposition = report_cluster_failure(&error, console);
-            let failure = error.to_string();
-            return Err(
-                no_verdict(request, console, run, "node-image", &failure, disposition).await,
-            );
-        }
+    let images = match pinned_images {
+        // A reproduction runs the images the recorded manifest named,
+        // and never asks the compatibility matrix what it thinks today.
+        Some(images) => images,
+        None => match runner.resolve_node_images(&inputs.lab).await {
+            Ok(images) => images,
+            Err(error) => {
+                let disposition = report_cluster_failure(&error, console);
+                let failure = error.to_string();
+                return Err(
+                    no_verdict(request, console, run, "node-image", &failure, disposition).await,
+                );
+            }
+        },
     };
 
     let manifest = provenance::initial_manifest(

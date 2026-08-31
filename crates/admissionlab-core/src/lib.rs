@@ -7,6 +7,7 @@ pub mod diagnostic;
 pub mod error;
 pub mod ids;
 pub mod process;
+pub mod reproduce;
 pub mod run;
 pub mod run_manifest;
 pub mod side;
@@ -26,6 +27,12 @@ pub use process::{
     CommandContext, CommandResult, CommandSpec, ProcessError, ProcessRunner, TokioProcessRunner,
     env_key_looks_sensitive,
 };
+pub use reproduce::{
+    DEFAULT_LAB_FILE_NAME, DiscoveredFixture, EffectiveMismatch, FixtureVerification,
+    ReproduceError, ReproducePlan, ReproductionPin, SidePin, UNCONFIRMED_COMPONENT_VERSION,
+    VerifiedInput, incomplete_run_warning, plan_reproduction, plan_reproduction_from_config,
+    verify_effective_digests, verify_fixtures,
+};
 pub use run::{
     CapturedFixture, CapturedLab, ClusterCreationFailure, FixtureCapture, FixtureCaptureError,
     FixtureCaptureFailure, InstalledComponent, InstalledLab, LabRunner, PreparedLab,
@@ -35,8 +42,8 @@ pub use run::{
 pub use run_manifest::{
     ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, HostProvenance,
     NormalizationRuleRecord, RunManifest, RunManifestWriter, RunStage, RunStatus, ToolProvenance,
-    canonical_sha256, normalization_sha256, policy_sha256, run_manifest_v1alpha1_json_schema,
-    sha256_hex, split_node_image_reference,
+    canonical_sha256, file_sha256, normalization_sha256, policy_sha256,
+    run_manifest_v1alpha1_json_schema, sha256_hex, split_node_image_reference,
 };
 pub use side::Side;
 pub use tool::{

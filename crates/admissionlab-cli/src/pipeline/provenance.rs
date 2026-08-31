@@ -62,7 +62,7 @@ use std::time::SystemTime;
 use admissionlab_core::{
     ComponentProvenance, DoctorReport, EffectiveNormalization, EnvironmentProvenance,
     HostProvenance, NormalizationRuleRecord, ResolvedNodeImages, RunId, RunManifest, RunStage,
-    RunStatus, SideInstall, ToolProvenance, normalization_sha256, policy_sha256, sha256_hex,
+    RunStatus, SideInstall, ToolProvenance, file_sha256, normalization_sha256, policy_sha256,
     split_node_image_reference,
 };
 use admissionlab_core::{FixtureId, run_manifest::SCHEMA_VERSION};
@@ -115,9 +115,14 @@ pub fn input_digests(
     lab: &ResolvedLab,
     fixtures: &[FixtureSource],
 ) -> io::Result<InputDigests> {
-    let config_sha256 = sha256_hex(&std::fs::read(config)?);
+    // `file_sha256`, not a local `sha256_hex(&fs::read(..))`: it is the
+    // one implementation of "the digest of a file's bytes" in the
+    // workspace, and `admissionlab_core::reproduce` checks these same two
+    // digests back through it. Two spellings of one rule is exactly the
+    // pair that would eventually stop agreeing.
+    let config_sha256 = file_sha256(config)?;
     let expectations_sha256 = match &lab.expectations_file {
-        Some(path) => Some(sha256_hex(&std::fs::read(path)?)),
+        Some(path) => Some(file_sha256(path)?),
         None => None,
     };
 

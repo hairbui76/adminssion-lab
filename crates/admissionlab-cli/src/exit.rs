@@ -60,7 +60,7 @@
 use std::process::ExitCode;
 
 use admissionlab_core::{
-    ArtifactError, DoctorReport, RunDisposition, RunError, StackInstallFailure,
+    ArtifactError, DoctorReport, ReproduceError, RunDisposition, RunError, StackInstallFailure,
 };
 use admissionlab_fixtures::FixtureError;
 use admissionlab_normalize::{NormalizeError, RuleTier};
@@ -121,6 +121,37 @@ pub const fn disposition_for_policy_spec() -> RunDisposition {
 #[must_use]
 pub const fn disposition_for_expectations() -> RunDisposition {
     RunDisposition::InvalidInput
+}
+
+/// A reproduction that could not be planned (ROADMAP Task 5.3).
+///
+/// Every variant is `2`, and matched exhaustively rather than collapsed
+/// to a constant so a future variant describing something that is *not*
+/// the user's input has to be classified here deliberately.
+///
+/// The reading is the same one [`disposition_for_spec_error`] gives a
+/// malformed `admissionlab.yaml`: the command was handed a manifest and a
+/// source tree that do not go together — a manifest from another schema,
+/// a configuration that has been edited since, a corpus that no longer
+/// matches — and that pair is invalid *input*. No lab infrastructure
+/// failed, because none was attempted: every one of these is detected
+/// from files on disk before a container exists (see
+/// `admissionlab_core::reproduce`'s "Plan-time refusal versus run-time
+/// unavailability" section for the failures that are *not* detectable
+/// there, and which therefore surface as `3`/`4` from the run itself).
+///
+/// [`ReproduceError::Unreadable`] is `2` for the same reason
+/// [`disposition_for_expectations`] treats a missing expectations file as
+/// one: the path came from the user's own `--source-root`/`--config`.
+#[must_use]
+pub fn disposition_for_reproduce_error(error: &ReproduceError) -> RunDisposition {
+    match error {
+        ReproduceError::UnsupportedSchema { .. }
+        | ReproduceError::Unreadable { .. }
+        | ReproduceError::Config { .. }
+        | ReproduceError::ExpectationsPresenceChanged { .. }
+        | ReproduceError::ComponentSetChanged { .. } => RunDisposition::InvalidInput,
+    }
 }
 
 /// Host prerequisites, as `admissionlab doctor` probes them.
