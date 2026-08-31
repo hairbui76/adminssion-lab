@@ -108,14 +108,12 @@
 //!
 //! # Why validating webhooks are never invented, only counted
 //!
-//! An event that ran validating webhooks carries
-//! `validation.webhook.admission.k8s.io/round_<r>_index_<i>` annotations
-//! too. This module never builds a [`WebhookInvocation`] from one (Task
-//! 3.6 Step 5): a mutating annotation says nothing about a validating
-//! webhook, and a validating annotation is not what this function was
-//! asked to reconstruct.
+//! This module never builds a [`WebhookInvocation`] from a validating
+//! webhook's annotation (Task 3.6 Step 5): a mutating annotation says
+//! nothing about a validating webhook, and a validating annotation is
+//! not what this function was asked to reconstruct.
 //!
-//! It does, however, *notice that they exist*, and that is not the same
+//! It does, however, *notice that one exists*, and that is not the same
 //! thing. [`crate::trace::TraceEvidence::Observed`] means "the full
 //! webhook chain was watched; `invocations` is believed complete". If the
 //! event proves a validating chain ran that this trace does not describe,
@@ -123,6 +121,45 @@
 //! honest answer is [`crate::trace::TraceEvidence::Partial`]. Only the
 //! key prefix is looked at; not one field of a validating payload is
 //! parsed, and no invocation is created from it.
+//!
+//! ## What a validating annotation actually is (corrected in Task 3.10)
+//!
+//! Task 3.6 wrote this section assuming validating webhooks leave a
+//! per-invocation annotation mirroring the mutating one, under
+//! `validation.webhook.admission.k8s.io/`. Neither half of that is true,
+//! and both were checked:
+//!
+//! - The prefix is `validating.` , not `validation.`. Upstream
+//!   `staging/src/k8s.io/apiserver/pkg/admission/plugin/webhook/validating/dispatcher.go`
+//!   (read at `release-1.36`) declares
+//!   `ValidatingAuditAnnotationPrefix = "validating.webhook.admission.k8s.io/"`.
+//!   The old constant could therefore never have matched anything.
+//! - There is **no per-invocation validating annotation at all**. That
+//!   prefix appears in exactly one place in that file: building
+//!   `ValidatingAuditAnnotationFailedOpenKeyPrefix + "round_0_index_<i>"`,
+//!   written only when a webhook call fails *and* its `failurePolicy` is
+//!   `Ignore`, with the bare webhook name as its value. An ordinary
+//!   allow or deny leaves nothing behind. (A validating webhook can also
+//!   return its own `auditAnnotations`, which the dispatcher writes under
+//!   `<webhook name>/<key>` -- not under either prefix here, and not
+//!   something this module reads.)
+//!
+//! Confirmed live as well, on `kind` v1.36.4 running this project's own
+//! dogfood webhook: across 1385 audit events -- 472 of them at `Request`
+//! level, including a genuine `403` validating denial and eight admitted
+//! fixtures -- the only admission-annotation prefixes present were
+//! `mutation.webhook.admission.k8s.io/` and
+//! `patch.webhook.admission.k8s.io/`. Not one `validat*` key appeared.
+//!
+//! So [`VALIDATING_ANNOTATION_PREFIX`] now carries the real prefix, and
+//! the check accepts [`FAILED_OPEN_VALIDATING_ANNOTATION_PREFIX`] too --
+//! today the only key of either shape kube-apiserver actually writes.
+//! Both are matched with `starts_with`, and the failed-open one is not a
+//! suffix-extension of the other the way the mutating pair is (it starts
+//! with `failed-open.`), so neither can be reached by testing the other.
+//! A failed-open validating annotation proves a validating webhook ran
+//! and failed open, which is exactly the "a chain ran that this trace
+//! does not describe" condition [`TraceEvidence::Partial`] exists for.
 //!
 //! # Which `TraceEvidence` an empty trace deserves
 //!
@@ -342,13 +379,33 @@ pub const PATCH_ANNOTATION_PREFIX: &str = "patch.webhook.admission.k8s.io/";
 pub const FAILED_OPEN_MUTATION_ANNOTATION_PREFIX: &str =
     "failed-open.mutation.webhook.admission.k8s.io/";
 
-/// The key prefix of a *validating* webhook's audit annotation.
+/// kube-apiserver's `ValidatingAuditAnnotationPrefix`: the key prefix of
+/// a *validating* webhook's audit annotation.
 ///
 /// Recognized only to the extent of noticing that such a key exists --
 /// see this module's documentation ("Why validating webhooks are never
 /// invented, only counted"). No payload behind this prefix is ever
 /// parsed, and no [`WebhookInvocation`] is ever built from one.
-pub const VALIDATION_ANNOTATION_PREFIX: &str = "validation.webhook.admission.k8s.io/";
+///
+/// Note that current kube-apiserver never writes a bare key under this
+/// prefix; the only one it writes is the failed-open key below. This
+/// constant is matched anyway so a future per-invocation annotation
+/// would be noticed rather than silently ignored -- see that same
+/// documentation section for the upstream source and the live evidence.
+pub const VALIDATING_ANNOTATION_PREFIX: &str = "validating.webhook.admission.k8s.io/";
+
+/// kube-apiserver's `ValidatingAuditAnnotationFailedOpenKeyPrefix`: the
+/// key prefix of the annotation recording that a *validating* webhook
+/// call failed and was failed open under `failurePolicy: Ignore`.
+///
+/// The one key under [`VALIDATING_ANNOTATION_PREFIX`]'s family that a
+/// current kube-apiserver actually writes. Its value is the bare webhook
+/// name, not JSON -- and, unlike
+/// [`FAILED_OPEN_MUTATION_ANNOTATION_PREFIX`], nothing here ever parses
+/// it: it is read only as proof that a validating webhook ran, which
+/// makes the mutating-only trace [`TraceEvidence::Partial`].
+pub const FAILED_OPEN_VALIDATING_ANNOTATION_PREFIX: &str =
+    "failed-open.validating.webhook.admission.k8s.io/";
 
 /// The only `patchType` a mutating webhook annotation can carry: upstream
 /// `addPatchAnnotation` refuses to write an annotation for any other
@@ -579,7 +636,7 @@ pub fn reconstruct_mutating_trace(event: &AuditEvent) -> Result<AdmissionTrace, 
     // `mutation.`, and the failed-open value carries no `configuration`
     // to build an `InvocationKey` from on its own.
     let mut failed_open: Vec<(u32, u32, &str)> = Vec::new();
-    let mut saw_validation_annotation = false;
+    let mut saw_validating_annotation = false;
 
     for (key, value) in &event.annotations {
         // The failed-open prefix is tested first because it *contains*
@@ -618,12 +675,14 @@ pub fn reconstruct_mutating_trace(event: &AuditEvent) -> Result<AdmissionTrace, 
                 })
                 .or_default()
                 .patch = Some(payload.patch);
-        } else if key.starts_with(VALIDATION_ANNOTATION_PREFIX) {
-            saw_validation_annotation = true;
+        } else if key.starts_with(FAILED_OPEN_VALIDATING_ANNOTATION_PREFIX)
+            || key.starts_with(VALIDATING_ANNOTATION_PREFIX)
+        {
+            saw_validating_annotation = true;
         }
     }
 
-    let mut partial = saw_validation_annotation;
+    let mut partial = saw_validating_annotation;
     for (round, index, webhook) in failed_open {
         let mut matched = false;
         for (key, entry) in &mut evidence {

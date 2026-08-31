@@ -328,23 +328,32 @@ fn an_orphan_failed_open_annotation_is_partial() {
 // Step 5: never infer validating invocations
 // ---------------------------------------------------------------------
 
-/// The mutation this test exists to kill: parsing
-/// `validation.webhook.admission.k8s.io/...` annotations into
-/// invocations. A validating webhook's allow is not a mutating webhook's
-/// allow, and Task 3.6 Step 5 forbids inferring one from the other.
+/// The mutation this test exists to kill: parsing a validating webhook's
+/// annotation into an invocation. A validating webhook's failure is not a
+/// mutating webhook's anything, and Task 3.6 Step 5 forbids inferring one
+/// from the other.
 ///
 /// The other half of the assertion is the reason the prefix is looked at
 /// at all: the event proves a chain ran that this trace does not
 /// describe, so `Observed` -- "the full webhook chain was watched" --
 /// would be a false claim.
+///
+/// The fixture event carries a `failed-open.validating.webhook.admission.k8s.io/`
+/// key, which Task 3.10 confirmed is the *only* annotation under that
+/// family a real kube-apiserver writes: an earlier version of this
+/// fixture invented a per-invocation `validation.webhook...` key that no
+/// Kubernetes release has ever emitted, and that the old (misspelled)
+/// constant could not have matched even if one did. See
+/// `admissionlab_admission::correlate`'s own module documentation for
+/// the upstream source and the live evidence.
 #[test]
 fn validating_annotations_create_no_invocations_but_do_downgrade_the_evidence() {
-    let event = response_complete_for("fixture-validating-only");
+    let event = response_complete_for("fixture-validating-failed-open");
     assert!(
         event
             .annotations
             .keys()
-            .any(|key| key.starts_with("validation.webhook.admission.k8s.io/")),
+            .any(|key| key.starts_with("failed-open.validating.webhook.admission.k8s.io/")),
         "precondition: the fixture event carries a validating-webhook annotation"
     );
 

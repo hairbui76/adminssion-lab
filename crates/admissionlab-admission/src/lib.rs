@@ -112,9 +112,10 @@ pub use audit_reader::{
 };
 pub use correlate::{
     AUDIT_TIMESTAMP_RESOLUTION, CorrelationError, DRY_RUN_ALL, DRY_RUN_QUERY_PARAM,
-    FAILED_OPEN_MUTATION_ANNOTATION_PREFIX, MUTATION_ANNOTATION_PREFIX, NearMiss, NearMissReason,
-    ObjectKey, PATCH_ANNOTATION_PREFIX, TraceError, VALIDATION_ANNOTATION_PREFIX, VERB_CREATE,
-    reconstruct_mutating_trace, select_fixture_event,
+    FAILED_OPEN_MUTATION_ANNOTATION_PREFIX, FAILED_OPEN_VALIDATING_ANNOTATION_PREFIX,
+    MUTATION_ANNOTATION_PREFIX, NearMiss, NearMissReason, ObjectKey, PATCH_ANNOTATION_PREFIX,
+    TraceError, VALIDATING_ANNOTATION_PREFIX, VERB_CREATE, reconstruct_mutating_trace,
+    select_fixture_event,
 };
 pub use execute::{
     AdmissionExecutor, FixtureExecutionError, KubeAdmissionExecutor, RawAdmissionResponse,

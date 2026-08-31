@@ -272,7 +272,7 @@ pub struct AuditEvent {
     /// `mutation.webhook.admission.k8s.io/round_<r>_index_<i>`,
     /// `patch.webhook.admission.k8s.io/...` (at `Request` level, per
     /// Global Constraint 18), and
-    /// `validation.webhook.admission.k8s.io/...`. **Task 3.6 parses
+    /// `failed-open.validating.webhook.admission.k8s.io/...`. **Task 3.6 parses
     /// those; this module does not touch them**, so that exactly one
     /// place in the codebase encodes what those keys and their JSON
     /// values mean.
