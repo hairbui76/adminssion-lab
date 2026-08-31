@@ -1,0 +1,78 @@
+# What running Admission Lab in *your* repository looks like.
+#
+# Copy this file to `.github/workflows/admissionlab.yml`, replace OWNER
+# with the account that hosts Admission Lab, and set `version`/`sha256`
+# to a release you have verified. That is the whole integration: the
+# action installs a pinned binary and pinned tools, runs one lab, writes
+# the job summary, and uploads the artifacts.
+#
+# This copy lives under `examples/` and is therefore **not** a workflow of
+# this repository — GitHub only runs what is in the repository-root
+# `.github/workflows`. The job that actually exercises the action here is
+# `action` in `.github/workflows/integration.yml`, which uses the local
+# `./.github/actions/admissionlab` and its from-source build instead of a
+# pinned release.
+#
+# See `docs/github-action.md` for every input, the artifact list, and the
+# exit-code table.
+name: Admission Lab
+
+on:
+  pull_request:
+    # A lab run costs minutes and two clusters, so it is worth spending
+    # only on the changes it can say something about: the stack
+    # definition, the fixtures, and the lab configuration itself.
+    paths:
+      - "admissionlab.yaml"
+      - "expectations.yaml"
+      - "fixtures/**"
+      - "stacks/**"
+      - ".github/workflows/admissionlab.yml"
+
+permissions:
+  # The action needs no token, no package read, and no secrets: it
+  # downloads a public release, verifies its checksum, and writes only
+  # the job summary and one workflow artifact. `contents: read` is what
+  # `actions/checkout` needs and nothing more.
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  admission-lab:
+    name: Admission regression test
+    # `ubuntu-latest` matters: the action is Linux x86_64 only, because
+    # `kind` needs a working Docker daemon and GitHub's macOS runners do
+    # not have one.
+    runs-on: ubuntu-latest
+    # Two clusters, both stacks installed, every fixture replayed twice.
+    # A minute or two for a lab with no components; well over ten for one
+    # that installs real vendor charts on both sides.
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Run Admission Lab
+        uses: OWNER/admission-lab/.github/actions/admissionlab@v1
+        with:
+          config: admissionlab.yaml
+          # Pin both, always. `version` alone is refused: the action does
+          # not download a binary it cannot verify. The checksum comes
+          # from the release's `SHA256SUMS`, which is itself signed with a
+          # keyless Sigstore certificate — the release notes carry the
+          # `cosign verify-blob` command that checks it.
+          version: "0.1.0"
+          sha256: "0000000000000000000000000000000000000000000000000000000000000000"
+          # Everything below is optional; these are the defaults, written
+          # out so the file shows what it is choosing.
+          report-dir: ./admissionlab-artifacts
+          artifact-name: admissionlab-artifacts
+
+      # Nothing else is needed. The action has already appended the
+      # verdict to this job's summary and uploaded `result.json`,
+      # `report.html`, and the run manifest — on a passing run and on a
+      # failing one alike — and this job's conclusion is Admission Lab's
+      # own exit code.

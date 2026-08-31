@@ -101,6 +101,27 @@
 //! section for the contract, and [`provenance`] for how the values are
 //! assembled.
 //!
+//! ## The job summary is written whatever happens
+//!
+//! ROADMAP Task 5.4. `--github-summary` names one file the GitHub Action
+//! appends to `$GITHUB_STEP_SUMMARY`, and the reason it is written by the
+//! CLI rather than assembled in YAML is the same reason `result.json` is:
+//! the action is a wrapper, and a summary composed in shell would be a
+//! second renderer that can disagree with the first.
+//!
+//! Every path out of this module that has *anything* to say writes it —
+//! a verdict summary alongside the reports when the run reached one
+//! ([`report::write_reports`]), and [`report::render_no_verdict_summary`]
+//! naming the failed stage when it did not, from the configuration stage
+//! (before any cluster exists) through reporting. That is what lets the
+//! action's summary step be an unconditional `cat` of one file rather
+//! than a shell script deciding what a run meant.
+//!
+//! Writing it is always best-effort on the failure paths and never
+//! changes an exit code: a run that already failed must not be re-failed,
+//! or have its failure replaced, because a Markdown file could not be
+//! written.
+//!
 //! Only the *first* manifest write is fatal: at that moment nothing has
 //! been provisioned, and a run workspace that cannot be written to is one
 //! whose later evidence would be untrustworthy anyway. Every later
@@ -162,6 +183,12 @@ pub struct RunRequest<'a> {
     /// Where to write `result.json`/`report.html`. `None` writes them
     /// into this run's own `reports/` directory under [`Self::run_root`].
     pub report_dir: Option<&'a Path>,
+    /// Where to write the GitHub Actions job summary, or `None` to write
+    /// none. Any path the caller chose — it is not required to be inside
+    /// [`Self::report_dir`], and its parent directory is created if it
+    /// does not exist. See this module's "The job summary is written
+    /// whatever happens" section.
+    pub github_summary: Option<&'a Path>,
     /// The directory this run's on-disk workspace is created under. Must
     /// be absolute (`LabRunner::prepare_clusters` rejects a relative one
     /// before creating anything).
@@ -291,6 +318,9 @@ struct Outputs<'a> {
     /// The directory `result.json`/`report.html`/`diagnostics.json` land
     /// in.
     report_dir: PathBuf,
+    /// Where the GitHub job summary goes, when one was asked for. Its
+    /// parent directory has already been created by the time this exists.
+    github_summary: Option<&'a Path>,
     /// This run's manifest, advanced (or failed) at every stage boundary.
     manifest: &'a mut RunManifestWriter,
 }
@@ -312,74 +342,44 @@ pub async fn run_lab<B: LabBackend>(
     let started_at = SystemTime::now();
     let inputs = match prepare_inputs(request, console) {
         Ok(inputs) => inputs,
-        Err(disposition) => return disposition,
+        Err(disposition) => {
+            return no_verdict(
+                request,
+                console,
+                None,
+                "configuration",
+                "The lab configuration, its policy section, its expectations, or its fixtures \
+                 could not be loaded. Nothing was provisioned.",
+                disposition,
+            )
+            .await;
+        }
     };
     let doctor = match check_prerequisites(backend, console).await {
         Ok(report) => report,
-        Err(disposition) => return disposition,
+        Err(disposition) => {
+            return no_verdict(
+                request,
+                console,
+                None,
+                "prerequisites",
+                "This host does not meet the prerequisites `admissionlab test` needs. Run \
+                 `admissionlab doctor` for the full report.",
+                disposition,
+            )
+            .await;
+        }
     };
 
     let runner = LabRunner {
         cluster_manager: backend.cluster_manager(),
         artifact_store: ArtifactStore::new(&request.run_root),
     };
-    let options = RunOptions {
-        keep_clusters: request.keep_clusters,
-        run_root: request.run_root.clone(),
-    };
-
-    // `prepare_clusters`'s three parts, driven separately (Task 5.2):
-    // the manifest has to exist before a cluster does, and it cannot
-    // exist before the workspace that holds it — nor be complete before
-    // both sides' node images are known. Neither of the first two steps
-    // provisions anything, so a failure in either leaks nothing.
-    let (run_id, paths) = match runner.create_workspace(&options).await {
-        Ok(workspace) => workspace,
-        Err(error) => return report_cluster_failure(&error, console),
-    };
-    let images = match runner.resolve_node_images(&inputs.lab).await {
-        Ok(images) => images,
-        Err(error) => return report_cluster_failure(&error, console),
-    };
-
-    let manifest = provenance::initial_manifest(
-        &run_id,
-        &doctor,
-        &inputs.lab,
-        &images,
-        inputs.digests.clone(),
-        started_at,
-    );
-    let mut manifest =
-        match RunManifestWriter::create(ArtifactStore::new(&request.run_root), &paths, manifest)
-            .await
-        {
-            Ok(writer) => writer,
-            Err(error) => {
-                // Fatal, and cheap to be fatal about: nothing is provisioned
-                // yet — see this module's "The run manifest is written before
-                // anything is provisioned" section.
-                console.problem(&format!("failed to write this run's manifest: {error}"));
-                return RunDisposition::InfrastructureFailed;
-            }
+    let (prepared, mut manifest) =
+        match provision(request, console, &runner, &inputs, &doctor, started_at).await {
+            Ok(provisioned) => provisioned,
+            Err(disposition) => return disposition,
         };
-    console.say(&format!("wrote {}.", manifest.path().display()));
-
-    let prepared = match runner
-        .create_clusters(&inputs.lab, &run_id, &paths, &images)
-        .await
-    {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            record_stage_failure(&mut manifest, RunStage::ClusterCreation, console).await;
-            return report_cluster_failure(&error, console);
-        }
-    };
-    console.say(&format!(
-        "created baseline cluster {:?} and candidate cluster {:?}.",
-        prepared.baseline.spec.name, prepared.candidate.spec.name
-    ));
-    record_stage(&mut manifest, RunStage::ClusterCreation, |_| {}, console).await;
 
     // Exactly one path from here to this function's return, and
     // `finish` is on it — see this module's documentation.
@@ -407,6 +407,153 @@ pub async fn run_lab<B: LabBackend>(
         console.problem(&format!("could not record this run's completion: {error}"));
     }
     disposition
+}
+
+/// Everything between "the inputs are good" and "both clusters exist":
+/// the run workspace, both sides' node images, the run manifest, and the
+/// clusters themselves.
+///
+/// Split out of [`run_lab`] because it is the one stretch of the run
+/// where every step can fail in the same way — nothing is provisioned
+/// yet or the leak has already been rolled back, the failure is reported,
+/// a no-verdict summary is written, and the run is over — and because
+/// `prepare_clusters`'s three parts have to be driven separately (Task
+/// 5.2): the manifest has to exist before a cluster does, cannot exist
+/// before the workspace that holds it, and cannot be complete before both
+/// sides' node images are known.
+///
+/// Returns the two values the rest of the run needs: the prepared
+/// clusters and the manifest writer, already advanced past cluster
+/// creation.
+async fn provision<C: ClusterManager>(
+    request: &RunRequest<'_>,
+    console: &mut Console<'_>,
+    runner: &LabRunner<C>,
+    inputs: &Inputs,
+    doctor: &DoctorReport,
+    started_at: SystemTime,
+) -> Result<(PreparedLab, RunManifestWriter), RunDisposition> {
+    let options = RunOptions {
+        keep_clusters: request.keep_clusters,
+        run_root: request.run_root.clone(),
+    };
+    let (run_id, paths) = match runner.create_workspace(&options).await {
+        Ok(workspace) => workspace,
+        Err(error) => {
+            let disposition = report_cluster_failure(&error, console);
+            let failure = error.to_string();
+            return Err(
+                no_verdict(request, console, None, "workspace", &failure, disposition).await,
+            );
+        }
+    };
+    let run = Some(run_id.as_str());
+    let images = match runner.resolve_node_images(&inputs.lab).await {
+        Ok(images) => images,
+        Err(error) => {
+            let disposition = report_cluster_failure(&error, console);
+            let failure = error.to_string();
+            return Err(
+                no_verdict(request, console, run, "node-image", &failure, disposition).await,
+            );
+        }
+    };
+
+    let manifest = provenance::initial_manifest(
+        &run_id,
+        doctor,
+        &inputs.lab,
+        &images,
+        inputs.digests.clone(),
+        started_at,
+    );
+    let mut manifest =
+        match RunManifestWriter::create(ArtifactStore::new(&request.run_root), &paths, manifest)
+            .await
+        {
+            Ok(writer) => writer,
+            Err(error) => {
+                // Fatal, and cheap to be fatal about: nothing is provisioned
+                // yet — see this module's "The run manifest is written before
+                // anything is provisioned" section.
+                console.problem(&format!("failed to write this run's manifest: {error}"));
+                let failure = error.to_string();
+                let disposition = RunDisposition::InfrastructureFailed;
+                return Err(
+                    no_verdict(request, console, run, "manifest", &failure, disposition).await,
+                );
+            }
+        };
+    console.say(&format!("wrote {}.", manifest.path().display()));
+
+    let prepared = match runner
+        .create_clusters(&inputs.lab, &run_id, &paths, &images)
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            record_stage_failure(&mut manifest, RunStage::ClusterCreation, console).await;
+            let disposition = report_cluster_failure(&error, console);
+            let failure = error.to_string();
+            let stage = "cluster-creation";
+            return Err(no_verdict(request, console, run, stage, &failure, disposition).await);
+        }
+    };
+    console.say(&format!(
+        "created baseline cluster {:?} and candidate cluster {:?}.",
+        prepared.baseline.spec.name, prepared.candidate.spec.name
+    ));
+    record_stage(&mut manifest, RunStage::ClusterCreation, |_| {}, console).await;
+    Ok((prepared, manifest))
+}
+
+/// Writes the no-verdict job summary for a run that is ending without
+/// one, and returns `disposition` unchanged.
+///
+/// Returning the caller's own disposition is the whole shape of this
+/// helper: every call site reads `return no_verdict(..., disposition)`,
+/// so writing the summary cannot accidentally become the thing that
+/// decides how the run ended. A write failure is reported and dropped for
+/// the same reason (see this module's "The job summary is written
+/// whatever happens" section), and no summary is written at all when the
+/// caller asked for none.
+async fn no_verdict(
+    request: &RunRequest<'_>,
+    console: &mut Console<'_>,
+    run_id: Option<&str>,
+    stage: &str,
+    failure: &str,
+    disposition: RunDisposition,
+) -> RunDisposition {
+    write_no_verdict_summary(request.github_summary, console, run_id, stage, failure, 0).await;
+    disposition
+}
+
+/// Writes the no-verdict job summary to `path`, if there is one to write
+/// to.
+///
+/// Separate from [`no_verdict`] because the post-cluster failure path
+/// ([`write_failure`]) has diagnostics to count and a disposition it
+/// decides elsewhere, so it needs the write without the return-value
+/// plumbing.
+async fn write_no_verdict_summary(
+    path: Option<&Path>,
+    console: &mut Console<'_>,
+    run_id: Option<&str>,
+    stage: &str,
+    failure: &str,
+    diagnostics: usize,
+) {
+    let Some(path) = path else {
+        return;
+    };
+    match report::write_no_verdict_summary(path, run_id, stage, failure, diagnostics).await {
+        Ok(()) => console.say(&format!("wrote {}.", path.display())),
+        Err(error) => console.problem(&format!(
+            "could not write this run's job summary to {}: {error}",
+            path.display()
+        )),
+    }
 }
 
 /// Advances the manifest to `stage`, applying `update` first, and reports
@@ -632,11 +779,15 @@ async fn run_with_clusters<B: LabBackend>(
         Err(error) => {
             console.problem(&format!("failed to prepare the report directory: {error}"));
             record_stage_failure(manifest, RunStage::Reporting, console).await;
-            return RunDisposition::InfrastructureFailed;
+            let run = Some(prepared.run_id.as_str());
+            let failure = error.to_string();
+            let disposition = RunDisposition::InfrastructureFailed;
+            return no_verdict(request, console, run, "reporting", &failure, disposition).await;
         }
     };
     let mut outputs = Outputs {
         report_dir,
+        github_summary: request.github_summary,
         manifest,
     };
 
@@ -655,7 +806,7 @@ async fn run_with_clusters<B: LabBackend>(
             console.problem(&format!("{failure}"));
             record_stage_failure(outputs.manifest, RunStage::Installation, console).await;
             write_failure(
-                &outputs.report_dir,
+                &outputs,
                 prepared,
                 "install",
                 &failure.to_string(),
@@ -700,7 +851,7 @@ async fn run_with_clusters<B: LabBackend>(
         // being discarded with the run (ROADMAP step 3).
         diagnostics.extend(outcome_diagnostics(&capture.captured_outcomes()));
         write_failure(
-            &outputs.report_dir,
+            &outputs,
             prepared,
             "capture",
             &failure.to_string(),
@@ -752,7 +903,7 @@ async fn compare_and_report(
             console.problem(&format!("failed to normalize captured objects: {error}"));
             record_stage_failure(outputs.manifest, RunStage::Comparison, console).await;
             write_failure(
-                &outputs.report_dir,
+                &*outputs,
                 prepared,
                 "normalize",
                 &error.to_string(),
@@ -781,11 +932,30 @@ async fn compare_and_report(
 
     record_stage(outputs.manifest, RunStage::Comparison, |_| {}, console).await;
 
-    let written = match report::write_reports(&outputs.report_dir, &result, console.terminal) {
+    let written = match report::write_reports(
+        &outputs.report_dir,
+        outputs.github_summary,
+        &result,
+        console.terminal,
+    ) {
         Ok(written) => written,
         Err(error) => {
             console.problem(&format!("failed to write the run's reports: {error}"));
             record_stage_failure(outputs.manifest, RunStage::Reporting, console).await;
+            // The verdict exists but nobody can read it, so the summary
+            // says exactly that rather than nothing: this is the one
+            // no-verdict summary written for a run that did reach one,
+            // and it still states no verdict, because the value it would
+            // have stated is the value that could not be written.
+            write_no_verdict_summary(
+                outputs.github_summary,
+                console,
+                Some(prepared.run_id.as_str()),
+                "reporting",
+                &error.to_string(),
+                0,
+            )
+            .await;
             return crate::exit::disposition_for_report_error(&error);
         }
     };
@@ -795,6 +965,9 @@ async fn compare_and_report(
         written.result_json.display(),
         written.report_html.display()
     ));
+    if let Some(summary) = &written.github_summary {
+        console.say(&format!("wrote {}.", summary.display()));
+    }
     record_stage(outputs.manifest, RunStage::Reporting, |_| {}, console).await;
 
     crate::exit::disposition_for_policy(result.policy.disposition)
@@ -846,10 +1019,22 @@ async fn finish<C: ClusterManager>(
 /// "put them there", not "fail because I did not `mkdir` first". The
 /// default needs no creation — `ArtifactStore::create_run` already made
 /// it.
+///
+/// `--github-summary`'s parent directory is created here too, for the
+/// same reason and at the same moment, so that
+/// [`report::write_reports`] can require it to exist exactly as it
+/// requires the report directory to.
 async fn resolve_report_dir(
     request: &RunRequest<'_>,
     prepared: &PreparedLab,
 ) -> io::Result<PathBuf> {
+    if let Some(parent) = request
+        .github_summary
+        .and_then(Path::parent)
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
     match request.report_dir {
         Some(directory) => {
             tokio::fs::create_dir_all(directory).await?;
@@ -859,29 +1044,46 @@ async fn resolve_report_dir(
     }
 }
 
-/// Writes the failure-path `diagnostics.json`, reporting where it landed
-/// (or why it could not be written — which must never itself replace the
-/// failure being reported).
+/// Writes the failure-path `diagnostics.json` and the matching
+/// no-verdict job summary, reporting where each landed (or why it could
+/// not be written — which must never itself replace the failure being
+/// reported).
+///
+/// The two are written together because they are the same statement to
+/// two readers: `diagnostics.json` is what a machine (or a human with the
+/// artifact downloaded) reads, and the summary is what the same person
+/// sees in the pull request without downloading anything. Neither carries
+/// a verdict.
 async fn write_failure(
-    directory: &Path,
+    outputs: &Outputs<'_>,
     prepared: &PreparedLab,
     stage: &'static str,
     failure: &str,
     diagnostics: Vec<Diagnostic>,
     console: &mut Console<'_>,
 ) {
+    let collected = diagnostics.len();
     let artifact = report::FailureArtifact {
         run_id: prepared.run_id.as_str().to_owned(),
         stage,
         failure: failure.to_owned(),
         diagnostics,
     };
-    match report::write_failure_artifact(directory, &artifact).await {
+    match report::write_failure_artifact(&outputs.report_dir, &artifact).await {
         Ok(path) => console.say(&format!("wrote {}.", path.display())),
         Err(error) => console.problem(&format!(
             "could not write this run's diagnostics artifact: {error}"
         )),
     }
+    write_no_verdict_summary(
+        outputs.github_summary,
+        console,
+        Some(prepared.run_id.as_str()),
+        stage,
+        failure,
+        collected,
+    )
+    .await;
 }
 
 /// Run-level diagnostics from installing both stacks.

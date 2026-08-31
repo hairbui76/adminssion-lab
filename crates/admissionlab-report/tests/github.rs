@@ -18,7 +18,7 @@ mod support;
 use admissionlab_policy::{PolicyDisposition, Severity};
 use admissionlab_report::{
     LabResult, MAX_CELL_CHARS, MAX_LISTED_FINDINGS, SUMMARY_BYTE_BUDGET, escape_markdown,
-    render_github_summary,
+    render_github_summary, write_github_summary,
 };
 use support::canonical_result;
 
@@ -404,4 +404,36 @@ fn cell_count(row: &str) -> usize {
     }
     // A row is `| a | b |`: one more delimiter than it has cells.
     cells.saturating_sub(1)
+}
+
+#[test]
+fn writing_produces_exactly_the_rendered_summary() {
+    let result = canonical_result();
+    let dir = std::env::temp_dir().join(format!(
+        "admissionlab-report-github-test-{}-write",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create the temp dir");
+    let path = dir.join("github-summary.md");
+
+    write_github_summary(&path, &result).expect("writing the summary succeeds");
+
+    let written = std::fs::read_to_string(&path).expect("the summary was written");
+    assert_eq!(written, render_github_summary(&result));
+    // The file the Action appends to `$GITHUB_STEP_SUMMARY` must be the
+    // only thing left behind: `write_atomic`'s temporary is renamed, not
+    // abandoned (`tests/html.rs` makes the same check for the same
+    // reason).
+    let entries: Vec<String> = std::fs::read_dir(&dir)
+        .expect("read the temp dir")
+        .map(|entry| {
+            entry
+                .expect("a directory entry")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    assert_eq!(entries, vec!["github-summary.md".to_owned()]);
+    let _ = std::fs::remove_dir_all(&dir);
 }

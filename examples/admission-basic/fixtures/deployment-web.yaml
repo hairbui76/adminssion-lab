@@ -1,0 +1,50 @@
+# An ordinary Deployment, replayed as a server-side dry-run CREATE
+# through both sides' API servers.
+#
+# This is the fixture with something to observe. A Deployment arrives
+# with roughly half its spec unset, and what comes back carries the API
+# server's own defaulting: `strategy` (RollingUpdate with its 25%/25%
+# surge and unavailable), `revisionHistoryLimit`, `progressDeadlineSeconds`,
+# `terminationGracePeriodSeconds`, `dnsPolicy`, `restartPolicy`,
+# `schedulerName`, and each container's `imagePullPolicy` and
+# `terminationMessagePath`. On two clusters running the same Kubernetes
+# version, every one of those defaults matches, and the fixture lands in
+# the `identical` bucket. On two clusters running *different* versions,
+# any of them changing is exactly the kind of finding this tool exists to
+# surface — which is what the one-line edit described in
+# `../admissionlab.yaml` turns on.
+#
+# `replicas: 1` and a `pause` image because nothing is ever scheduled: a
+# dry-run CREATE is answered by the API server and never reaches a
+# controller, so no pod is created, no image is pulled, and the object is
+# discarded when the request returns.
+#
+# No `metadata.namespace`, so this is replayed into `default`, which
+# exists on every cluster from the moment it is up. See
+# `../admissionlab.yaml` for why this example deliberately depends on
+# nothing else existing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: basic-web
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: basic-web
+  template:
+    metadata:
+      labels:
+        app: basic-web
+    spec:
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.10
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi

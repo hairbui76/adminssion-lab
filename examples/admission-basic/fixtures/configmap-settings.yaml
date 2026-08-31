@@ -1,0 +1,23 @@
+# The control fixture: an object with nothing to default and nothing to
+# mutate.
+#
+# A ConfigMap passes through admission untouched on any cluster, so what
+# comes back from both sides must be identical after the run's normalizer
+# has removed the fields that are volatile by construction (uid,
+# resourceVersion, creationTimestamp, managedFields). If this fixture
+# ever lands anywhere but the `identical` bucket, the finding is about
+# Admission Lab or the environment rather than about the two stacks —
+# which is precisely what a control is for.
+#
+# It also keeps this example honest about cost: a two-fixture lab where
+# one fixture is trivially invariant is a smoke test, and this file is
+# the half of it that can only pass.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: basic-settings
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+data:
+  greeting: hello
+  replicas: "1"

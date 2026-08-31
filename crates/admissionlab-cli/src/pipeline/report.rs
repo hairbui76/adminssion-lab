@@ -39,6 +39,17 @@
 //! machine-readable `diagnostics.json` naming the stage that failed, the
 //! failure itself, and every diagnostic collected up to that point,
 //! written *before* cleanup runs (Task 4.14 step 3).
+//!
+//! # The job summary is written on both paths
+//!
+//! `--github-summary` (Task 5.4) names a file the GitHub Action appends
+//! to `$GITHUB_STEP_SUMMARY`. A run that reached a verdict writes
+//! `admissionlab_report::render_github_summary` of the same redacted
+//! result the other two artifacts render; a run that did not writes
+//! [`render_no_verdict_summary`], which says so and names the stage that
+//! failed. There is no third possibility, and neither file ever states a
+//! verdict the run did not reach — the failure summary has no verdict
+//! word in it at all.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -47,8 +58,8 @@ use admissionlab_core::{Diagnostic, InstalledLab, PreparedLab, RunId, SideInstal
 use admissionlab_policy::PolicyResult;
 use admissionlab_report::{
     ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureComparison, LabResult,
-    RedactionRules, ReportError, RunSummary, SCHEMA_VERSION, TerminalOptions, redact_result,
-    render_terminal, write_html_report, write_json_report,
+    RedactionRules, ReportError, RunSummary, SCHEMA_VERSION, TerminalOptions, escape_markdown,
+    redact_result, render_terminal, write_github_summary, write_html_report, write_json_report,
 };
 use serde::Serialize;
 
@@ -75,6 +86,8 @@ pub struct WrittenReports {
     pub result_json: PathBuf,
     /// Where `report.html` was written.
     pub report_html: PathBuf,
+    /// Where the GitHub job summary was written, when one was asked for.
+    pub github_summary: Option<PathBuf>,
 }
 
 /// Composes one run's report-ready result.
@@ -175,19 +188,29 @@ fn environment_report(kubernetes: &str, install: &SideInstall) -> EnvironmentRep
     }
 }
 
-/// Redacts `result` once and renders all three views of it.
+/// Redacts `result` once and renders every view of it.
 ///
-/// `directory` must already exist. Returns the rendered terminal report
-/// for the caller to print, and where the two files landed.
+/// `directory` must already exist, and so must `github_summary`'s parent
+/// directory when one is given. Returns the rendered terminal report for
+/// the caller to print, and where each file landed.
+///
+/// `github_summary` is `--github-summary`'s path: the same redacted
+/// value, rendered as the capped Markdown a GitHub Actions job summary
+/// wants. It is written here rather than by the caller for the reason
+/// this module exists — redaction happens once, and every rendering hangs
+/// off that single redacted value, so a renderer added later cannot be
+/// the one that forgets.
 ///
 /// # Errors
 ///
-/// Returns [`ReportError`] if either artifact could not be serialized or
+/// Returns [`ReportError`] if any artifact could not be serialized or
 /// written. The JSON report is written first: it is the machine-readable
-/// one a CI job consumes, so if only one of the two can be produced it
-/// should be that one.
+/// one a CI job consumes, so if only one can be produced it should be
+/// that one. The summary is written last because it is the one view whose
+/// content is wholly derived from the others.
 pub fn write_reports(
     directory: &Path,
+    github_summary: Option<&Path>,
     result: &LabResult,
     terminal: TerminalOptions,
 ) -> Result<WrittenReports, ReportError> {
@@ -199,11 +222,19 @@ pub fn write_reports(
     write_json_report(&result_json, &published)?;
     let report_html = directory.join(REPORT_HTML);
     write_html_report(&report_html, &published)?;
+    let github_summary = match github_summary {
+        Some(path) => {
+            write_github_summary(path, &published)?;
+            Some(path.to_path_buf())
+        }
+        None => None,
+    };
 
     Ok(WrittenReports {
         terminal: render_terminal(&published, &terminal),
         result_json,
         report_html,
+        github_summary,
     })
 }
 
@@ -224,6 +255,133 @@ pub struct FailureArtifact {
     /// diagnostics, and the diagnostics on whatever fixtures were
     /// captured before the failing one.
     pub diagnostics: Vec<Diagnostic>,
+}
+
+/// How many characters of the failure text the no-verdict summary
+/// carries.
+///
+/// The same reasoning as `admissionlab_report::MAX_CELL_CHARS`, at a
+/// different scale: this is one prose block rather than a table cell, and
+/// the whole point of it is to save a reader the trip to the job log, so
+/// 160 characters would cut most install failures off mid-sentence. It is
+/// still a cap, because the text is vendor-derived (a `helm` failure
+/// carries whatever the chart's hooks printed) and a job summary that a
+/// single unbounded error can blow past `SUMMARY_BYTE_BUDGET` is not
+/// bounded at all.
+const MAX_FAILURE_CHARS: usize = 2_000;
+
+/// The job summary for a run that produced no verdict.
+///
+/// This is deliberately *not* a result: it states that the run failed,
+/// names the stage it failed at, and quotes the failure. It renders no
+/// verdict word, no bucket counts, and no findings, because a run that
+/// never compared both sides has none of those — inventing any of them is
+/// the fabrication Global Constraint 15 forbids, and this file is read in
+/// a pull request by someone deciding whether the change is safe.
+///
+/// `run_id` is absent for a failure that happened before the run
+/// workspace existed (a bad configuration, a host missing a
+/// prerequisite), which is exactly when there is no run to name.
+///
+/// Every interpolated value goes through
+/// `admissionlab_report::escape_markdown`, for the reason that renderer
+/// documents at length: a step summary renders raw HTML, and the failure
+/// text is vendor-derived.
+#[must_use]
+pub fn render_no_verdict_summary(
+    run_id: Option<&str>,
+    stage: &str,
+    failure: &str,
+    diagnostics: usize,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    // Infallible for `String`; discarded exactly as `admissionlab-report`'s
+    // own renderers discard it.
+    let _ = writeln!(out, "## Admission Lab: NO RESULT\n");
+    let _ = writeln!(
+        out,
+        "This run failed at the `{stage}` stage before it could compare baseline and candidate, \
+         so it has **no pass/fail verdict**. `admissionlab test` exited non-zero and the step log \
+         above has its full output.\n",
+        stage = escape_markdown(stage),
+    );
+
+    let _ = writeln!(out, "| | |");
+    let _ = writeln!(out, "| --- | --- |");
+    let _ = writeln!(
+        out,
+        "| Run | {run} |",
+        run = run_id.map_or_else(
+            || "not started — the failure came before a run workspace existed".to_owned(),
+            escape_markdown,
+        ),
+    );
+    let _ = writeln!(out, "| Failed stage | {} |", escape_markdown(stage));
+    let _ = writeln!(out, "| Diagnostics collected | {diagnostics} |\n");
+
+    let _ = writeln!(out, "### What failed\n");
+    let _ = writeln!(out, "> {}\n", escape_markdown(&truncate(failure)));
+
+    let _ = writeln!(out, "### Evidence\n");
+    let _ = writeln!(
+        out,
+        "- `{DIAGNOSTICS_JSON}` — the failed stage, this failure, and every diagnostic collected \
+         before it. Uploaded with this run when the failure happened after the run workspace \
+         existed."
+    );
+    let _ = writeln!(
+        out,
+        "- No `{RESULT_JSON}` and no `{REPORT_HTML}`: both carry a policy verdict, and this run \
+         never earned one."
+    );
+    out
+}
+
+/// `text` capped at [`MAX_FAILURE_CHARS`] characters, with a trailing `…`
+/// when it was cut.
+///
+/// Iterates [`char`]s rather than slicing bytes, so a multi-byte
+/// character is never split — the same rule, for the same reason, as
+/// `admissionlab_report::github`'s own truncation.
+fn truncate(text: &str) -> String {
+    let mut out: String = text.chars().take(MAX_FAILURE_CHARS).collect();
+    if text.chars().nth(MAX_FAILURE_CHARS).is_some() {
+        out.push('…');
+    }
+    out
+}
+
+/// Writes [`render_no_verdict_summary`] to `path`, creating its parent
+/// directory if it does not exist.
+///
+/// Unlike [`write_reports`], this one does create directories: it runs on
+/// paths where the run may have failed *because* the report directory
+/// could not be prepared, and a summary that cannot be written is the one
+/// case where the reader is left with nothing at all.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`]. Callers report it rather than
+/// propagating it: this function only ever runs on a path that is already
+/// failing, and a summary that could not be written must never replace
+/// the failure it was describing.
+pub async fn write_no_verdict_summary(
+    path: &Path,
+    run_id: Option<&str>,
+    stage: &str,
+    failure: &str,
+    diagnostics: usize,
+) -> io::Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let text = render_no_verdict_summary(run_id, stage, failure, diagnostics);
+    tokio::fs::write(path, text.as_bytes()).await
 }
 
 /// Writes `artifact` as `diagnostics.json` in `directory`, which must

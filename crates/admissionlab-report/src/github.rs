@@ -100,10 +100,13 @@ use std::collections::BTreeMap;
 // `fmt::Write` impl for `String` is why every call site discards the
 // `Result` with `let _ =`.
 use std::fmt::Write as _;
+use std::path::Path;
 
 use admissionlab_diff::{DivergenceConfidence, DivergenceEvidence};
 use admissionlab_policy::{ClassifiedChange, PolicyDisposition, Severity};
 
+use crate::error::ReportError;
+use crate::json::write_atomic;
 use crate::model::{FixtureComparison, LabResult, RunSummary};
 
 /// How many findings each of the two tables lists before it stops and
@@ -136,6 +139,26 @@ pub const MAX_CELL_CHARS: usize = 160;
 /// documented ceiling for tests to assert against, not a runtime check --
 /// the caps are what enforce it.
 pub const SUMMARY_BYTE_BUDGET: usize = 128 * 1024;
+
+/// Writes [`render_github_summary`]'s output to `path`, atomically.
+///
+/// The file is what an Admission Lab caller appends to
+/// `$GITHUB_STEP_SUMMARY`; this function still does not know that
+/// variable exists (see this module's documentation) — it writes a file
+/// wherever it was told to, and the caller decides where that is and what
+/// reads it. Written through the same temp-file-and-rename path as the
+/// JSON and HTML reports, so a reader never sees a half-written summary.
+///
+/// `path`'s parent directory must already exist, exactly as
+/// [`write_html_report`](crate::write_html_report) requires.
+///
+/// # Errors
+///
+/// Returns [`ReportError::Io`] if the file could not be written.
+/// Rendering itself cannot fail.
+pub fn write_github_summary(path: &Path, result: &LabResult) -> Result<(), ReportError> {
+    write_atomic(path, render_github_summary(result).as_bytes())
+}
 
 /// Renders `result` as a GitHub Actions job summary.
 ///

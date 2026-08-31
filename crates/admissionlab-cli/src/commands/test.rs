@@ -81,6 +81,21 @@ pub struct TestArgs {
     /// points.
     #[arg(long, value_name = "DIR")]
     pub report_dir: Option<PathBuf>,
+
+    /// Write a GitHub Actions job summary to this file (Markdown).
+    ///
+    /// Intended for the composite action in
+    /// `.github/actions/admissionlab`, which appends the file to
+    /// `$GITHUB_STEP_SUMMARY`: this command deliberately does not read
+    /// that variable itself, so the same flag is useful outside GitHub
+    /// and so nothing here has to guess what CI system it is running
+    /// under. Parent directories are created.
+    ///
+    /// The file is written whatever happens — the run's verdict when it
+    /// reached one, and otherwise a summary naming the stage that failed.
+    /// It never states a verdict the run did not reach.
+    #[arg(long, value_name = "FILE")]
+    pub github_summary: Option<PathBuf>,
 }
 
 /// The directory this run's on-disk workspace is created under.
@@ -184,6 +199,7 @@ pub fn run(args: &TestArgs) -> ExitCode {
         config: &args.config,
         keep_clusters: args.keep_clusters,
         report_dir: args.report_dir.as_deref(),
+        github_summary: args.github_summary.as_deref(),
         run_root,
     };
 

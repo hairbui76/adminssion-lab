@@ -87,7 +87,7 @@ pub mod terminal;
 pub use error::ReportError;
 pub use github::{
     MAX_CELL_CHARS, MAX_LISTED_FINDINGS, SUMMARY_BYTE_BUDGET, escape_markdown,
-    render_github_summary,
+    render_github_summary, write_github_summary,
 };
 pub use html::{escape_html, render_html, write_html_report};
 pub use json::{render_json, write_json_report};

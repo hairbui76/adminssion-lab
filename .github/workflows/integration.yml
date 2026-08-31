@@ -14,6 +14,11 @@ on:
       - "fixtures/**"
       - "examples/**"
       - "testdata/**"
+      # Task 5.4: the composite action and this workflow itself, so a
+      # change to either is tested by the `action` job below rather than
+      # discovered by the first downstream repository to use it.
+      - ".github/actions/**"
+      - ".github/workflows/integration.yml"
 
 permissions:
   contents: read
@@ -235,6 +240,123 @@ jobs:
           leaked="$(printf '%s\n' "$clusters" | grep '^adlab-' || true)"
           if [ -n "$leaked" ]; then
             echo "::error::leaked adlab-* cluster(s) after ${{ matrix.package }}::${{ matrix.test }}:"
+            echo "$leaked"
+            echo "$leaked" | xargs -r -n1 kind delete cluster --name
+            exit 1
+          fi
+          echo "no adlab-* cluster left behind"
+
+  action:
+    # ROADMAP Task 5.4 step 5: the composite action, run against this
+    # repository's own example, on every pull request that touches either.
+    #
+    # It is a separate job rather than another `matrix.include` entry
+    # above for the same reason those entries are separate jobs from each
+    # other -- it creates its own clusters and must not serialize behind
+    # anyone else's -- and because it shares none of that job's steps: it
+    # installs no `kind` of its own (proving that the action does), runs
+    # no `cargo test` (the action builds and runs the binary), and its
+    # assertions are about files on disk rather than about a test binary's
+    # exit code.
+    #
+    # What this job can prove, and what it cannot: it exercises the
+    # action's real steps -- the from-source build, the pinned checksummed
+    # `kind` install, the tool verification, the run, the summary, the
+    # artifact upload, and the exit-code propagation -- against a real
+    # two-cluster lab. What it cannot exercise is the pinned-release
+    # download branch, which needs a published release to download; that
+    # branch is covered by `docs/github-action.md`'s instructions and by
+    # the first workflow that uses it, and it is deliberately built so
+    # that failing to verify a checksum stops the run rather than falling
+    # back to anything.
+    name: GitHub composite action (examples/admission-basic)
+    runs-on: ubuntu-latest
+    # Two bare `kind` clusters, four dry-run admission requests, and one
+    # `cargo build --release` -- the build dominates, and dominates most
+    # on the first run after a dependency change, when the cache below
+    # cannot help. 30 minutes matches the matrix job above rather than
+    # inventing a second ceiling.
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        # Same pin as every other workflow in this repository.
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          # Its own cache entry, for the same reason the matrix jobs each
+          # take one: this job builds a *release* profile, which shares
+          # almost nothing with the debug artifacts the test jobs cache.
+          key: composite-action
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      # The action under test. Deliberately referenced by path with no
+      # `version` input, which selects its from-source branch: the whole
+      # point of this job is to test the action *in this pull request*,
+      # and a pinned release download would test a previously published
+      # binary instead.
+      #
+      # No `continue-on-error` here either: `examples/admission-basic` is
+      # designed to pass, so the action failing means either the example
+      # regressed or the wrapper did, and both should fail this job.
+      - name: Run the Admission Lab action
+        id: lab
+        uses: ./.github/actions/admissionlab
+        with:
+          config: examples/admission-basic/admissionlab.yaml
+          report-dir: ./admissionlab-artifacts
+          artifact-name: admissionlab-basic-artifacts
+
+      - name: Assert the action produced every artifact
+        # `always()` so a failing lab still gets its artifacts checked --
+        # ROADMAP step 4 is precisely the claim that they exist even then,
+        # and a step that only ran on success could never observe it.
+        if: always()
+        # Existence only. This job does not read `result.json`'s contents
+        # any more than the action does: what a run *meant* is the
+        # binary's business, and a workflow that asserted on a verdict
+        # here would be the second engine the exit gate forbids. The
+        # verdict is already checked -- by the action's final step, which
+        # made this job's own conclusion Admission Lab's exit code.
+        run: |
+          set -euo pipefail
+          dir="./admissionlab-artifacts"
+          missing=""
+          for artifact in result.json report.html github-summary.md; do
+            [ -s "${dir}/${artifact}" ] || missing="${missing} ${artifact}"
+          done
+          # The run manifest is collected out of the run workspace by the
+          # action, named by run id, so it is matched rather than named.
+          manifests="$(find "${dir}/run-manifests" -name '*.json' -type f 2>/dev/null | wc -l)"
+          [ "${manifests}" -ge 1 ] || missing="${missing} run-manifests/<run-id>.json"
+          if [ -n "${missing}" ]; then
+            echo "::error::the action did not produce:${missing}"
+            find "${dir}" -type f | sort
+            exit 1
+          fi
+          find "${dir}" -type f | sort
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        # The same guard, and the same reasoning, as the matrix job's:
+        # PRODUCT.md §33's "no leaked cluster after normal failure paths"
+        # applies to a run driven through the action exactly as it applies
+        # to one driven through `cargo test`.
+        run: |
+          set -euo pipefail
+          clusters=""
+          status=0
+          clusters="$(kind get clusters 2>&1)" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::kind get clusters failed (exit $status): $clusters"
+            exit 1
+          fi
+          leaked="$(printf '%s\n' "$clusters" | grep '^adlab-' || true)"
+          if [ -n "$leaked" ]; then
+            echo "::error::leaked adlab-* cluster(s) after the composite action job:"
             echo "$leaked"
             echo "$leaked" | xargs -r -n1 kind delete cluster --name
             exit 1

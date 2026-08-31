@@ -1,0 +1,462 @@
+# Admission Lab as a GitHub Actions composite action.
+#
+# This file is a *wrapper*. It installs pinned tools, runs one
+# `admissionlab test` invocation, publishes what that invocation wrote,
+# and exits with the code that invocation returned. It contains no
+# regression logic whatsoever: nothing here reads `result.json`, counts a
+# finding, compares a version, or decides what a run meant. Every one of
+# those decisions is made by the binary and is recorded in the artifacts
+# this action uploads. (ROADMAP Task 5.4 step 1, and the Phase 5 exit
+# gate's "action logic is a wrapper, not a second engine".)
+#
+# The five responsibilities, in the order the steps below implement them:
+#
+#   1. install the pinned Admission Lab binary (or build the checked-out
+#      source, for this repository's own CI);
+#   2. install/verify pinned `kind`, `kubectl`, and `helm`;
+#   3. run `admissionlab test`;
+#   4. write the job summary from the file the CLI produced;
+#   5. upload the JSON/HTML/run-manifest artifacts.
+#
+# # Exit-code preservation
+#
+# ROADMAP step 3 ("preserve Admission Lab exit code") and step 4 ("upload
+# artifacts even when exit code is 1-5") pull in opposite directions: a
+# composite step that exits non-zero ends the action there, and the
+# summary and upload steps would never run — which is precisely the case
+# (a failing policy, exit 1) a reviewer most needs the artifacts for.
+#
+# So the run step never fails. It captures the CLI's status into a step
+# output, exits 0, and a final step re-exits with that saved code. The
+# steps in between carry `if: always()` as well, so they also survive a
+# failure *before* the run step (a checksum mismatch, a missing tool).
+#
+# `continue-on-error` would express the same intent in one line and is
+# deliberately not used: it is a *workflow* step key, not part of the
+# composite-action step schema, and a composite action that depends on it
+# fails to parse rather than degrading. The capture-and-re-exit pattern
+# needs nothing but `if:` and `$GITHUB_OUTPUT`.
+#
+# The consequence to keep in mind when editing: the action's outcome is
+# decided by the *last* step, so that step must never be made
+# conditional, and no step after it may fail for a reason of its own.
+#
+# # What is downloaded, and how it is verified
+#
+# Nothing is downloaded without a SHA-256 the caller can read in this
+# file or supplied as an input. `version` (the Admission Lab release)
+# requires `sha256` and is refused without it. `kind` is pinned to the
+# version this project validated its cluster lifecycle against, with the
+# checksum published in that `kind` release; changing `kind-version`
+# requires supplying the matching `kind-sha256`. `kubectl` and `helm` are
+# used as the runner image ships them unless a version *and* a checksum
+# are given for either.
+#
+# The action needs no secrets, no registry credentials, and no token: it
+# reads a public release and a public tool download, and writes only into
+# the workspace and the job summary.
+#
+# # Platform
+#
+# Linux x86_64 only, and it says so rather than guessing. `kind` needs a
+# working Docker daemon, which GitHub's macOS runners do not have, and
+# the checksums pinned below are for `linux-amd64` artifacts. On any
+# other platform this action fails immediately with that explanation
+# instead of downloading something it cannot verify.
+name: Admission Lab
+description: >-
+  Run an Admission Lab regression test and publish its report, job
+  summary, and run manifest. Exits with Admission Lab's own exit code.
+
+inputs:
+  config:
+    description: >-
+      Path to the lab configuration (`admissionlab.yaml`), relative to the
+      workspace or absolute.
+    required: true
+
+  version:
+    description: >-
+      Admission Lab release version to install, for example `0.1.0`. The
+      release tarball is downloaded from the action's own repository and
+      verified against `sha256`, which is required together with this.
+      Leave empty to build the checked-out working tree with
+      `cargo build --release` instead — the from-source mode this
+      repository's own CI uses, which is not what a downstream repository
+      should do.
+    required: false
+    default: ""
+
+  sha256:
+    description: >-
+      SHA-256 of the release tarball named by `version`. Required
+      whenever `version` is set; the action refuses to download an
+      unverified binary. Take it from the release's `SHA256SUMS`, which
+      is itself signed with a keyless Sigstore certificate (see the
+      release notes for the `cosign verify-blob` command).
+    required: false
+    default: ""
+
+  repository:
+    description: >-
+      `owner/repo` to download the release from. Defaults to the
+      repository this action itself came from, which is the right answer
+      whenever the action is referenced as
+      `owner/admission-lab/.github/actions/admissionlab@vX`.
+    required: false
+    default: ""
+
+  report-dir:
+    description: >-
+      Directory the run's artifacts are written into. Created if absent.
+    required: false
+    default: ./admissionlab-artifacts
+
+  artifact-name:
+    description: Name of the uploaded workflow artifact.
+    required: false
+    default: admissionlab-artifacts
+
+  upload-artifacts:
+    description: >-
+      Set to `false` to skip the upload step, for a workflow that
+      collects the report directory itself.
+    required: false
+    default: "true"
+
+  artifact-retention-days:
+    description: How long the uploaded artifact is kept.
+    required: false
+    default: "14"
+
+  kind-version:
+    description: >-
+      `kind` version to install, as a `v`-prefixed tag. The default is
+      the version this project validated its cluster lifecycle against
+      and the one `compatibility/kubernetes.yaml`'s node-image digests
+      were captured from. Changing it requires `kind-sha256`.
+    required: false
+    default: v0.33.0
+
+  kind-sha256:
+    description: >-
+      SHA-256 of `kind-linux-amd64` for `kind-version`, as published in
+      that release's own `kind-linux-amd64.sha256sum`. The default is the
+      checksum for the default version and nothing else.
+    required: false
+    default: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+
+  kubectl-version:
+    description: >-
+      `kubectl` version to install, as a `v`-prefixed tag (for example
+      `v1.36.4`). Empty (the default) uses the `kubectl` the runner image
+      already ships, whose version this action prints. Requires
+      `kubectl-sha256` when set.
+    required: false
+    default: ""
+
+  kubectl-sha256:
+    description: >-
+      SHA-256 of `kubectl` for `kubectl-version` (linux/amd64), as
+      published at `dl.k8s.io/release/<version>/bin/linux/amd64/kubectl.sha256`.
+    required: false
+    default: ""
+
+  helm-version:
+    description: >-
+      `helm` version to install, as a `v`-prefixed tag (for example
+      `v3.19.0`). Empty (the default) uses the `helm` the runner image
+      already ships, whose version this action prints. Requires
+      `helm-sha256` when set.
+    required: false
+    default: ""
+
+  helm-sha256:
+    description: >-
+      SHA-256 of `helm-<version>-linux-amd64.tar.gz`, as published at
+      `get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum`.
+    required: false
+    default: ""
+
+outputs:
+  exit-code:
+    description: >-
+      `admissionlab test`'s own exit code, as a string. `0` pass (or
+      warn), `1` policy failure, `2` invalid input, `3` infrastructure,
+      `4` install, `5` capture; see `docs/github-action.md`. Available
+      even though the action fails on a non-zero code, so a workflow that
+      wants to branch on *which* failure can, without parsing anything.
+    value: ${{ steps.run.outputs.exit-code }}
+  report-dir:
+    description: Absolute path of the directory the artifacts were written to.
+    value: ${{ steps.run.outputs.report-dir }}
+
+runs:
+  using: composite
+  steps:
+    - name: Check the platform
+      shell: bash
+      run: |
+        set -euo pipefail
+        os="$(uname -s)"
+        arch="$(uname -m)"
+        if [ "${os}" != "Linux" ] || [ "${arch}" != "x86_64" ]; then
+          echo "::error::the Admission Lab action supports Linux x86_64 runners only (this is ${os}/${arch}); see the action's own header for why"
+          exit 1
+        fi
+
+    # Responsibility 1. Exactly one of the two branches runs, and which
+    # one is decided by whether `version` was given -- there is no
+    # fallback from one to the other, because silently building from
+    # source when a pinned download failed would defeat the pin.
+    - name: Install the pinned Admission Lab release
+      if: inputs.version != ''
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        EXPECTED_SHA256: ${{ inputs.sha256 }}
+        REPOSITORY: ${{ inputs.repository }}
+      run: |
+        set -euo pipefail
+        if [ -z "${EXPECTED_SHA256}" ]; then
+          echo "::error::the 'version' input was given without 'sha256'; this action never downloads an unverified binary"
+          exit 1
+        fi
+        # `v1.2.3` and `1.2.3` are both accepted from the caller: the tag
+        # carries the prefix, the archive name does not.
+        tag="v${VERSION#v}"
+        bare="${VERSION#v}"
+        repo="${REPOSITORY:-${GITHUB_ACTION_REPOSITORY:-${GITHUB_REPOSITORY}}}"
+        archive="admissionlab-${bare}-x86_64-unknown-linux-gnu.tar.gz"
+        url="https://github.com/${repo}/releases/download/${tag}/${archive}"
+
+        staging="$(mktemp -d)"
+        echo "downloading ${url}"
+        curl --fail --silent --show-error --location --output "${staging}/${archive}" "${url}"
+        echo "${EXPECTED_SHA256}  ${staging}/${archive}" | sha256sum --check --strict -
+        tar --extract --gzip --file "${staging}/${archive}" --directory "${staging}"
+
+        binary="${staging}/admissionlab-${bare}-x86_64-unknown-linux-gnu/admissionlab"
+        install -D -m 0755 "${binary}" "${HOME}/.admissionlab/bin/admissionlab"
+        echo "${HOME}/.admissionlab/bin" >> "${GITHUB_PATH}"
+
+    - name: Build Admission Lab from the checked-out source
+      if: inputs.version == ''
+      shell: bash
+      working-directory: ${{ github.workspace }}
+      run: |
+        set -euo pipefail
+        if [ ! -f Cargo.toml ]; then
+          echo "::error::no 'version' input was given, so this action builds the checked-out working tree - but ${GITHUB_WORKSPACE} does not look like the Admission Lab source. Downstream workflows should pin 'version' and 'sha256'."
+          exit 1
+        fi
+        # `--locked` for the same reason `.github/workflows/release.yml`
+        # uses it: the binary under test must be built from the
+        # dependency versions this repository has reviewed.
+        cargo build --release --locked -p admissionlab-cli
+        echo "${GITHUB_WORKSPACE}/target/release" >> "${GITHUB_PATH}"
+
+    # Responsibility 2.
+    - name: Install and verify kind, kubectl, and helm
+      shell: bash
+      env:
+        KIND_VERSION: ${{ inputs.kind-version }}
+        KIND_SHA256: ${{ inputs.kind-sha256 }}
+        KUBECTL_VERSION: ${{ inputs.kubectl-version }}
+        KUBECTL_SHA256: ${{ inputs.kubectl-sha256 }}
+        HELM_VERSION: ${{ inputs.helm-version }}
+        HELM_SHA256: ${{ inputs.helm-sha256 }}
+      run: |
+        set -euo pipefail
+        bin="${HOME}/.admissionlab/tools"
+        mkdir -p "${bin}"
+        echo "${bin}" >> "${GITHUB_PATH}"
+        export PATH="${bin}:${PATH}"
+
+        # kind: always installed at the pinned version rather than
+        # trusting whichever one the runner image ships (observed as
+        # v0.32.0 while this was written) -- the same argument, and the
+        # same source and checksum, as
+        # `.github/workflows/integration.yml`'s own kind step.
+        if kind version 2>/dev/null | grep -qF "kind ${KIND_VERSION}"; then
+          echo "kind ${KIND_VERSION} is already on this runner"
+        else
+          url="https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "downloading ${url}"
+          curl --fail --silent --show-error --location --output "${bin}/kind" "${url}"
+          echo "${KIND_SHA256}  ${bin}/kind" | sha256sum --check --strict -
+          chmod +x "${bin}/kind"
+        fi
+
+        # kubectl and helm: pinned only if the caller asked for a pin.
+        # A version without a checksum is refused rather than downloaded,
+        # exactly as the release binary is.
+        if [ -n "${KUBECTL_VERSION}" ]; then
+          if [ -z "${KUBECTL_SHA256}" ]; then
+            echo "::error::the 'kubectl-version' input was given without 'kubectl-sha256'"
+            exit 1
+          fi
+          url="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+          echo "downloading ${url}"
+          curl --fail --silent --show-error --location --output "${bin}/kubectl" "${url}"
+          echo "${KUBECTL_SHA256}  ${bin}/kubectl" | sha256sum --check --strict -
+          chmod +x "${bin}/kubectl"
+        fi
+
+        if [ -n "${HELM_VERSION}" ]; then
+          if [ -z "${HELM_SHA256}" ]; then
+            echo "::error::the 'helm-version' input was given without 'helm-sha256'"
+            exit 1
+          fi
+          archive="helm-${HELM_VERSION}-linux-amd64.tar.gz"
+          url="https://get.helm.sh/${archive}"
+          staging="$(mktemp -d)"
+          echo "downloading ${url}"
+          curl --fail --silent --show-error --location --output "${staging}/${archive}" "${url}"
+          echo "${HELM_SHA256}  ${staging}/${archive}" | sha256sum --check --strict -
+          tar --extract --gzip --file "${staging}/${archive}" --directory "${staging}"
+          install -m 0755 "${staging}/linux-amd64/helm" "${bin}/helm"
+        fi
+
+        # What the run will actually use, printed once so a failing run's
+        # log answers "which versions was this?" without a rerun. A tool
+        # that is missing entirely is named here rather than discovered
+        # halfway through a lab -- `admissionlab test` checks the same
+        # things again for itself and is the one that decides, but this
+        # message can say what to do about it.
+        missing=""
+        for tool in kind kubectl helm docker; do
+          command -v "${tool}" >/dev/null 2>&1 || missing="${missing} ${tool}"
+        done
+        if [ -n "${missing}" ]; then
+          echo "::error::this runner has no:${missing}. GitHub's ubuntu-* images ship kubectl, helm, and Docker; on a self-hosted runner install them, or pin 'kubectl-version'/'helm-version' with their checksums."
+          exit 1
+        fi
+        kind version
+        kubectl version --client=true
+        helm version --short
+        docker version --format 'docker {{.Server.Version}}'
+
+    # Responsibility 3. The only step that runs Admission Lab, and the
+    # only one whose result means anything -- which is why it is also the
+    # only one that captures a status instead of failing on it. See this
+    # file's "Exit-code preservation" section.
+    - name: Run admissionlab test
+      id: run
+      shell: bash
+      env:
+        CONFIG: ${{ inputs.config }}
+        REPORT_DIR: ${{ inputs.report-dir }}
+      run: |
+        set -euo pipefail
+        mkdir -p "${REPORT_DIR}"
+        report_dir="$(cd "${REPORT_DIR}" && pwd)"
+        echo "report-dir=${report_dir}" >> "${GITHUB_OUTPUT}"
+
+        # Where `admissionlab test` puts each run's workspace, and so
+        # where its run manifest lands. It is not configurable yet (the
+        # CLI has no `--run-root`), so the value is reproduced here from
+        # `commands::test::default_run_root` in order to collect
+        # `run.json` afterwards -- the one piece of coupling in this file,
+        # and it reads a path rather than a result.
+        run_root="${TMPDIR:-/tmp}"
+        run_root="${run_root%/}/admissionlab-runs"
+        echo "run-root=${run_root}" >> "${GITHUB_OUTPUT}"
+
+        status=0
+        admissionlab test "${CONFIG}" \
+          --report-dir "${report_dir}" \
+          --github-summary "${report_dir}/github-summary.md" || status=$?
+        echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
+        echo "admissionlab test exited ${status}"
+
+    # Responsibility 5, first half: the run manifest lives in the run
+    # workspace rather than the report directory, so it is copied in
+    # beside the reports. Named by run id, because a workflow may invoke
+    # this action more than once.
+    - name: Collect the run manifest
+      if: always()
+      shell: bash
+      env:
+        REPORT_DIR: ${{ steps.run.outputs.report-dir }}
+        RUN_ROOT: ${{ steps.run.outputs.run-root }}
+      run: |
+        set -euo pipefail
+        if [ -z "${REPORT_DIR:-}" ] || [ ! -d "${RUN_ROOT:-/nonexistent}" ]; then
+          echo "no run workspace to collect a manifest from"
+          exit 0
+        fi
+        mkdir -p "${REPORT_DIR}/run-manifests"
+        found=0
+        while IFS= read -r manifest; do
+          run_id="$(basename "$(dirname "${manifest}")")"
+          cp "${manifest}" "${REPORT_DIR}/run-manifests/${run_id}.json"
+          found=$((found + 1))
+        done < <(find "${RUN_ROOT}" -mindepth 2 -maxdepth 2 -name run.json -type f)
+        echo "collected ${found} run manifest(s)"
+
+    # Responsibility 4. An unconditional `cat` of one file: the CLI
+    # renders the summary (`admissionlab_report::render_github_summary`,
+    # capped at 128 KiB against GitHub's 1 MiB limit) and this step only
+    # moves bytes. The fallback states that the file is missing and
+    # nothing else -- it never says how the run went, because this step
+    # has no way to know.
+    - name: Write the job summary
+      if: always()
+      shell: bash
+      env:
+        REPORT_DIR: ${{ steps.run.outputs.report-dir }}
+      run: |
+        set -euo pipefail
+        summary="${REPORT_DIR:-}/github-summary.md"
+        if [ -n "${REPORT_DIR:-}" ] && [ -f "${summary}" ]; then
+          cat "${summary}" >> "${GITHUB_STEP_SUMMARY}"
+        else
+          {
+            echo "## Admission Lab: no summary was produced"
+            echo
+            echo "\`admissionlab test\` did not write a job summary, which means it did not"
+            echo "start or could not write to its report directory. The step log above has"
+            echo "the reason. This action does not know what the run would have found."
+          } >> "${GITHUB_STEP_SUMMARY}"
+        fi
+
+    # Responsibility 5, second half. `if: always()` is ROADMAP step 4:
+    # `result.json` on a policy failure, `diagnostics.json` on an
+    # infrastructure one, and the HTML report and run manifest with
+    # either.
+    - name: Upload the report artifacts
+      if: always() && inputs.upload-artifacts == 'true'
+      uses: actions/upload-artifact@v4.6.2
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ inputs.report-dir }}
+        # `warn`, not `error`: this step must never be the thing that
+        # fails the action, or a run that died before writing anything
+        # would report an upload problem instead of its own failure.
+        if-no-files-found: warn
+        retention-days: ${{ inputs.artifact-retention-days }}
+
+    # The action's outcome. Must stay last, and must stay unconditional:
+    # see this file's "Exit-code preservation" section.
+    - name: Exit with Admission Lab's exit code
+      shell: bash
+      env:
+        STATUS: ${{ steps.run.outputs.exit-code }}
+      run: |
+        set -euo pipefail
+        case "${STATUS:-}" in
+          "")
+            echo "::error::admissionlab test did not run; an earlier step failed"
+            exit 1
+            ;;
+          0) exit 0 ;;
+          *[!0-9]*)
+            echo "::error::unusable exit code ${STATUS} recorded for admissionlab test"
+            exit 1
+            ;;
+          *)
+            echo "::error::admissionlab test exited ${STATUS}; the job summary and the uploaded artifacts have the detail"
+            exit "${STATUS}"
+            ;;
+        esac

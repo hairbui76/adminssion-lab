@@ -487,6 +487,7 @@ fn a_run_with_no_differences_passes_and_writes_all_three_reports() {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -568,6 +569,7 @@ fn reports_default_to_the_runs_own_directory_when_no_report_dir_is_given() {
         config: &config,
         keep_clusters: false,
         report_dir: None,
+        github_summary: None,
         run_root: run_root.clone(),
     };
 
@@ -604,6 +606,7 @@ fn a_critical_regression_fails_the_run_and_still_writes_the_reports() {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -647,6 +650,7 @@ fn a_warning_only_run_still_exits_passed_with_the_warning_in_the_report() {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -675,6 +679,7 @@ fn fail_on_escalates_a_warning_into_a_failing_run() {
         config: &config,
         keep_clusters: false,
         report_dir: None,
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -700,6 +705,7 @@ fn an_unreadable_configuration_exits_invalid_input_without_creating_a_cluster() 
         config: &config,
         keep_clusters: false,
         report_dir: None,
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -730,6 +736,7 @@ fn an_unknown_semantic_kind_in_fail_on_exits_invalid_input_before_any_cluster() 
         config: &config,
         keep_clusters: false,
         report_dir: None,
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -762,6 +769,7 @@ fn a_host_missing_its_prerequisites_exits_invalid_input_before_any_cluster() {
         config: &config,
         keep_clusters: false,
         report_dir: None,
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -793,6 +801,7 @@ fn an_install_failure_exits_four_writes_diagnostics_and_still_cleans_up() {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -802,6 +811,177 @@ fn an_install_failure_exits_four_writes_diagnostics_and_still_cleans_up() {
     assert!(reports.join("diagnostics.json").is_file());
     assert!(!reports.join("result.json").exists());
     assert_eq!(backend.clusters.deleted_sides().len(), 2);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------
+// The GitHub job summary (Task 5.4)
+//
+// The action that consumes this file `cat`s it unconditionally, so what
+// matters here is that the file exists on every path with something to
+// say -- a verdict when the run reached one, an honest "no result" naming
+// the failed stage when it did not -- and that the second kind never
+// contains the first kind's verdict.
+// ---------------------------------------------------------------------
+
+/// Reads a written job summary, failing with the directory listing when
+/// it is not there (the whole point of the flag is that it always is).
+fn read_summary(path: &Path) -> String {
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("the job summary must exist at {}: {error}", path.display()))
+}
+
+#[test]
+fn a_passing_run_writes_its_verdict_to_the_github_summary() {
+    let dir = unique_dir("summary-pass");
+    let config = write_lab(&dir, "");
+    let reports = dir.join("artifacts");
+    // Deliberately two levels below anything that exists: the flag
+    // creates its parent directories rather than requiring a `mkdir`
+    // step in the workflow.
+    let summary = dir.join("summaries").join("github-summary.md");
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: Some(&summary),
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+    assert_eq!(output.disposition, RunDisposition::Passed, "{output:?}");
+
+    let text = read_summary(&summary);
+    assert!(
+        text.starts_with("## Admission Lab: PASS"),
+        "summary:\n{text}"
+    );
+    assert!(text.contains("| identical | 1 |"), "summary:\n{text}");
+    // The summary is the same value the other artifacts render, so it
+    // must never disagree with them about the verdict.
+    let result = read_result(&reports.join("result.json"));
+    assert_eq!(result["policy"]["disposition"], serde_json::json!("pass"));
+    // And the run says where it put it, so a workflow author can find it
+    // in the log.
+    assert!(
+        output.stdout.contains(&summary.display().to_string()),
+        "stdout:\n{}",
+        output.stdout
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_policy_failure_still_writes_the_github_summary() {
+    let dir = unique_dir("summary-fail");
+    let config = write_lab(&dir, "");
+    let reports = dir.join("artifacts");
+    let summary = reports.join("github-summary.md");
+    let backend = FakeBackend::new(CaptureBehavior::CandidateDenies);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: Some(&summary),
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+    assert_eq!(
+        output.disposition,
+        RunDisposition::PolicyFailed,
+        "{output:?}"
+    );
+
+    let text = read_summary(&summary);
+    assert!(
+        text.starts_with("## Admission Lab: FAIL"),
+        "summary:\n{text}"
+    );
+    assert!(
+        text.contains("### Critical findings (1)"),
+        "summary:\n{text}"
+    );
+    // Exit 1 is the case the action exists to make visible: the summary,
+    // the JSON, and the HTML are all there for the upload step.
+    assert!(reports.join("result.json").is_file());
+    assert!(reports.join("report.html").is_file());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_run_that_never_reaches_a_verdict_writes_a_summary_naming_the_stage() {
+    let dir = unique_dir("summary-install-fail");
+    let config = write_lab(&dir, "");
+    let reports = dir.join("artifacts");
+    let summary = reports.join("github-summary.md");
+    let backend = FakeBackend::new(CaptureBehavior::Identical).failing_install();
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: Some(&summary),
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+    assert_eq!(
+        output.disposition,
+        RunDisposition::InstallationFailed,
+        "{output:?}"
+    );
+
+    let text = read_summary(&summary);
+    assert!(
+        text.starts_with("## Admission Lab: NO RESULT"),
+        "summary:\n{text}"
+    );
+    assert!(
+        text.contains("`install`"),
+        "the summary must name the stage that failed:\n{text}"
+    );
+    // Global Constraint 15, in the one place a reader is most likely to
+    // skim: a run that compared nothing states no verdict at all.
+    for verdict in ["PASS", "WARN", "FAIL"] {
+        assert!(
+            !text.contains(verdict),
+            "a no-verdict summary must not contain {verdict}:\n{text}"
+        );
+    }
+    // It matches what the machine-readable failure artifact says.
+    assert!(reports.join("diagnostics.json").is_file());
+    assert!(!reports.join("result.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn an_invalid_configuration_writes_a_summary_before_any_cluster_exists() {
+    let dir = unique_dir("summary-invalid-input");
+    let summary = dir.join("artifacts").join("github-summary.md");
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let request = RunRequest {
+        config: &dir.join("missing.yaml"),
+        keep_clusters: false,
+        report_dir: None,
+        github_summary: Some(&summary),
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+    assert_eq!(
+        output.disposition,
+        RunDisposition::InvalidInput,
+        "{output:?}"
+    );
+
+    let text = read_summary(&summary);
+    assert!(text.contains("`configuration`"), "summary:\n{text}");
+    assert!(text.contains("no pass/fail verdict"), "summary:\n{text}");
+    // No run workspace exists to name, and the summary says so rather
+    // than inventing a run id.
+    assert!(text.contains("not started"), "summary:\n{text}");
+    assert!(backend.clusters.created_sides().is_empty());
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -822,6 +1002,7 @@ fn a_failed_install_leaves_a_run_manifest_naming_the_stage() {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&dir.join("artifacts")),
+        github_summary: None,
         run_root: run_root.clone(),
     };
 
@@ -885,6 +1066,7 @@ fn a_completed_run_marks_its_manifest_completed_even_when_the_policy_failed() {
         config: &config,
         keep_clusters: false,
         report_dir: None,
+        github_summary: None,
         run_root: run_root.clone(),
     };
 
@@ -934,6 +1116,7 @@ fn a_capture_failure_exits_five_writes_what_it_knows_and_still_cleans_up() {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -981,6 +1164,7 @@ fn keep_clusters_skips_cleanup_and_prints_the_exact_delete_commands() {
         config: &config,
         keep_clusters: true,
         report_dir: None,
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -1024,6 +1208,7 @@ fn a_cleanup_failure_after_a_passing_run_reports_infrastructure_but_keeps_the_re
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 
@@ -1058,6 +1243,7 @@ fn a_cleanup_failure_never_masks_a_policy_failure() {
         config: &config,
         keep_clusters: false,
         report_dir: None,
+        github_summary: None,
         run_root: dir.join("runs"),
     };
 

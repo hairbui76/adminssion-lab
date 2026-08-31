@@ -1,0 +1,115 @@
+# The smallest lab that is still a real one: two bare Kubernetes
+# clusters, no components installed on either side, two fixtures replayed
+# through both API servers.
+#
+#     admissionlab test examples/admission-basic/admissionlab.yaml
+#
+# It creates both clusters, replays both fixtures through each, prints a
+# PASS summary, writes `result.json` and `report.html`, deletes both
+# clusters, and exits `0`.
+#
+# This is the example `.github/actions/admissionlab` is tested against in
+# `.github/workflows/integration.yml`, and the one to copy when adding
+# Admission Lab to a repository for the first time.
+# `examples/kyverno-istio-upgrade` is the other end of the range: two
+# vendor stacks, ten fixtures, and a real regression that fails the run.
+#
+# # What this example can and cannot demonstrate
+#
+# It is worth being exact about this, because "minimal" and "meaningless"
+# are close neighbours.
+#
+# What it *does* exercise is everything except the differences: two real
+# `kind` clusters, two real API servers, four real server-side dry-run
+# admission requests, the normalizer, the semantic diff, the policy
+# engine, all three reports, the job summary, and cleanup. Every part of
+# the machinery a real lab depends on runs here — which is exactly what
+# an action smoke test needs to cover, and it costs about a minute
+# instead of the ten `examples/kyverno-istio-upgrade` costs.
+#
+# What it *cannot* demonstrate is a regression. With no admission webhook
+# installed, the only mutating admission in play is the API server's own
+# built-in plugin chain, and both sides are running the same version of
+# it, so the two sides agree by construction and the run passes. That is
+# a genuine result rather than a rigged one — "identical inputs, identical
+# stacks, identical admission behavior" is the control experiment every
+# comparison rests on, and a run of this example that did *not* pass
+# would be reporting real nondeterminism worth investigating — but it is
+# not a demonstration of finding anything.
+#
+# The one-line edit that turns it into one: change `candidate.kubernetes`
+# below to a different supported version (`compatibility/kubernetes.yaml`
+# lists them) and the lab starts answering "does upgrading Kubernetes
+# itself change what my objects look like after admission?". Adding a
+# webhook to one side, as the Kyverno/Istio example does, is the other
+# direction.
+#
+# # Why 1.36.4 on both sides
+#
+# Admission Lab's Tier 1 primary supported version
+# (`compatibility/kubernetes.yaml`), and the same version on both sides
+# so that the node image is pulled once and reused for the second
+# cluster. Version-skew labs are a deliberate choice a reader makes; a
+# smoke test should not pay for one by default.
+#
+# # Why there are no components
+#
+# `baseline.components` and `candidate.components` are optional, and an
+# environment with none is a bare cluster. Installing something on both
+# sides identically would add several minutes of image pulls and would
+# not change a single line of the report, because nothing about the
+# comparison depends on a component existing — the fixtures below are
+# replayed through whatever admission chain the cluster has.
+#
+# # Why the fixtures are a Deployment and a ConfigMap, and not a Pod
+#
+# Both are chosen for determinism across two independently created
+# clusters, which is the property this example exists to demonstrate.
+#
+# A bare Pod is the obvious first fixture and is the wrong one here, for
+# two reasons that only appear on a cluster with nothing installed:
+#
+#   1. The `default` ServiceAccount is created asynchronously by a
+#      controller shortly after the namespace exists, and the API
+#      server's ServiceAccount admission plugin rejects a Pod that
+#      references one that is not there yet. With no components to
+#      install, this lab reaches fixture replay seconds after the
+#      clusters come up, which is exactly the window that race lives in.
+#      `examples/kyverno-istio-upgrade` avoids it by applying a setup
+#      manifest first; this example avoids it by not needing a
+#      ServiceAccount at all.
+#
+#   2. That same plugin projects a `kube-api-access-<5 random
+#      characters>` volume into every Pod it admits. The suffix is
+#      random per admission, so the two sides disagree on a volume name
+#      on every run, and no normalization rule can strip it (see
+#      `admissionlab-normalize`'s own rules). It is suppressible with
+#      `automountServiceAccountToken: false`, but a first example should
+#      not need a workaround in it to pass.
+#
+# Neither applies to a Deployment: its pod template is stored as written
+# and is not run through the Pod admission plugins until the ReplicaSet
+# controller creates actual Pods, which a dry-run CREATE never does. The
+# Deployment still exercises real defaulting, and the ConfigMap is the
+# control — an object with nothing to default, which must come back from
+# both sides byte-identical after normalization.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+
+baseline:
+  kubernetes: "1.36.4"
+
+candidate:
+  kubernetes: "1.36.4"
+
+fixtures:
+  # Rooted at this file's own directory (fixture roots are not
+  # configurable — see `docs/fixtures.md`), so this matches exactly the
+  # two documents in `fixtures/` beside it.
+  include:
+    - "fixtures/*.yaml"
+
+# No `expectationsFile` and no `policy` section: both are optional, and
+# this lab has nothing to except and no severity to override. The
+# defaults are what a first run should see. `docs/config.md` documents
+# both, and `examples/kyverno-istio-upgrade` uses both in earnest.

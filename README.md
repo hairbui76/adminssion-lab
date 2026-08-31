@@ -426,6 +426,7 @@ programming need durable objects — which is one reason Gateway support is
 | --- | --- |
 | [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` v1alpha1 reference: every field, every default, path resolution, `policy`, overrides, and `expectations.yaml` |
 | [`docs/fixtures.md`](docs/fixtures.md) | Fixture format, discovery globs, identity and hashing, the setup-outside-the-glob pattern, and the dogfood webhook's annotation vocabulary |
+| [`docs/github-action.md`](docs/github-action.md) | The composite action: pinned/checksummed installation, every input, the artifacts it uploads on a failing run, exit-code behavior, and what the job summary says |
 | [`docs/recipes.md`](docs/recipes.md) | What a recipe is, the certified set, the capability model, override directories, and why recipes may never classify regressions |
 | [`docs/security.md`](docs/security.md) | Threat model, the trust boundary around third-party charts, exactly what is redacted and what is not, and the audit-policy Secret exclusion |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Real failure modes and their fixes, keyed to the exit codes above |
