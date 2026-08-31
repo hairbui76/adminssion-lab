@@ -1,0 +1,204 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunManifest",
+  "description": "Everything needed to say what produced one run, and (Task 5.3) to\nattempt reproducing it.\n\nSee this module's documentation for what this document may never\ncontain, for where each `*_sha256` digest's bytes come from, and for\nthe pinned timestamp encoding.\n\n# No `Default`\n\nDeliberately absent, and not an oversight: every field here is\n*evidence*, and a defaulted manifest would be a document full of\nempty strings asserting things nothing observed. There is no\nconstructor either — a caller fills the struct literally, so adding a\nfield is a compile error at every construction site rather than a\nsilently-defaulted blank.",
+  "type": "object",
+  "properties": {
+    "admissionlabVersion": {
+      "description": "The Admission Lab version that produced this run, as its binary\nreports it.",
+      "type": "string"
+    },
+    "baseline": {
+      "description": "The baseline environment as provisioned.",
+      "$ref": "#/$defs/EnvironmentProvenance"
+    },
+    "candidate": {
+      "description": "The candidate environment as provisioned.",
+      "$ref": "#/$defs/EnvironmentProvenance"
+    },
+    "completedAt": {
+      "description": "When the run finished, or `None` while it is still running or if\nit failed before finishing. Task 5.2 makes this the load-bearing\nsignal that a manifest describes an *incomplete* run, so it is\nnever filled speculatively.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "configSha256": {
+      "description": "SHA-256 (lowercase hex) of the lab configuration file's own bytes.\nSee this module's \"Canonical serialization\" section.",
+      "type": "string"
+    },
+    "expectationsSha256": {
+      "description": "SHA-256 (lowercase hex) of the expectations file's own bytes, or\n`None` when the configuration declared no `expectationsFile`.\n`None` here means \"there was no such file\", which is a different\nclaim from \"there was one and we could not read it\" — the latter\nfails the run before a manifest is ever completed.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fixtureHashes": {
+      "description": "One SHA-256 (lowercase hex) per replayed fixture, keyed by\nfixture identifier and therefore written in identifier order (see\n[`FixtureId`]'s own `Ord` note) rather than discovery order.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "host": {
+      "description": "The machine the run executed on.",
+      "$ref": "#/$defs/HostProvenance"
+    },
+    "normalizationSha256": {
+      "description": "SHA-256 (lowercase hex) of the canonical encoding of the\n*effective* normalization profile ([`EffectiveNormalization`]) —\nbuilt-in rules plus whatever the run's recipes and the user\ncontributed. See this module's \"Canonical serialization\" section.",
+      "type": "string"
+    },
+    "policySha256": {
+      "description": "SHA-256 (lowercase hex) of the canonical encoding of the effective\nregression policy. See this module's \"Canonical serialization\"\nsection, and [`policy_sha256`] for the exact encoding.",
+      "type": "string"
+    },
+    "runId": {
+      "description": "The run this manifest describes.",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "description": "Always [`SCHEMA_VERSION`] for documents this crate writes; kept as\na field rather than implied so a reader that only has the file can\ntell what it is holding.",
+      "type": "string"
+    },
+    "startedAt": {
+      "description": "When the run began.",
+      "type": "string"
+    },
+    "tools": {
+      "description": "The external tool versions this run actually used.",
+      "$ref": "#/$defs/ToolProvenance"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "admissionlabVersion",
+    "host",
+    "tools",
+    "baseline",
+    "candidate",
+    "configSha256",
+    "fixtureHashes",
+    "normalizationSha256",
+    "policySha256",
+    "startedAt"
+  ],
+  "$defs": {
+    "ComponentProvenance": {
+      "description": "One installed component's identity.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The component's name, as written in the lab configuration.",
+          "type": "string"
+        },
+        "sourceSha256": {
+          "description": "A content hash of the component's *source*, when one is\nobtainable, and `None` otherwise — never `\"\"`.\n\n`None` for every component today, and that is honest rather than\nunimplemented. A pinned Helm chart's content hash is not knowable\nwithout fetching and hashing the chart, which no stage of a run\ncurrently does; a raw-manifests component *does* have one —\n`admissionlab_installer::ManifestBundle::source_hash`, computed at\ninstall time — but that value does not cross the\n[`crate::StackInstaller`] boundary into\n[`crate::InstalledComponent`], and widening that trait is\n`admissionlab-installer`'s change to make, not this module's.\nThat is the seam to fill this field through when it is made.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The version actually installed. For a Helm component this is the\npinned chart version (`admissionlab-spec` guarantees a Helm\nversion is an exact pin, never a floating range); after the\ninstall stage it is `InstalledComponent::resolved_version`, which\nthe installer confirms against the cluster where it can.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "EnvironmentProvenance": {
+      "description": "One side's environment, as provisioned rather than as requested.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "This side's components, in install order. Empty before the install\nstage has run — Task 5.2's `stage` field is what distinguishes\n\"nothing installed yet\" from \"this side genuinely has no\ncomponents\".",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentProvenance"
+          }
+        },
+        "kubernetesVersion": {
+          "description": "The Kubernetes version this side ran, as configured and resolved\n(for example `\"1.36.4\"`).",
+          "type": "string"
+        },
+        "nodeImage": {
+          "description": "The node image reference **without** its digest (for example\n`\"kindest/node:v1.36.4\"`), as split out by\n[`split_node_image_reference`].",
+          "type": "string"
+        },
+        "nodeImageDigest": {
+          "description": "The node image's content digest (for example `\"sha256:099e04...\"`),\nor `None` when the backend did not digest-pin the reference. See\nthis module's \"Honest absence\" section.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kubernetesVersion",
+        "nodeImage",
+        "components"
+      ]
+    },
+    "HostProvenance": {
+      "description": "The machine a run executed on.\n\nExactly the two values Rust can state without probing anything: the\ntarget OS and architecture this binary was compiled for. Deliberately\nnot a hostname, a username, a kernel build string, or an IP address —\nnone of those help reproduce a run, and every one of them is a small\nprivacy leak in a document users attach to public bug reports.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "The target architecture, from [`std::env::consts::ARCH`] (for\nexample `\"x86_64\"`, `\"aarch64\"`).",
+          "type": "string"
+        },
+        "os": {
+          "description": "The target operating system, from [`std::env::consts::OS`] (for\nexample `\"linux\"`, `\"macos\"`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "arch"
+      ]
+    },
+    "ToolProvenance": {
+      "description": "The external tools this run used, by self-reported version.\n\nEvery field is `Option` — see this module's \"Honest absence\" section\nfor why, and [`ToolProvenance::from_doctor_report`] for where the\nvalues come from. The versions are recorded *verbatim* as each tool\nprinted them (`kind`'s `v0.33.0`, `helm`'s `v3.16.2`, `kubectl`'s\n`v1.36.4`), leading `v` and all: normalizing them here would make the\nmanifest disagree with what a user sees when they run the same probe\nby hand.",
+      "type": "object",
+      "properties": {
+        "docker": {
+          "description": "The Docker *server* (daemon) version — what `docker version\n--format {{json .Server.Version}}` reports, which is the version\nthat actually runs the ephemeral nodes, not the client binary's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "helm": {
+          "description": "`helm`'s version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`kind`'s version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kubectl": {
+          "description": "`kubectl`'s client version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

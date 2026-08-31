@@ -18,7 +18,32 @@ async-trait = { workspace = true }
 # so there is no path back from it to `admissionlab-core` for this edge
 # to complete into a cycle.
 admissionlab-spec = { workspace = true }
+# `run_manifest.rs` renders `RunManifest`'s two `SystemTime` fields as
+# RFC 3339 (Task 5.1's pinned timestamp encoding). Formatting an instant
+# as a calendar date requires real civil-time arithmetic, which `std`
+# does not provide, so this needs a date library. `jiff` is the one this
+# workspace already resolves (`k8s-openapi` depends on it directly, and
+# `admissionlab-admission` parses audit timestamps with it), so this is a
+# promotion of an already-fetched transitive dependency to a direct one
+# rather than a new dependency — and it means a run manifest's
+# timestamps are produced by the same library that already parses the
+# Kubernetes timestamps this project reads. `default-features = false`
+# for the reason the workspace entry documents: jiff's default feature
+# set bundles an IANA time zone database this project has no use for,
+# since a manifest timestamp is always a UTC instant.
+jiff = { workspace = true }
+# `run_manifest.rs` generates `schemas/run-manifest-v1alpha1.json` from
+# the same derives that govern the manifest's own serialization, so the
+# published schema can never drift from what Admission Lab actually
+# writes — the identical arrangement `admissionlab-spec` already uses for
+# `schemas/admissionlab-v1alpha1.json`.
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# `run_manifest.rs` computes every `*_sha256` field in the run manifest.
+# Same crate and same 0.10 pin as `admissionlab-fixtures`'s own fixture
+# hashing, so a hash recorded in the manifest and a hash computed by
+# fixture discovery are the same function of the same bytes.
+sha2 = { workspace = true }
 # Used by `artifact.rs`'s `ArtifactStore::write_json_atomic` in
 # production code (not only by tests), so it belongs here rather than
 # under `[dev-dependencies]` — the same v2-resolver reasoning as the

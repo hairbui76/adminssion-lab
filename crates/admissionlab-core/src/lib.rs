@@ -7,6 +7,7 @@ pub mod error;
 pub mod ids;
 pub mod process;
 pub mod run;
+pub mod run_manifest;
 pub mod side;
 pub mod tool;
 
@@ -26,6 +27,11 @@ pub use run::{
     FixtureCaptureFailure, InstalledComponent, InstalledLab, LabRunner, PreparedLab, RunError,
     RunOptions, SideCapture, SideInstall, StackInstallError, StackInstallFailure, StackInstaller,
     preserved_cluster_report,
+};
+pub use run_manifest::{
+    ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, HostProvenance,
+    NormalizationRuleRecord, RunManifest, ToolProvenance, canonical_sha256, normalization_sha256,
+    policy_sha256, run_manifest_v1alpha1_json_schema, sha256_hex, split_node_image_reference,
 };
 pub use side::Side;
 pub use tool::{

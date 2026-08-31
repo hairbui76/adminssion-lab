@@ -1,0 +1,49 @@
+{
+  "schemaVersion": "admissionlab.io/run-manifest/v1alpha1",
+  "runId": "6f1a7c2e-9b34-4d5a-8f0e-11c2b3a4d5e6",
+  "admissionlabVersion": "0.1.0",
+  "host": {
+    "os": "linux",
+    "arch": "x86_64"
+  },
+  "tools": {
+    "kind": "v0.33.0",
+    "kubectl": "v1.36.4",
+    "helm": "v3.16.2",
+    "docker": "27.5.0"
+  },
+  "baseline": {
+    "kubernetesVersion": "1.36.4",
+    "nodeImage": "kindest/node:v1.36.4",
+    "nodeImageDigest": "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+    "components": [
+      {
+        "name": "kyverno",
+        "version": "3.2.6",
+        "sourceSha256": null
+      }
+    ]
+  },
+  "candidate": {
+    "kubernetesVersion": "1.36.4",
+    "nodeImage": "kindest/node:v1.36.4",
+    "nodeImageDigest": "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed",
+    "components": [
+      {
+        "name": "kyverno",
+        "version": "3.3.0",
+        "sourceSha256": null
+      }
+    ]
+  },
+  "configSha256": "cb63c6aaf098370331d2ba3b095dc5268f5e2c58ae8a1d082f1d0d471a2c3b6e",
+  "fixtureHashes": {
+    "deployments-web-0": "22855d347d358ce607d9d8178cc4149575ead5d55e2592e9f569a8c9e771c403",
+    "pods-privileged-0": "4098835dca7dd56c3535517c75262456249b40cc6fc5dc5f1ed6150be729c537"
+  },
+  "expectationsSha256": "f0e0e984efe714482c5844ffc508469b7ec3be19b8789c1eb15ea8bbee0fda45",
+  "normalizationSha256": "d9057464b01b27907e7c5852b98acbaa1c2147375cfd21f9d4df0d58f5477799",
+  "policySha256": "6dbf5316df62a6c02112531d344c4c69eb5e0fe4e3c60a1df892a789ceea0d39",
+  "startedAt": "2026-09-01T12:00:00.123456789Z",
+  "completedAt": "2026-09-01T12:17:30.123456789Z"
+}
