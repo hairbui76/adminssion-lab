@@ -26,6 +26,14 @@
 //!   reads immediately after a run. Its module documentation covers what
 //!   is never hidden and why color is a caller's decision rather than
 //!   something the renderer probes for.
+//! - [`json`] holds [`write_json_report`], the machine-readable artifact
+//!   other tools consume. Its module documentation covers the schema's
+//!   experimental status, the three things that make its output
+//!   byte-deterministic, and why it mirrors
+//!   `admissionlab_core::ArtifactStore`'s atomic write rather than
+//!   calling it.
+//! - [`error`] holds [`ReportError`], the one failure vocabulary shared
+//!   by every renderer that touches the filesystem.
 //!
 //! # Redact once, render many
 //!
@@ -58,10 +66,14 @@
 //! [`GatewayCaseComparison`]: model::GatewayCaseComparison
 //! [`FixtureComparison::bucket`]: model::FixtureComparison::bucket
 
+pub mod error;
+pub mod json;
 pub mod model;
 pub mod redact;
 pub mod terminal;
 
+pub use error::ReportError;
+pub use json::{render_json, write_json_report};
 pub use model::{
     AdmissionComparison, ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureBucket,
     FixtureComparison, GatewayCaseComparison, LabResult, RunSummary, SCHEMA_VERSION,

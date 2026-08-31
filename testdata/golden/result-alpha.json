@@ -1,0 +1,397 @@
+{
+  "schemaVersion": "admissionlab.io/result/v1alpha1",
+  "runId": "alpha-demo-run",
+  "summary": {
+    "fixturesTotal": 4,
+    "identical": 1,
+    "expected": 1,
+    "warnings": 0,
+    "critical": 1,
+    "inconclusive": 1
+  },
+  "environments": {
+    "baseline": {
+      "kubernetes": "v1.34.1",
+      "components": [
+        {
+          "name": "sidecar-injector",
+          "version": "1.26.3"
+        }
+      ]
+    },
+    "candidate": {
+      "kubernetes": "v1.34.1",
+      "components": [
+        {
+          "name": "sidecar-injector",
+          "version": "1.27.0"
+        }
+      ]
+    }
+  },
+  "fixtures": [
+    {
+      "fixtureId": "deployment-sidecar",
+      "admission": {
+        "baseline": {
+          "fixture_id": "deployment-sidecar",
+          "side": "baseline",
+          "decision": "accepted",
+          "warnings": [],
+          "total_latency": 42,
+          "final_object": {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+              "name": "sidecar-demo"
+            }
+          },
+          "trace": {
+            "evidence": "observed",
+            "invocations": [
+              {
+                "configuration": "sidecar-injector",
+                "webhook": "inject.example.com",
+                "round": 0,
+                "index": 0,
+                "mutated": true,
+                "patch": null,
+                "latency": 7,
+                "outcome": "allowed"
+              }
+            ]
+          },
+          "diagnostics": []
+        },
+        "candidate": {
+          "fixture_id": "deployment-sidecar",
+          "side": "candidate",
+          "decision": "accepted",
+          "warnings": [
+            "sidecar injector is running a preview build"
+          ],
+          "total_latency": 58,
+          "final_object": {
+            "apiVersion": "apps/v1",
+            "kind": "Deployment",
+            "metadata": {
+              "name": "sidecar-demo"
+            }
+          },
+          "trace": {
+            "evidence": "observed",
+            "invocations": [
+              {
+                "configuration": "sidecar-injector",
+                "webhook": "inject.example.com",
+                "round": 0,
+                "index": 0,
+                "mutated": true,
+                "patch": [
+                  {
+                    "op": "add",
+                    "path": "/spec/template/spec/containers/1",
+                    "value": {
+                      "image": "registry.example.com/proxy:1.27.0",
+                      "name": "istio-proxy"
+                    }
+                  }
+                ],
+                "latency": 19,
+                "outcome": "allowed"
+              }
+            ]
+          },
+          "diagnostics": []
+        },
+        "firstDivergence": {
+          "confidence": "observed",
+          "baseline_position": [
+            0,
+            0
+          ],
+          "candidate_position": [
+            0,
+            0
+          ],
+          "baseline_webhook": "inject.example.com",
+          "candidate_webhook": "inject.example.com",
+          "explanation": "inject.example.com returned a patch adding container istio-proxy on the candidate side and no such operation on the baseline side"
+        }
+      },
+      "gateway": null,
+      "changes": [
+        {
+          "change": {
+            "kind": "container_added",
+            "fixture_id": "deployment-sidecar",
+            "object_path": "/spec/template/spec/containers/1",
+            "subject": "istio-proxy",
+            "baseline": null,
+            "candidate": {
+              "image": "registry.example.com/proxy:1.27.0",
+              "name": "istio-proxy"
+            },
+            "origin": {
+              "confidence": "observed",
+              "baseline_position": null,
+              "candidate_position": [
+                0,
+                0
+              ],
+              "baseline_webhook": null,
+              "candidate_webhook": "inject.example.com",
+              "explanation": "the container appears in inject.example.com's candidate patch"
+            }
+          },
+          "severity": "critical",
+          "expected": false
+        }
+      ]
+    },
+    {
+      "fixtureId": "deployment-image-bump",
+      "admission": {
+        "baseline": {
+          "fixture_id": "deployment-image-bump",
+          "side": "baseline",
+          "decision": "accepted",
+          "warnings": [],
+          "total_latency": 31,
+          "final_object": {
+            "kind": "Deployment",
+            "metadata": {
+              "name": "web"
+            }
+          },
+          "trace": {
+            "evidence": "partial",
+            "invocations": []
+          },
+          "diagnostics": [
+            {
+              "code": "audit.incomplete",
+              "message": "audit evidence did not cover the whole request window",
+              "context": {
+                "stage": "ResponseComplete"
+              }
+            }
+          ]
+        },
+        "candidate": {
+          "fixture_id": "deployment-image-bump",
+          "side": "candidate",
+          "decision": "accepted",
+          "warnings": [],
+          "total_latency": 33,
+          "final_object": {
+            "kind": "Deployment",
+            "metadata": {
+              "name": "web"
+            }
+          },
+          "trace": {
+            "evidence": "partial",
+            "invocations": []
+          },
+          "diagnostics": []
+        },
+        "firstDivergence": {
+          "confidence": "unknown",
+          "baseline_position": null,
+          "candidate_position": null,
+          "baseline_webhook": null,
+          "candidate_webhook": null,
+          "explanation": "both traces are identical, so the captured evidence does not locate where the final objects diverged"
+        }
+      },
+      "gateway": null,
+      "changes": [
+        {
+          "change": {
+            "kind": "image_changed",
+            "fixture_id": "deployment-image-bump",
+            "object_path": "/spec/template/spec/containers/0/image",
+            "subject": "web",
+            "baseline": "registry.example.com/web:1.4.0",
+            "candidate": "registry.example.com/web:1.5.0",
+            "origin": null
+          },
+          "severity": "critical",
+          "expected": true
+        }
+      ]
+    },
+    {
+      "fixtureId": "crd-custom-resource",
+      "admission": {
+        "baseline": {
+          "fixture_id": "crd-custom-resource",
+          "side": "baseline",
+          "decision": "accepted",
+          "warnings": [],
+          "total_latency": 12,
+          "final_object": null,
+          "trace": {
+            "evidence": "unavailable",
+            "invocations": []
+          },
+          "diagnostics": []
+        },
+        "candidate": {
+          "fixture_id": "crd-custom-resource",
+          "side": "candidate",
+          "decision": {
+            "unsupported_dry_run": {
+              "message": "the candidate cluster's CRD does not accept server-side dry-run"
+            }
+          },
+          "warnings": [],
+          "total_latency": 9,
+          "final_object": null,
+          "trace": {
+            "evidence": "unavailable",
+            "invocations": []
+          },
+          "diagnostics": []
+        },
+        "firstDivergence": null
+      },
+      "gateway": null,
+      "changes": []
+    },
+    {
+      "fixtureId": "pod-baseline",
+      "admission": {
+        "baseline": {
+          "fixture_id": "pod-baseline",
+          "side": "baseline",
+          "decision": {
+            "rejected": {
+              "code": 403,
+              "message": "pods must not run as root"
+            }
+          },
+          "warnings": [],
+          "total_latency": 15,
+          "final_object": null,
+          "trace": {
+            "evidence": "observed",
+            "invocations": [
+              {
+                "configuration": "baseline-policy",
+                "webhook": "validate.example.com",
+                "round": 0,
+                "index": 0,
+                "mutated": false,
+                "patch": null,
+                "latency": null,
+                "outcome": "denied"
+              }
+            ]
+          },
+          "diagnostics": []
+        },
+        "candidate": {
+          "fixture_id": "pod-baseline",
+          "side": "candidate",
+          "decision": {
+            "rejected": {
+              "code": 403,
+              "message": "pods must not run as root"
+            }
+          },
+          "warnings": [],
+          "total_latency": 15,
+          "final_object": null,
+          "trace": {
+            "evidence": "observed",
+            "invocations": [
+              {
+                "configuration": "baseline-policy",
+                "webhook": "validate.example.com",
+                "round": 0,
+                "index": 0,
+                "mutated": false,
+                "patch": null,
+                "latency": null,
+                "outcome": "denied"
+              }
+            ]
+          },
+          "diagnostics": []
+        },
+        "firstDivergence": null
+      },
+      "gateway": null,
+      "changes": []
+    }
+  ],
+  "policy": {
+    "disposition": "fail",
+    "changes": [
+      {
+        "change": {
+          "kind": "container_added",
+          "fixture_id": "deployment-sidecar",
+          "object_path": "/spec/template/spec/containers/1",
+          "subject": "istio-proxy",
+          "baseline": null,
+          "candidate": {
+            "image": "registry.example.com/proxy:1.27.0",
+            "name": "istio-proxy"
+          },
+          "origin": {
+            "confidence": "observed",
+            "baseline_position": null,
+            "candidate_position": [
+              0,
+              0
+            ],
+            "baseline_webhook": null,
+            "candidate_webhook": "inject.example.com",
+            "explanation": "the container appears in inject.example.com's candidate patch"
+          }
+        },
+        "severity": "critical",
+        "expected": false
+      },
+      {
+        "change": {
+          "kind": "image_changed",
+          "fixture_id": "deployment-image-bump",
+          "object_path": "/spec/template/spec/containers/0/image",
+          "subject": "web",
+          "baseline": "registry.example.com/web:1.4.0",
+          "candidate": "registry.example.com/web:1.5.0",
+          "origin": null
+        },
+        "severity": "critical",
+        "expected": true
+      }
+    ],
+    "stale_expectations": [
+      {
+        "id": "sidecar-injection-rollout",
+        "reason": "no matching change was observed in this run"
+      }
+    ]
+  },
+  "diagnostics": [
+    {
+      "code": "metrics.unavailable",
+      "message": "per-webhook latency metrics were not scraped on the candidate side",
+      "context": {
+        "side": "candidate"
+      }
+    },
+    {
+      "code": "kubeconfig.loaded",
+      "message": "loaded isolated kubeconfigs for both sides",
+      "context": {
+        "baseline": "[REDACTED]",
+        "candidate": "[REDACTED]"
+      }
+    }
+  ]
+}

@@ -55,3 +55,16 @@ serde = { workspace = true, features = ["derive"] }
 # (through the foreign types it carries), and `redact.rs` walks them
 # directly rather than serde-generically.
 serde_json = { workspace = true }
+# `error.rs` follows the same `thiserror` derive convention every other
+# error vocabulary in this workspace uses, so a report failure formats
+# and chains like a spec, policy, or artifact failure.
+thiserror = { workspace = true }
+# `json.rs`'s atomic write names its temporary file with a random v4
+# UUID suffix, mirroring `admissionlab_core::ArtifactStore`'s own
+# temporary-file convention exactly (see that module's "Atomicity"
+# section, and `json.rs`'s "Why not `ArtifactStore`" for why the
+# mechanism is mirrored rather than reused). Same crate, same feature
+# set, already resolved in `Cargo.lock` -- so two writers racing on one
+# destination path cannot collide on the temporary name, and a report
+# artifact's write behaves exactly like every other run artifact's.
+uuid = { workspace = true, features = ["v4"] }

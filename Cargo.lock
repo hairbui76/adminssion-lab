@@ -185,6 +185,8 @@ dependencies = [
  "json-patch",
  "serde",
  "serde_json",
+ "thiserror",
+ "uuid",
 ]
 
 [[package]]
