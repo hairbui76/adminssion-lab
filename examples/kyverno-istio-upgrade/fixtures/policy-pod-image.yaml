@@ -1,0 +1,49 @@
+# A bare Pod as an image-pin target: the same expected change the
+# Deployment and the Job carry, one level up.
+#
+# `alpha-image-pin` has two rules — `pin-pod-image` for `Pod` and
+# `pin-controller-image` for `Deployment`/`Job` — because this lab
+# switches Kyverno's rule autogeneration off and names every kind it
+# matches (see `stacks/baseline/policies.yaml`). This fixture is what
+# makes the first of those two rules live, and it is the corpus's only
+# `image_changed` reported at `/spec/containers/0/image` rather than at
+# `/spec/template/spec/containers/0/image`. A corpus that exercised only
+# the controller path would not notice `admissionlab_diff::workload`'s
+# pod-spec location search picking the wrong one of its three candidate
+# pointers for a bare Pod.
+#
+# # Why it is not the same pod as the regression fixture
+#
+# It used to be. Kyverno answers a request with one patch per invocation
+# however many of its rules matched, in Go map order, so a pod matched by
+# both `alpha-image-pin` and `alpha-audit-init` produced a two-operation
+# patch whose operations were sequenced differently on each run — and
+# `admissionlab_normalize::trace` treats JSON Patch operation order as
+# semantics (Task 4.2), so two runs that observed identical behavior
+# recorded non-identical evidence and the exit gate rejected the pair.
+# `fixtures/regression-pod-init-container.yaml` now lives alone in
+# `admissionlab-alpha-init` and this fixture takes over the image-pin
+# half, so neither is ever matched by more than one rule. See
+# `fixtures/core/alpha-corpus/00-setup.yaml`'s "one-rule-per-namespace
+# invariant".
+#
+# # Expected result
+#
+# Both sides pin the image, to two different values, so this fixture
+# produces one `image_changed` (escalated to `critical` by this lab's
+# `policy.failOn`, then marked expected) and one
+# `webhook_invocation_changed` (the same fact seen in the trace).
+# Together they put it in the `expected` bucket.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpha-image-target
+  namespace: admissionlab-alpha
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  serviceAccountName: alpha-runner
+  automountServiceAccountToken: false
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.8

@@ -1,4 +1,4 @@
-# Setup, not fixtures: the three namespaces and two ServiceAccounts every
+# Setup, not fixtures: the four namespaces and the ServiceAccounts every
 # fixture in the Public Alpha regression corpus is replayed into.
 #
 # The replayable half of this corpus lives in
@@ -31,12 +31,16 @@
 # Alpha now has a first-class way to apply it (a component), where that
 # corpus still requires its caller to apply it by hand.
 #
-# # Three namespaces, because the corpus needs three admission regimes
+# # Four namespaces: one per admission regime, and never more than one
+# mutating rule per namespace
 #
-#   - `admissionlab-alpha`        — the Kyverno policy target. Both
-#     sides' `alpha-policies` component scopes every rule to this
-#     namespace by name, so membership *is* the opt-in; no label selector
-#     is involved and none can be misread.
+#   - `admissionlab-alpha`        — the image-pin target. Both sides'
+#     `alpha-image-pin` policy scopes its rules to this namespace by
+#     name, so membership *is* the opt-in; no label selector is involved
+#     and none can be misread.
+#   - `admissionlab-alpha-init`   — the init-container-injection target,
+#     and the namespace the demo's critical regression is observed in.
+#     Only the baseline stack installs a policy matching it.
 #   - `admissionlab-alpha-plain`  — deliberately outside every policy and
 #     outside the mesh. Fixtures here are the corpus's control group: any
 #     difference observed on one of them is a difference this lab did not
@@ -48,6 +52,31 @@
 #     it: the Kyverno one injects, the Istio one is observed declining
 #     (see that fixture's own header for the measured reason it opts out
 #     of Istio's injection).
+#
+# ## The one-rule-per-namespace invariant, and why it is not tidiness
+#
+# `admissionlab-alpha` and `admissionlab-alpha-init` were one namespace
+# until a gate run caught what that costs. Kyverno answers a request with
+# **one** patch per invocation, whatever number of its rules matched, and
+# it assembles that patch's operations in Go map order. A pod matched by
+# two rules therefore gets a two-operation patch whose operations are
+# ordered differently on each run:
+#
+#     run 1 baseline: [replace /spec/containers/0/image,
+#                      add     /spec/initContainers]
+#     run 2 baseline: [add     /spec/initContainers,
+#                      replace /spec/containers/0/image]
+#
+# `admissionlab_normalize::trace` deliberately treats JSON Patch
+# operation order as semantics rather than presentation (Task 4.2), so
+# those two runs disagree about the observed evidence for the *same*
+# behavior — which is exactly what the exit gate's cross-run comparison
+# is there to reject. Splitting the namespaces means every fixture in
+# this corpus is matched by at most one Kyverno rule, every invocation
+# patch is a single operation, and a single operation has no order to
+# permute. `fixtures/policy-pod-image.yaml` and
+# `fixtures/regression-pod-init-container.yaml` carry the same note from
+# the fixture side.
 #
 # # `automountServiceAccountToken: false` is load-bearing on every fixture
 #
@@ -93,6 +122,14 @@ metadata:
 apiVersion: v1
 kind: Namespace
 metadata:
+  name: admissionlab-alpha-init
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: alpha-corpus
+---
+apiVersion: v1
+kind: Namespace
+metadata:
   name: admissionlab-alpha-plain
   labels:
     app.kubernetes.io/part-of: admission-lab
@@ -118,6 +155,15 @@ kind: ServiceAccount
 metadata:
   name: alpha-runner
   namespace: admissionlab-alpha
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alpha-runner
+  namespace: admissionlab-alpha-init
   labels:
     app.kubernetes.io/part-of: admission-lab
 automountServiceAccountToken: false

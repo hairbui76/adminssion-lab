@@ -1,10 +1,9 @@
 # The behavior changes this upgrade was *meant* to produce.
 #
-# Read alongside `admissionlab.yaml`. Two of the three differences a run
-# of this lab reports are accounted for here; the third — the
-# `init_container_removed` on
-# `fixtures/policy-pod-init-container.yaml` — deliberately is not, and
-# is what makes the run fail.
+# Read alongside `admissionlab.yaml`. Every difference a run of this lab
+# reports on the three `fixtures/policy-*.yaml` fixtures is accounted for
+# here; the two on `fixtures/regression-pod-init-container.yaml`
+# deliberately are not, and are what make the run fail.
 #
 # # What an entry does, and what it does not do
 #
@@ -17,6 +16,16 @@
 # and simply stops being a reason to exit non-zero. That is the whole
 # difference between "we know about this" and "hide this".
 #
+# # Why both entries are scoped by the same filename glob
+#
+# `fixtures-policy-*` matches the three fixtures the `alpha-image-pin`
+# ClusterPolicy targets and *cannot* match the regression fixture, whose
+# file is named `regression-pod-init-container.yaml` for exactly that
+# reason. Scoping on the fixture's own filename rather than on a
+# hand-maintained list means the separation survives someone adding a
+# fourth image-pin fixture, and means the finding this demo exists to
+# produce cannot be marked expected by a glob somebody widened.
+#
 # # Why an unmatched entry is not silently fine
 #
 # An expectation that matches nothing in a run is reported as a
@@ -24,27 +33,24 @@
 # a tidy-your-config problem is not a statement about the two stacks, and
 # folding it in would make `warn` mean two unrelated things — but it is
 # visible, which is what stops this file from accumulating entries that
-# stopped applying releases ago.
+# stopped applying releases ago. `alpha_e2e` asserts there are none.
 apiVersion: admissionlab.io/v1alpha1
 kind: Expectations
 expectations:
-  # 1. The image bump the upgrade is actually for.
+  # 1. The image bump the upgrade is actually for, as seen in the
+  #    admitted object.
   #
   # `admissionlab.yaml`'s `policy.failOn` escalates `image_changed` to
   # `critical`, so without this entry the run would fail on three
   # fixtures that changed exactly as intended, and the one finding that
   # matters would be a quarter of the output instead of all of it. This
-  # entry is what buys that signal-to-noise, and removing it is the
+  # entry is what buys that signal-to-noise, and deleting it is the
   # cheapest way to confirm it is doing so.
   #
-  # Scoped by fixture glob and by subject: `fixtures-policy-*` is the
-  # three fixtures in `admissionlab-alpha` (the Kyverno policy target
-  # namespace — the corpus's control-group fixtures are named
-  # `fixtures-pod-*` and are outside it), and `app` is the one container
-  # `alpha-image-pin` names. A second container in the same pod whose
-  # image changed would still fail this run, which is the point of
-  # naming the subject rather than accepting any image change on those
-  # fixtures.
+  # `subject: app` is the container `alpha-image-pin` names. A *second*
+  # container in one of those fixtures whose image changed would still
+  # fail this run, which is the point of naming the subject rather than
+  # accepting any image change on those fixtures.
   - id: alpha-pinned-image-bump
     fixtures: "fixtures-policy-*"
     kind: image_changed
@@ -57,40 +63,25 @@ expectations:
       pins :3.9. This is the change the upgrade is for; it was reviewed
       when `stacks/candidate/policies.yaml` was written.
 
-  # 2. The same change, observed one layer down, on the two controller
-  #    fixtures.
+  # 2. The same change, as seen in the webhook trace.
   #
-  # Kyverno answers with one JSON patch per request, so a rule that
-  # pins a different image emits a different patch — and
+  # Kyverno answers with one JSON patch per request, so a rule that pins
+  # a different image emits a different patch — and
   # `admissionlab_diff::trace` reports a webhook whose two observed
   # patches differ as `webhook_invocation_changed` (a `warning`). On
-  # `fixtures-policy-deployment-*` and `fixtures-policy-job-*` the image
-  # pin is the *only* rule that matched, so the patch difference is
-  # exactly the image difference entry 1 already accounts for, seen from
-  # the trace instead of from the admitted object.
+  # these three fixtures the image pin is the only rule that matches, so
+  # that patch difference is exactly the image difference entry 1 already
+  # accounts for, seen one layer down.
   #
-  # Two narrowly scoped entries rather than one `fixtures-policy-*`
-  # entry, and the distinction is the whole reason this file is worth
-  # reading: on `fixtures-policy-pod-init-container-*` the Kyverno patch
-  # *also* differs, but there it differs for a second, unaccounted
-  # reason — the missing init container — and a broader glob would have
-  # marked that trace-level evidence expected too. It would not have
-  # hidden the regression (the `init_container_removed` on the admitted
-  # object is a separate, still-unexpected finding), but it would have
-  # quietly excused the one piece of evidence that says which webhook
-  # caused it.
-  - id: alpha-kyverno-patch-differs-deployment
-    fixtures: "fixtures-policy-deployment-*"
+  # Deliberately *not* widened to cover the regression fixture. Kyverno's
+  # invocation differs there too — that is how the run attributes the
+  # first divergence to a named webhook with `observed` confidence — and
+  # excusing it would quietly excuse the single best piece of evidence
+  # the report contains about who caused the regression.
+  - id: alpha-kyverno-patch-differs
+    fixtures: "fixtures-policy-*"
     kind: webhook_invocation_changed
     reason: >-
-      Kyverno's mutating webhook patches this Deployment's pod template
-      on both sides and the two patches differ only in the pinned `app`
-      image — the trace-level view of `alpha-pinned-image-bump`.
-
-  - id: alpha-kyverno-patch-differs-job
-    fixtures: "fixtures-policy-job-*"
-    kind: webhook_invocation_changed
-    reason: >-
-      Kyverno's mutating webhook patches this Job's pod template on both
+      Kyverno's mutating webhook patches these three workloads on both
       sides and the two patches differ only in the pinned `app` image —
       the trace-level view of `alpha-pinned-image-bump`.

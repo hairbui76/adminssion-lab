@@ -96,10 +96,17 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 // has ever archived.
 // ---------------------------------------------------------------------
 
-/// `examples/kyverno-istio-upgrade/fixtures/policy-pod-init-container.yaml`:
+/// `examples/kyverno-istio-upgrade/fixtures/regression-pod-init-container.yaml`:
 /// the pod carrying the demo's critical regression.
+///
+/// The `regression-` prefix is what keeps this fixture outside
+/// `expectations.yaml`'s `fixtures-policy-*` globs; see that file.
 const INIT_CONTAINER_FIXTURE: &str =
-    "fixtures-policy-pod-init-container-yaml-pod-admissionlab-alpha-alpha-init-target-0";
+    "fixtures-regression-pod-init-container-yaml-pod-admissionlab-alpha-init-alpha-init-target-0";
+
+/// `examples/kyverno-istio-upgrade/fixtures/policy-pod-image.yaml`.
+const IMAGE_POD_FIXTURE: &str =
+    "fixtures-policy-pod-image-yaml-pod-admissionlab-alpha-alpha-image-target-0";
 
 /// `examples/kyverno-istio-upgrade/fixtures/policy-deployment.yaml`.
 const DEPLOYMENT_FIXTURE: &str =
@@ -183,10 +190,15 @@ fn the_example_configuration_resolves_and_discovers_its_fixtures() {
 
     assert_eq!(
         fixtures.len(),
-        9,
-        "the canonical corpus is nine fixtures; found {ids:?}"
+        10,
+        "the canonical corpus is ten fixtures; found {ids:?}"
     );
-    for expected in [INIT_CONTAINER_FIXTURE, DEPLOYMENT_FIXTURE, JOB_FIXTURE] {
+    for expected in [
+        INIT_CONTAINER_FIXTURE,
+        IMAGE_POD_FIXTURE,
+        DEPLOYMENT_FIXTURE,
+        JOB_FIXTURE,
+    ] {
         assert!(
             ids.contains(expected),
             "fixture identifier {expected:?} is not in the discovered set {ids:?}; \
@@ -420,7 +432,8 @@ fn assert_reports_the_expected_image_change(run: &LabRun) {
     assert_eq!(
         image_changes.len(),
         3,
-        "the pinned-image bump reaches all three policy-target fixtures"
+        "the pinned-image bump reaches all three image-pin fixtures -- and not the regression \
+         fixture, which lives in its own namespace so that exactly one Kyverno rule can match it"
     );
 
     for classified in &image_changes {
@@ -448,7 +461,7 @@ fn assert_reports_the_expected_image_change(run: &LabRun) {
         .collect();
     assert_eq!(
         fixtures,
-        [INIT_CONTAINER_FIXTURE, DEPLOYMENT_FIXTURE, JOB_FIXTURE]
+        [IMAGE_POD_FIXTURE, DEPLOYMENT_FIXTURE, JOB_FIXTURE]
             .into_iter()
             .collect::<BTreeSet<&str>>()
     );
@@ -478,11 +491,11 @@ fn assert_summary_buckets_are_exactly_as_designed(run: &LabRun) {
         // Six fixtures report no change at all (five in the policy-free
         // namespace, plus the mesh one, whose injected telemetry sidecar
         // and declining Istio injector are identical on both sides); the
-        // Deployment and the Job report only accounted-for ones; the
+        // three image-pin fixtures report only accounted-for ones; the
         // init-container pod is the single critical.
-        "fixturesTotal": 9,
+        "fixturesTotal": 10,
         "identical": 6,
-        "expected": 2,
+        "expected": 3,
         "warnings": 0,
         "critical": 1,
         "inconclusive": 0

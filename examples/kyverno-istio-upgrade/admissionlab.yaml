@@ -5,25 +5,25 @@
 #
 #     admissionlab test examples/kyverno-istio-upgrade/admissionlab.yaml
 #
-# It creates both clusters, installs both stacks, replays nine fixtures
+# It creates both clusters, installs both stacks, replays ten fixtures
 # through each, prints a PASS/WARN/FAIL summary, writes `result.json` and
 # `report.html`, deletes both clusters, and exits `1` — because one
 # critical, unexpected behavior change was observed:
 #
 #     init_container_removed  [alpha-audit-init]
-#       on fixtures/policy-pod-init-container.yaml
+#       on fixtures/regression-pod-init-container.yaml
 #       first divergence [observed]: Webhook `mutate.kyverno.svc-fail`
-#       ran in round 0 at index 5 on both sides and responded with a
-#       different patch.
+#       ran in round 0 at index 5 on both sides and was observed to
+#       mutate on the baseline side and not on the candidate side.
 #
 # `crates/admissionlab-cli/tests/alpha_e2e.rs` runs exactly this
 # configuration end to end against real clusters and asserts that
 # finding, the expected image change beside it, and the exact bucket
 # counts this file is designed to produce:
 #
-#     Summary  9 fixtures
+#     Summary  10 fixtures
 #       identical    6
-#       expected     2
+#       expected     3
 #       warnings     0
 #       critical     1
 #       inconclusive 0

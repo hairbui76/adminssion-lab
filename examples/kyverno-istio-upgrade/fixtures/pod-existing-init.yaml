@@ -2,7 +2,7 @@
 # of its own.
 #
 # The regression this lab demonstrates is an init container that stops
-# being *injected* (`policy-pod-init-container.yaml`). This fixture is
+# being *injected* (`regression-pod-init-container.yaml`). This fixture is
 # the other half of that question, and it is deliberately outside the
 # policy namespace: an init container the fixture author wrote must
 # survive both stacks untouched, at the same index, with the same image.

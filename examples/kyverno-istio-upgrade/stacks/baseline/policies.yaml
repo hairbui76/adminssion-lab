@@ -44,6 +44,29 @@
 # objects — activity this lab never looks at, that has nothing to do
 # with what is being compared, and that would run against two clusters
 # on two independent schedules.
+#
+# # One rule per fixture
+#
+# Every rule below is scoped to a namespace, and no two rules name the
+# same one: `alpha-image-pin` matches `admissionlab-alpha`,
+# `alpha-audit-init` matches `admissionlab-alpha-init`, and
+# `alpha-mesh-sidecar` matches `admissionlab-alpha-mesh`. That is not
+# organization — it is the invariant that keeps this lab's evidence
+# reproducible.
+#
+# Kyverno answers a request with **one** patch per invocation, whatever
+# number of its rules matched, and assembles that patch's operations in
+# Go map order. While the regression pod was matched by both
+# `alpha-image-pin` and `alpha-audit-init`, the baseline's single
+# invocation carried two operations in a sequence that differed run to
+# run — identical behavior, non-identical recorded evidence, and an exit
+# gate that (correctly) rejected the pair. One rule per fixture means one
+# operation per patch, and one operation has no order to permute.
+#
+# Adding a rule to this file therefore means either giving it a namespace
+# of its own or accepting that its fixture's observed patch stops being
+# order-stable. `fixtures/core/alpha-corpus/00-setup.yaml` states the
+# same invariant from the namespace side.
 apiVersion: kyverno.io/v1
 kind: ClusterPolicy
 metadata:
@@ -52,7 +75,7 @@ metadata:
     pod-policies.kyverno.io/autogen-controllers: none
     policies.kyverno.io/description: >-
       Injects the platform's audit init container into every pod in the
-      admissionlab-alpha namespace. Deliberately absent from the
+      admissionlab-alpha-init namespace. Deliberately absent from the
       candidate stack: its removal is the critical regression this
       example lab exists to demonstrate.
 spec:
@@ -64,8 +87,11 @@ spec:
           - resources:
               kinds:
                 - Pod
+              # `admissionlab-alpha-init`, not `admissionlab-alpha`: this
+              # rule and `alpha-image-pin`'s must never both match one
+              # fixture. See this file's header, "One rule per fixture".
               namespaces:
-                - admissionlab-alpha
+                - admissionlab-alpha-init
       mutate:
         # Strategic merge on a list keyed by `name`: the entry is added
         # when no init container of that name is present, and is a no-op
@@ -144,7 +170,7 @@ spec:
     # Deliberately *not* part of `alpha-image-pin` and deliberately not
     # scoped to `admissionlab-alpha`: keeping container injection in its
     # own namespace means the headline regression fixture
-    # (`fixtures/policy-pod-init-container.yaml`) carries exactly one
+    # (`fixtures/regression-pod-init-container.yaml`) carries exactly one
     # injected element, so the finding it produces names exactly one
     # subject.
     - name: add-telemetry-sidecar

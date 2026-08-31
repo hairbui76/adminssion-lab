@@ -1,0 +1,87 @@
+# The headline fixture: the pod whose injected init container the
+# candidate stack no longer adds.
+#
+# Named `regression-` rather than `policy-` like the three image-pin
+# fixtures, and that prefix is load-bearing rather than descriptive:
+# `expectations.yaml` scopes its two entries with the glob
+# `fixtures-policy-*`, so a filename is what keeps this fixture's
+# findings structurally outside every expectation in this lab. The demo
+# would be worth nothing if the finding it exists to produce could be
+# marked expected by a glob somebody widened.
+#
+# # What each side does to it
+#
+# Both sides install the same pinned Kyverno (chart 3.9.0). Only the
+# **baseline** installs `alpha-audit-init`, the policy whose one rule
+# prepends an `alpha-audit-init` init container to every pod in
+# `admissionlab-alpha-init` — the exact shape of a real platform change,
+# where a policy is retired or renamed during an upgrade and nobody
+# notices that something stopped being injected.
+#
+# So, replaying these same bytes through both stacks:
+#
+#   - baseline admits a pod with `initContainers: [alpha-audit-init]`;
+#   - candidate admits it with **no init containers**.
+#
+# `admissionlab_diff::workload` reports that as `init_container_removed`
+# with `subject: alpha-audit-init` — graded `critical` by
+# `admissionlab_policy::severity`'s frozen table, with no expectation
+# covering it, which is what makes the whole run exit `1`.
+#
+# # How the divergence stays attributable with only one side mutating
+#
+# Kyverno's resource mutating webhook is invoked for this pod on **both**
+# sides — its webhook configuration matches pods broadly, and Kyverno
+# decides internally whether any rule applies. On the baseline it answers
+# `mutated: true` with a one-operation patch; on the candidate, where no
+# policy matches this namespace at all, it answers `mutated: false` with
+# no patch. `admissionlab_diff::divergence` compares the two invocations
+# at the same position, finds the same webhook observed to mutate on one
+# side and not the other, and reports `observed` confidence naming
+# `mutate.kyverno.svc-fail`. A finding that says *where* it happened is
+# worth more than one that says only that something changed.
+#
+# # Why this pod is alone in its own namespace
+#
+# `admissionlab-alpha-init` exists so that exactly one Kyverno rule can
+# ever match this fixture. Kyverno answers a request with one patch per
+# invocation however many of its rules matched, and assembles that
+# patch's operations in Go map order — so while this pod also lived in
+# the image-pin namespace, the baseline's invocation carried two
+# operations in a sequence that differed from run to run:
+#
+#     run 1 baseline: [replace /spec/containers/0/image,
+#                      add     /spec/initContainers]
+#     run 2 baseline: [add     /spec/initContainers,
+#                      replace /spec/containers/0/image]
+#
+# Both runs observed identical *behavior* and reported identical admitted
+# objects, but `admissionlab_normalize::trace` deliberately treats JSON
+# Patch operation order as semantics rather than presentation (Task 4.2),
+# so the recorded evidence differed and the exit gate's cross-run
+# comparison rejected it — correctly. One rule means one operation, and
+# one operation has no order to permute. See
+# `fixtures/core/alpha-corpus/00-setup.yaml`'s "one-rule-per-namespace
+# invariant" for the corpus-wide statement of this.
+#
+# # Why this pod declares no init containers of its own
+#
+# So that `object_path` for the removal is unambiguous. Strategic-merge
+# insertion position for a list with a merge key is a Kyverno/Kubernetes
+# implementation detail, and a fixture that already carried its own init
+# container would make the reported index depend on it.
+# `pod-existing-init.yaml` covers the "the fixture brought its own"
+# shape instead, in a namespace no policy touches.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpha-init-target
+  namespace: admissionlab-alpha-init
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  serviceAccountName: alpha-runner
+  automountServiceAccountToken: false
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.8

@@ -6,11 +6,15 @@
 #   1. `alpha-audit-init` is **gone.** Not disabled, not narrowed —
 #      absent, the way a policy disappears during a real platform
 #      upgrade when it is retired, renamed, or lost in a refactor of a
-#      policy repository. Every pod in `admissionlab-alpha` is therefore
-#      admitted without the platform's audit init container, and
-#      `policy-pod-init-container.yaml` is where that shows up: one
-#      `init_container_removed`, subject `alpha-audit-init`, graded
+#      policy repository. Every pod in `admissionlab-alpha-init` is
+#      therefore admitted without the platform's audit init container,
+#      and `regression-pod-init-container.yaml` is where that shows up:
+#      one `init_container_removed`, subject `alpha-audit-init`, graded
 #      `critical`, unexpected, and the sole reason this lab exits `1`.
+#      No policy on this side matches that namespace at all, so Kyverno's
+#      webhook is still invoked for the fixture and answers
+#      `mutated: false` — which is what makes the divergence `observed`
+#      rather than `unknown`.
 #
 #   2. `alpha-image-pin` pins `registry.k8s.io/pause:3.10` where the
 #      baseline pins `:3.9`. This one is *known* — it is the upgrade the
@@ -94,7 +98,7 @@ spec:
     # Deliberately *not* part of `alpha-image-pin` and deliberately not
     # scoped to `admissionlab-alpha`: keeping container injection in its
     # own namespace means the headline regression fixture
-    # (`fixtures/policy-pod-init-container.yaml`) carries exactly one
+    # (`fixtures/regression-pod-init-container.yaml`) carries exactly one
     # injected element, so the finding it produces names exactly one
     # subject.
     - name: add-telemetry-sidecar
