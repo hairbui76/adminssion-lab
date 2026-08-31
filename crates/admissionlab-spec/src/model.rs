@@ -34,6 +34,27 @@ pub const API_VERSION: &str = "admissionlab.io/v1alpha1";
 /// The only `kind` value [`crate::load_lab`] accepts.
 pub const KIND: &str = "Lab";
 
+/// The `kind` a *fixture matrix* declaration document carries, under the
+/// same [`API_VERSION`] group/version as [`KIND`].
+///
+/// This crate does **not** parse or validate such a document — the model
+/// lives in `admissionlab_fixtures::matrix`, which is where fixture
+/// discovery (the only thing that ever reads one) also lives, and which
+/// depends on this crate rather than the other way around. What lives
+/// here is only the *name*: `admissionlab.io/v1alpha1` is this crate's
+/// vocabulary, and keeping every kind that may legally appear under it in
+/// one place is what stops the `Lab` check in
+/// [`crate::validate::api_version_and_kind`] and the `FixtureMatrix`
+/// check in `admissionlab_fixtures::matrix::classify_document` from
+/// drifting into disagreement about which kinds exist at all.
+///
+/// A fixture matrix is declared as a document *inside the fixture tree*,
+/// selected by the same [`FixtureSelectionSpec::include`] globs as every
+/// other fixture — deliberately not as a new field in this
+/// configuration model. See [`FixtureSelectionSpec::include`] for that
+/// decision's reasoning in full.
+pub const FIXTURE_MATRIX_KIND: &str = "FixtureMatrix";
+
 /// Schema-only override for [`LabSpec::api_version`]: a JSON Schema
 /// `const` locking the property to [`API_VERSION`], so an editor
 /// validating a YAML file against the generated schema flags a wrong
@@ -358,6 +379,29 @@ pub struct FixtureSelectionSpec {
     /// Glob patterns selecting fixture files, resolved by
     /// [`crate::resolve_lab`] against this configuration file's own
     /// directory. Must not be empty — validated by [`crate::resolve_lab`].
+    ///
+    /// These same patterns also select *fixture matrix* declarations: a
+    /// matched document whose `apiVersion` is `admissionlab.io/v1alpha1`
+    /// and whose `kind` is `FixtureMatrix` is not replayed as a
+    /// Kubernetes object. It names one base document plus an explicit,
+    /// hand-written list of RFC 6902 JSON Patch cases, and fixture
+    /// discovery expands it into one ordinary fixture per case (see
+    /// `admissionlab_fixtures::matrix`). There is deliberately no
+    /// separate `matrices:` field here: a matrix lives in the fixture
+    /// tree next to the fixtures it varies, so one include list stays
+    /// the single answer to "which fixtures does this lab replay?", and
+    /// a matrix cannot be selected by a rule the ordinary fixtures
+    /// around it are not.
+    ///
+    /// A matrix's `base` document is *only* a template. It is replayed
+    /// as a fixture in its own right if and only if it independently
+    /// matches one of these patterns — this list is the whole rule, and
+    /// declaring a document as a matrix base neither adds it to nor
+    /// removes it from the replay set. (A matrix's own `base` path is
+    /// resolved against the matrix document's directory, not against
+    /// this configuration file's, so a fixture tree containing matrices
+    /// stays relocatable independently of where the lab that selects it
+    /// lives.)
     #[serde(default)]
     pub include: Vec<String>,
 }

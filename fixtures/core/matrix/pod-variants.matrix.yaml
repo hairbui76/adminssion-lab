@@ -1,0 +1,105 @@
+# An explicit, hand-written fixture matrix (Task 5.10).
+#
+# Three pod shapes that real admission policies treat differently, all
+# derived from one base pod by RFC 6902 JSON Patch:
+#
+#   * `pre-existing-init-container` -- a pod that already has an
+#     `initContainers` array. Sidecar/init injection behaves differently
+#     against an existing array (append at `/-`) than against an absent
+#     one (create the array), and a policy that only ever saw the absent
+#     case can regress on this one silently. `fixtures/core/admission/`
+#     covers the *webhook* halves of that split; this covers the *input*
+#     half.
+#   * `host-network` -- `spec.hostNetwork: true`, the single most common
+#     trigger for a Pod Security Admission `baseline`/`restricted`
+#     rejection and for policy-engine deny rules.
+#   * `custom-service-account` -- a non-`default` `spec.serviceAccountName`,
+#     which policy engines routinely use as an exemption or a targeting
+#     key, so a change in how it is evaluated is a real regression class.
+#
+# ## Why this is a matrix and not three files
+#
+# The three variants differ from the base by one field each. As three
+# separate files they would be three near-identical 12-line pods whose
+# shared parts could drift apart silently; as a matrix, the shared part
+# exists exactly once (`pod-base.yaml`) and each case states only its own
+# difference, which is also exactly what a reviewer needs to read.
+#
+# ## What this is NOT
+#
+# Not a generator. Global Constraint 11 keeps generated fuzz fixtures out
+# of scope for v1, and nothing here generates: every case and every patch
+# operation below is written out by hand and read back verbatim. There is
+# no cross-product, no value range, no "repeat for each of these". Adding
+# a fourth variant means writing a fourth case here, deliberately.
+#
+# Not text templating either. Patches apply to the *parsed* base object,
+# so a value can never accidentally reshape the surrounding document the
+# way a substituted string in a YAML template can.
+#
+# ## Identity and provenance
+#
+# Each case's fixture id is `<matrix id>-<case id>` -- here
+# `pod-variants-host-network` and so on. (`-`, not `/`: a `FixtureId` is
+# safe to embed in a filesystem path, which forbids a separator; see
+# `admissionlab_fixtures::matrix` for that decision.) Its source hash
+# covers `pod-base.yaml`'s file hash plus this case's canonical patch
+# list, so it changes if and only if the replayed content does.
+#
+# ## `base` is relative to THIS file's directory
+#
+# Not to the lab configuration's directory. That is deliberate: it means
+# this directory can be copied, vendored, or pointed at by an
+# `admissionlab.yaml` living anywhere, and the matrix keeps working --
+# whereas a selection-root-relative path would silently break the moment
+# the config moved. The cost is that a `base` may not be absolute and may
+# not contain `..`, so a base shared by several matrices has to sit at or
+# below their common directory.
+apiVersion: admissionlab.io/v1alpha1
+kind: FixtureMatrix
+spec:
+  id: pod-variants
+  base: pod-base.yaml
+  cases:
+    # Every case replaces `metadata.name` as its first operation. This is
+    # not required -- server-side dry-run persists nothing, so repeated
+    # names would replay fine -- but a report that names four pods
+    # `matrix-pod-base` is unreadable, and a distinct name is what makes
+    # a captured object recognizable next to its own fixture id.
+    - id: pre-existing-init-container
+      patches:
+        - op: replace
+          path: /metadata/name
+          value: matrix-pod-pre-existing-init-container
+        # `add` on an absent key creates it, so this is the "pod already
+        # has an init container" input -- not an injection *by* a
+        # webhook, which is what `fixtures/core/admission/pod-add-init-container.yaml`
+        # covers from the other side.
+        - op: add
+          path: /spec/initContainers
+          value:
+            - name: pre-existing
+              image: registry.k8s.io/pause:3.10
+
+    - id: host-network
+      patches:
+        - op: replace
+          path: /metadata/name
+          value: matrix-pod-host-network
+        - op: add
+          path: /spec/hostNetwork
+          value: true
+
+    - id: custom-service-account
+      patches:
+        - op: replace
+          path: /metadata/name
+          value: matrix-pod-custom-service-account
+        # Deliberately a service account that need not exist: a
+        # server-side dry-run CREATE of a Pod does not require the
+        # referenced ServiceAccount to be present, and what this fixture
+        # is for is how *admission* treats a non-default account name,
+        # not whether the pod could ultimately be scheduled.
+        - op: add
+          path: /spec/serviceAccountName
+          value: matrix-custom-runner

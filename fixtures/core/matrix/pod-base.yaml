@@ -1,0 +1,44 @@
+# The base document `pod-variants.matrix.yaml` varies.
+#
+# It is an ordinary, complete, valid fixture -- not a skeleton with
+# placeholder text to be substituted. That is the whole point of the
+# patch-based design: every case starts from *this parsed object* and
+# applies RFC 6902 operations to it, so this file can be read, reviewed,
+# linted, and replayed exactly like any other fixture in the corpus.
+#
+# ## Is this file itself replayed?
+#
+# Yes -- if and only if it independently matches one of the lab's
+# `fixtures.include` glob patterns. Naming a file as a matrix `base` does
+# not add it to the replay set and does not remove it from one; the
+# include list stays the single answer to "what does this lab replay?"
+# (see `admissionlab_fixtures::matrix`'s module documentation for that
+# decision in full).
+#
+# This example deliberately takes the "yes" branch. A pod with no
+# variation applied is a meaningful control result to have next to the
+# three variants -- it is the case that tells you whether a divergence
+# came from the variation or was already there. An author who wants the
+# opposite (a base that is only ever a template) writes an include
+# pattern that does not select it, for example by keeping bases in a
+# sibling directory the pattern does not reach.
+#
+# ## Namespace
+#
+# `admissionlab-fixtures`, the namespace `fixtures/core/admission/00-namespace.yaml`
+# declares and opts in to the test webhook. This base carries no
+# `test.admissionlab.io/*` annotation, so the test webhook parses it to
+# its default behavior: no mutation, no delay, no denial. Each case below
+# stays that way too -- these fixtures exercise *object* variation
+# (pre-existing init containers, host networking, a custom service
+# account), which is what a real admission stack's policies key on, not
+# the test webhook's own scripted behavior.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: matrix-pod-base
+  namespace: admissionlab-fixtures
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

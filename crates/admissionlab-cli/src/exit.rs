@@ -150,7 +150,8 @@ pub fn disposition_for_prerequisites(report: &DoctorReport) -> Option<RunDisposi
 /// - Everything `admissionlab_fixtures::discover_fixtures` can return is
 ///   the user's own fixture corpus — an unreadable directory, a
 ///   malformed YAML document, a document with no `metadata.name`, two
-///   documents colliding on one identifier — so those are
+///   documents colliding on one identifier, a fixture matrix (Task
+///   5.10) whose declaration or patches do not hold up — so those are
 ///   [`RunDisposition::InvalidInput`] (§0.4's "invalid ... fixture
 ///   definition"), and they are all discovered before any cluster
 ///   exists.
@@ -168,6 +169,7 @@ pub fn disposition_for_fixture_error(error: &FixtureError) -> RunDisposition {
         | FixtureError::NotAnObject { .. }
         | FixtureError::MissingField { .. }
         | FixtureError::GenerateNameUnsupported { .. }
+        | FixtureError::Matrix(_)
         | FixtureError::DuplicateFixtureId { .. } => RunDisposition::InvalidInput,
         FixtureError::ResourceDiscoveryUnavailable { .. }
         | FixtureError::UnsupportedResource { .. }

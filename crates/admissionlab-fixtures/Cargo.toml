@@ -66,6 +66,20 @@ serde_json = { workspace = true }
 # -- see that module's documentation. No derive feature needed, for the
 # same reason `serde` above needs none.
 serde_norway = { workspace = true }
+# `matrix.rs` (Task 5.10) parameterizes a fixture by applying RFC 6902
+# JSON Patch operations to the *parsed* base document -- never by
+# interpolating YAML text -- so a `FixtureMatrixCase`'s `patches` field is
+# `Vec<json_patch::PatchOperation>` and `expand_matrix` applies it with
+# `json_patch::patch` (which is atomic: a failing operation rolls the
+# document back rather than leaving it half-patched). Already resolved at
+# this exact version via `admissionlab-admission`'s own
+# `WebhookInvocation::patch` (see the root `Cargo.toml`'s comment on this
+# entry for the registry-name/`lib`-name split and the license
+# allow-list), so this is a promotion of an already-fetched dependency to
+# one more direct consumer, not a new crate in the graph. It also means
+# an *observed* mutation (Task 3.3) and a *declared* fixture variation
+# (this task) are expressed in one shared vocabulary rather than two.
+json-patch = { workspace = true }
 # `hash.rs` computes `FixtureSource::sha256`: SHA-256 of a fixture file's
 # canonical (raw, on-disk, never re-serialized) source bytes, lowercase
 # hex -- the same convention and the same pinned version

@@ -110,6 +110,7 @@ dependencies = [
  "globset",
  "http",
  "http-body-util",
+ "json-patch",
  "k8s-openapi",
  "kube",
  "serde",

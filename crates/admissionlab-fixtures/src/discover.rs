@@ -26,11 +26,18 @@
 //!    fixture file needs no separate code path -- this crate does not
 //!    branch on file extension at all.
 //! 5. For each parsed document, in file order: skip it if it is empty
-//!    (see "Empty documents" below); otherwise validate it and extract
-//!    its Kubernetes identity ([`crate::identity::extract_object_identity`]),
-//!    compute its [`admissionlab_core::FixtureId`]
-//!    ([`crate::identity::compute_fixture_id`]), and emit one
-//!    [`FixtureSource`].
+//!    (see "Empty documents" below); otherwise classify it
+//!    ([`crate::matrix::classify_document`]) and either
+//!    - **an ordinary object:** validate it and extract its Kubernetes
+//!      identity ([`crate::identity::extract_object_identity`]), compute
+//!      its [`admissionlab_core::FixtureId`]
+//!      ([`crate::identity::compute_fixture_id`]), and emit one
+//!      [`FixtureSource`]; or
+//!    - **a fixture matrix declaration:** parse it, check its id has not
+//!      already been declared, expand it
+//!      ([`crate::matrix::expand_matrix`]), and splice the resulting
+//!      [`FixtureSource`]s in at this document's own position (see
+//!      "Fixture matrices" below).
 //! 6. Once every file has been processed with no error, check the
 //!    *complete* result for a repeated [`admissionlab_core::FixtureId`]
 //!    (see "Fixture ID collisions" below) before returning it.
@@ -130,6 +137,41 @@
 //! it is provenance-only, never a security/tamper-authentication
 //! mechanism.
 //!
+//! # Fixture matrices
+//!
+//! A matched document whose `apiVersion`/`kind` is
+//! `admissionlab.io/v1alpha1`/`FixtureMatrix` is **not** a fixture. It
+//! declares a base document plus an explicit list of RFC 6902 patch
+//! cases, and is expanded here, during discovery, into one ordinary
+//! [`FixtureSource`] per case — so every consumer downstream of this
+//! function (capture, diff, report) sees plain fixtures and never needs
+//! to know a matrix existed. See [`crate::matrix`] for the declaration
+//! format, the `<matrix-id>-<case-id>` identity rule, the source-hash
+//! recipe, and why a matrix's base document is only replayed when it
+//! independently matches an include pattern.
+//!
+//! Two properties this module is responsible for:
+//!
+//! - **Position.** A matrix's cases are spliced in at the position of
+//!   the matrix document itself — the file's sorted position, then the
+//!   document's own index within it — in the order the cases are
+//!   written. Combined with the byte-lexicographic file order above,
+//!   that makes a matrix's contribution to the discovered order as
+//!   deterministic as a static file's, and keeps a matrix's fixtures
+//!   next to the fixtures they were written alongside.
+//! - **Never skipped.** An expansion failure is
+//!   [`crate::FixtureError::Matrix`] and stops discovery immediately,
+//!   exactly like a malformed static document. A matrix is never
+//!   partially expanded, never dropped with a warning, and never
+//!   downgraded: the alternative is a run that quietly replays fewer
+//!   fixtures than the corpus declares (Global Constraint 15).
+//!
+//! A matrix's `spec.id` must be unique across the whole discovered
+//! corpus ([`crate::matrix::MatrixError::DuplicateMatrixId`]), checked
+//! here — a single matrix cannot see its siblings — against a
+//! [`BTreeMap`]-backed registry, so the reported pair never depends on
+//! an unspecified iteration order.
+//!
 //! # Fixture ID collisions
 //!
 //! [`crate::identity::compute_fixture_id`]'s own documentation explains
@@ -154,32 +196,68 @@ use serde::Deserialize as _;
 use crate::FixtureError;
 use crate::hash::sha256_hex;
 use crate::identity::{compute_fixture_id, extract_object_identity};
+use crate::matrix::{DocumentKind, MatrixIdRegistry, classify_document, parse_matrix_document};
 
 /// One discovered fixture document: a single Kubernetes object parsed
 /// from one position in one file, with a stable identity and a
 /// provenance hash. See [`discover_fixtures`] and this module's
 /// documentation for exactly how each field is computed.
+///
+/// A fixture produced by expanding a matrix case
+/// ([`crate::matrix::expand_matrix`]) is the same type and is
+/// indistinguishable to every consumer, which is the point — but three
+/// of its fields are computed differently, and each field's own
+/// documentation says how.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixtureSource {
     /// This document's stable, cross-machine-deterministic identifier.
+    ///
+    /// Path-derived for a static document
+    /// ([`crate::identity::compute_fixture_id`]);
+    /// `<matrix-id>-<case-id>` for a matrix-expanded one (see
+    /// [`crate::matrix`]).
     pub id: FixtureId,
     /// The file this document was parsed from,
     /// [`admissionlab_spec::ResolvedFixtureSelection::root`] joined with
     /// the matched relative path — never canonicalized, matching how
     /// every other path in this workspace is handled (see
     /// `admissionlab_spec::resolve`'s own module documentation).
+    ///
+    /// For a matrix-expanded fixture this is the matrix's **base**
+    /// file — the file this object's structure actually came from —
+    /// which every case of one matrix therefore shares. The matrix
+    /// document that declared the case is not named here; it is named by
+    /// the `<matrix-id>` half of `id`, and by any
+    /// [`crate::FixtureError::Matrix`] the expansion produced.
     pub path: PathBuf,
     /// This document's zero-based position within `path`'s YAML document
     /// stream. See this module's documentation ("Empty documents") for
     /// why this can be greater than a naive count of *valid* documents
     /// seen so far.
+    ///
+    /// For a matrix-expanded fixture this is the base document's own
+    /// position within the base file (which
+    /// [`crate::matrix::expand_matrix`] requires to hold exactly one
+    /// document), so it too is shared by every case of one matrix.
     pub document_index: usize,
     /// SHA-256 (lowercase hex) of `path`'s whole raw file content. Every
     /// [`FixtureSource`] sharing the same `path` also shares this value
     /// — see this module's documentation ("Hashing").
+    ///
+    /// **Except for a matrix-expanded fixture**, where there is no file
+    /// holding the patched object to hash: it is instead a documented,
+    /// domain-separated digest over the base file's hash and the case's
+    /// canonically serialized patch list, so it still changes if and
+    /// only if the replayed content does. See [`crate::matrix`]'s
+    /// "Source hash" for the exact recipe.
     pub sha256: String,
     /// This document's own parsed content, exactly as YAML/JSON
     /// deserialized it — never re-serialized or mutated.
+    ///
+    /// For a matrix-expanded fixture, the base document's parsed content
+    /// with that case's RFC 6902 patches applied — still never a
+    /// re-serialization, and never the product of any text
+    /// interpolation.
     pub object: serde_json::Value,
 }
 
@@ -201,6 +279,8 @@ pub struct FixtureSource {
 /// or [`FixtureError::GenerateNameUnsupported`] if a non-empty document
 /// does not have the deterministic Kubernetes identity Alpha requires
 /// (see [`crate::identity`]'s module documentation). Returns
+/// [`FixtureError::Matrix`] if a matched `FixtureMatrix` document cannot
+/// be parsed or expanded (see [`crate::matrix::MatrixError`]). Returns
 /// [`FixtureError::DuplicateFixtureId`] if two documents land on the
 /// same [`FixtureId`]. Every error case stops discovery immediately,
 /// without processing any file later in the deterministic order.
@@ -220,6 +300,7 @@ pub fn discover_fixtures(
     candidates.sort();
 
     let mut sources = Vec::new();
+    let mut matrix_ids = MatrixIdRegistry::default();
     for (relative, full_path) in candidates {
         let bytes = fs::read(&full_path).map_err(|source| FixtureError::ReadFile {
             path: full_path.clone(),
@@ -244,16 +325,46 @@ pub fn discover_fixtures(
                 continue;
             }
 
-            let identity = extract_object_identity(&value, &full_path, document_index)?;
-            let id = compute_fixture_id(&relative, document_index, &identity);
+            match classify_document(&value, &full_path, document_index)? {
+                DocumentKind::Static => {
+                    let identity = extract_object_identity(&value, &full_path, document_index)?;
+                    let id = compute_fixture_id(&relative, document_index, &identity);
 
-            sources.push(FixtureSource {
-                id,
-                path: full_path.clone(),
-                document_index,
-                sha256: sha256.clone(),
-                object: value,
-            });
+                    sources.push(FixtureSource {
+                        id,
+                        path: full_path.clone(),
+                        document_index,
+                        sha256: sha256.clone(),
+                        object: value,
+                    });
+                }
+                DocumentKind::Matrix => {
+                    // Expanded in place -- see this module's
+                    // documentation, "Fixture matrices", for why the
+                    // cases land here rather than being collected and
+                    // appended after every static fixture.
+                    let spec = parse_matrix_document(&value, &full_path, document_index)?;
+                    matrix_ids.record(&spec.id, &full_path, document_index)?;
+                    // `spec.base` resolves against the matrix
+                    // declaration's own directory, not `selection.root`
+                    // -- see `crate::matrix`'s module documentation for
+                    // why a fixture tree stays relocatable that way.
+                    //
+                    // `full_path` always has a parent in practice: it is
+                    // `selection.root` joined with a matched relative
+                    // path, so it always ends in a file name.
+                    // `unwrap_or` rather than `expect` keeps this
+                    // function total (an `expect` here would be a panic
+                    // this function's own documentation would then have
+                    // to promise never happens), and the fallback is not
+                    // a guess: the only shape `Path::parent` returns
+                    // `None` for is one with no file name at all, which
+                    // a walked file never has, and `selection.root` is
+                    // where such a path would have been rooted anyway.
+                    let base_dir = full_path.parent().unwrap_or(selection.root.as_path());
+                    sources.extend(crate::matrix::expand_matrix(&spec, base_dir)?);
+                }
+            }
         }
     }
 

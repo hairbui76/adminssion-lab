@@ -22,6 +22,18 @@
 //!   document's path and position, into a [`admissionlab_core::FixtureId`].
 //! - [`hash`] computes the SHA-256 content hash [`discover::FixtureSource::sha256`]
 //!   carries.
+//! - [`matrix`] implements Task 5.10: a `FixtureMatrix` document found
+//!   in the fixture tree names one base document plus an explicit,
+//!   hand-written list of RFC 6902 JSON Patch cases, and
+//!   [`matrix::expand_matrix`] turns it into one ordinary
+//!   [`discover::FixtureSource`] per case — so everything downstream of
+//!   discovery sees a plain fixture and never learns a matrix existed.
+//!   Nothing there generates cases (Global Constraint 11 keeps generated
+//!   fixtures out of scope); it only removes the need to copy one base
+//!   document once per varied field. See that module's documentation for
+//!   the configuration surface, the identity and hashing recipes, and
+//!   why a base document is a template rather than automatically a
+//!   fixture.
 //! - [`resources`] implements Task 3.2: [`resources::ResourceResolver::resolve`]
 //!   turns a [`discover::FixtureSource::object`]'s `apiVersion`/`kind`
 //!   into a [`resources::ResolvedResource`] against a real cluster's own
@@ -64,10 +76,12 @@ pub mod discover;
 pub mod execute;
 pub mod hash;
 mod identity;
+pub mod matrix;
 pub mod resources;
 
 pub use discover::{FixtureSource, discover_fixtures};
 pub use execute::{DryRunCreateResponse, dry_run_create, dry_run_create_with_client};
+pub use matrix::{FixtureMatrixCase, FixtureMatrixSpec, MatrixError, expand_matrix};
 pub use resources::{KubeResourceResolver, ResolvedResource, ResourceResolver};
 
 use std::path::PathBuf;
@@ -287,4 +301,24 @@ pub enum FixtureError {
         /// `kube`/serialization failure's own `Display`.
         reason: String,
     },
+    /// A fixture matrix (Task 5.10) could not be declared or expanded:
+    /// a malformed `FixtureMatrix` document, an id that is not a usable
+    /// identifier, a duplicate matrix or case id, an unusable base, a
+    /// patch that could not be applied, or a patched object that is no
+    /// longer a valid fixture. See [`matrix::MatrixError`] for the
+    /// individual cases.
+    ///
+    /// One variant rather than a dozen, and `#[error(transparent)]`
+    /// rather than a wrapping message, for two reasons. First, this
+    /// enum is matched exhaustively outside this crate
+    /// (`admissionlab_cli::exit::disposition_for_fixture_error`), and
+    /// every matrix failure has the *same* answer there — it is
+    /// discovery-time invalid input, exit code `2` — so splitting them
+    /// across this enum would add a dozen names that classify
+    /// identically. Second, [`matrix::MatrixError`]'s own messages are
+    /// already self-contained (each names the matrix, the case, or the
+    /// file and document it came from), so a prefix here would only
+    /// repeat what follows it.
+    #[error(transparent)]
+    Matrix(#[from] matrix::MatrixError),
 }
