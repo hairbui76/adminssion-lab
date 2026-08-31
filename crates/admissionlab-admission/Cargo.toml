@@ -31,6 +31,14 @@ admissionlab-fixtures = { workspace = true }
 # `execute.rs`'s `AdmissionExecutor` trait and `KubeAdmissionExecutor`'s
 # `impl` of it are both `async fn`.
 async-trait = { workspace = true }
+# `metrics.rs` (Task 3.8) builds the raw `GET /metrics` request
+# `kube::Client::request_text` takes -- an `http::Request<Vec<u8>>`.
+# `kube` does not re-export `http` (confirmed by reading
+# `kube-4.2.0/src/lib.rs`'s own `pub use` lines), so it is named directly
+# here. Already resolved transitively at this exact version through
+# `kube`'s own client stack, and already a `[dev-dependencies]` entry
+# below -- a promotion, not a new crate in the resolved graph.
+http = "1.5.0"
 # `WebhookInvocation::patch` (Task 3.3) is `Option<Vec<json_patch::PatchOperation>>`
 # -- see the root `Cargo.toml`'s own comment on this entry for why.
 json-patch = { workspace = true }
@@ -63,8 +71,16 @@ serde = { workspace = true, features = ["derive"] }
 # `serde_json::Value`/`serde_json::to_string` directly, not only through
 # `serde`'s generic (de)serialize traits.
 serde_json = { workspace = true }
-# `execute.rs`'s `FixtureExecutionError` (Task 3.4).
+# `execute.rs`'s `FixtureExecutionError` (Task 3.4), and `metrics.rs`'s
+# `MetricsUnavailable` (Task 3.8).
 thiserror = { workspace = true }
+# `metrics.rs` (Task 3.8) bounds every `/metrics` scrape with
+# `tokio::time::timeout` (Global Constraint 13: every external
+# interaction has a timeout). Only the `time` feature: this crate spawns
+# nothing and owns no runtime of its own -- it runs on whatever runtime
+# its caller already has. The `[dev-dependencies]` entry below adds
+# `rt`/`macros` on top for `#[tokio::test]`; Cargo unifies the two.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 # `tests/execute_unit.rs` drives `KubeAdmissionExecutor::execute_create`
@@ -84,9 +100,9 @@ tower-test = "0.4.0"
 http-body-util = { workspace = true }
 # `http::{Request, Response}` -- what `tower_test::mock::pair` and
 # `kube::Client::new` are generic over, and what
-# `tests/execute_unit.rs` asserts the mock-received request's
-# method/path/query against. Already a `[dependencies]` entry above
-# (Task 3.4's own production code needs it too); named again here only
+# `tests/execute_unit.rs` and `tests/metrics.rs` assert the mock-received
+# request's method/path/query against. Already a `[dependencies]` entry
+# above (Task 3.8's `metrics.rs` names it too); named again here only
 # because `[dev-dependencies]` does not inherit `[dependencies]`
 # entries automatically -- no new version added to the resolved graph.
 http = "1.5.0"

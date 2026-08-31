@@ -1,0 +1,67 @@
+# The same kube-apiserver `/metrics` excerpt as `before.prom`, captured
+# *after* a single serial fixture request (Task 3.8, Global Constraint
+# 19). Every difference from `before.prom` is deliberate; together the
+# five webhook label sets cover every case `diff_metrics` has to get
+# right:
+#
+#   deny.test.admissionlab.io      CREATE/true/validate
+#       count 5 -> 6 (delta 1, attributable), sum 0.5123 -> 0.5241, and
+#       the matching `apiserver_admission_webhook_rejection_count`
+#       child moves 5 -> 6 while its `calling_webhook_error` sibling
+#       stays put -- so the aggregated rejection delta is 1, not 3.
+#   inject.istio.io                CREATE/false/admit
+#       absent from `before.prom` entirely: a webhook whose first-ever
+#       invocation happened inside this window. Its `_sum` is written in
+#       scientific notation (4.2657e-03), which the parser must read as
+#       0.0042657 seconds rather than reject.
+#   mutate.test.admissionlab.io    CREATE/false/admit
+#       count 7 -> 8 (delta 1, attributable), sum 0.0411 -> 0.0568.
+#   policy.kyverno.svc             UPDATE/false/admit
+#       count 100 -> 103 (delta 3): aggregate evidence is preserved but
+#       no per-fixture latency may be attributed.
+#   validate.test.admissionlab.io  CREATE/false/validate
+#       byte-identical to `before.prom`: a zero delta.
+#
+# The noise families move too, so a parser that accidentally read them
+# would produce visibly wrong numbers rather than coincidentally right
+# ones.
+# HELP apiserver_admission_step_admission_duration_seconds [ALPHA] Admission sub-step latency histogram in seconds, broken out for each operation and API resource and step type (validate or admit).
+# TYPE apiserver_admission_step_admission_duration_seconds histogram
+apiserver_admission_step_admission_duration_seconds_bucket{operation="CREATE",rejected="false",type="admit",le="0.005"} 119
+apiserver_admission_step_admission_duration_seconds_bucket{operation="CREATE",rejected="false",type="admit",le="+Inf"} 119
+apiserver_admission_step_admission_duration_seconds_sum{operation="CREATE",rejected="false",type="admit"} 0.0739
+apiserver_admission_step_admission_duration_seconds_count{operation="CREATE",rejected="false",type="admit"} 119
+# HELP apiserver_admission_webhook_admission_duration_seconds [ALPHA] Admission webhook latency histogram in seconds, identified by name and broken out for each operation and API resource and type (validate or admit).
+# TYPE apiserver_admission_webhook_admission_duration_seconds histogram
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="deny.test.admissionlab.io",operation="CREATE",rejected="true",type="validate",le="0.25"} 4
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="deny.test.admissionlab.io",operation="CREATE",rejected="true",type="validate",le="+Inf"} 6
+apiserver_admission_webhook_admission_duration_seconds_sum{name="deny.test.admissionlab.io",operation="CREATE",rejected="true",type="validate"} 0.5241
+apiserver_admission_webhook_admission_duration_seconds_count{name="deny.test.admissionlab.io",operation="CREATE",rejected="true",type="validate"} 6
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="inject.istio.io",operation="CREATE",rejected="false",type="admit",le="0.005"} 1
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="inject.istio.io",operation="CREATE",rejected="false",type="admit",le="+Inf"} 1
+apiserver_admission_webhook_admission_duration_seconds_sum{name="inject.istio.io",operation="CREATE",rejected="false",type="admit"} 4.2657e-03
+apiserver_admission_webhook_admission_duration_seconds_count{name="inject.istio.io",operation="CREATE",rejected="false",type="admit"} 1
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="mutate.test.admissionlab.io",operation="CREATE",rejected="false",type="admit",le="0.005"} 5
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="mutate.test.admissionlab.io",operation="CREATE",rejected="false",type="admit",le="0.025"} 8
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="mutate.test.admissionlab.io",operation="CREATE",rejected="false",type="admit",le="+Inf"} 8
+apiserver_admission_webhook_admission_duration_seconds_sum{name="mutate.test.admissionlab.io",operation="CREATE",rejected="false",type="admit"} 0.0568
+apiserver_admission_webhook_admission_duration_seconds_count{name="mutate.test.admissionlab.io",operation="CREATE",rejected="false",type="admit"} 8
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="policy.kyverno.svc",operation="UPDATE",rejected="false",type="admit",le="+Inf"} 103
+apiserver_admission_webhook_admission_duration_seconds_sum{name="policy.kyverno.svc",operation="UPDATE",rejected="false",type="admit"} 2.5312
+apiserver_admission_webhook_admission_duration_seconds_count{name="policy.kyverno.svc",operation="UPDATE",rejected="false",type="admit"} 103
+apiserver_admission_webhook_admission_duration_seconds_bucket{name="validate.test.admissionlab.io",operation="CREATE",rejected="false",type="validate",le="+Inf"} 42
+apiserver_admission_webhook_admission_duration_seconds_sum{name="validate.test.admissionlab.io",operation="CREATE",rejected="false",type="validate"} 1.2534
+apiserver_admission_webhook_admission_duration_seconds_count{name="validate.test.admissionlab.io",operation="CREATE",rejected="false",type="validate"} 42
+# HELP apiserver_admission_webhook_rejection_count [ALPHA] Admission webhook rejection count, identified by name and broken out for each admission type (validating or admitting) and operation. Additional labels specify an error type (calling_webhook_error or apiserver_internal_error if an error occurred; no_error otherwise) and optionally a non-zero rejection code if the webhook rejects the request with an HTTP status code (honored by the apiserver when the code is greater or equal to 400). Codes greater than 600 are truncated to 600, to keep the metrics cardinality bounded.
+# TYPE apiserver_admission_webhook_rejection_count counter
+apiserver_admission_webhook_rejection_count{error_type="calling_webhook_error",name="deny.test.admissionlab.io",operation="CREATE",rejection_code="0",type="validate"} 2
+apiserver_admission_webhook_rejection_count{error_type="no_error",name="deny.test.admissionlab.io",operation="CREATE",rejection_code="400",type="validate"} 6
+# HELP apiserver_request_total [STABLE] Counter of apiserver requests broken out for each verb, dry run value, group, version, resource, scope, component, and HTTP response code.
+# TYPE apiserver_request_total counter
+apiserver_request_total{code="201",component="apiserver",dry_run="All",group="",resource="configmaps",scope="namespace",subresource="",verb="POST",version="v1"} 119
+# HELP etcd_request_duration_seconds [ALPHA] Etcd request latency in seconds for each operation and object type.
+# TYPE etcd_request_duration_seconds histogram
+etcd_request_duration_seconds_bucket{operation="get",type="*core.Pod\", tricky}",le="+Inf"} 7
+# HELP go_goroutines Number of goroutines that currently exist.
+# TYPE go_goroutines gauge
+go_goroutines 415

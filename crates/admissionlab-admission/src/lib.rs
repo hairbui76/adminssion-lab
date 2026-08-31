@@ -37,6 +37,15 @@
 //!   with it fails explicitly, never silently as a persisted CREATE)
 //!   and for the live investigation behind why `UnsupportedDryRun` is
 //!   not yet asserted by that classification step.
+//! - [`metrics`] implements Task 3.8: the *optional* per-webhook latency
+//!   and rejection signal, read from kube-apiserver `/metrics` deltas
+//!   around one serial fixture request. Global Constraint 19 makes it
+//!   optional by construction, so every absence there is representable:
+//!   [`metrics::MetricsUnavailable`] is a recoverable "no metric
+//!   evidence", never a run failure, and
+//!   [`metrics::WebhookMetricDelta::attributable_latency`] yields `Some`
+//!   only under the exactly-one-invocation rule that makes attributing a
+//!   duration to a single fixture sound at all.
 //!
 //! # Dependency direction (controller supplement §3, Task 3.3; §2, Task 3.4)
 //!
@@ -59,12 +68,19 @@
 //! naming [`execute::AdmissionExecutor`] itself from `core`.
 
 pub mod execute;
+pub mod metrics;
 pub mod outcome;
 pub mod trace;
 
 pub use execute::{
     AdmissionExecutor, FixtureExecutionError, KubeAdmissionExecutor, RawAdmissionResponse,
     execute_create_with_client,
+};
+pub use metrics::{
+    AdmissionMetricSnapshot, AdmissionMetricsSource, DeltaEvidence, DurationSample,
+    KubeMetricsSource, MetricsUnavailable, RejectionEvidence, RejectionKey, WebhookMetricDelta,
+    WebhookMetricKey, diff_metrics, parse_snapshot, scrape_metrics_text,
+    scrape_metrics_text_with_client,
 };
 pub use outcome::{AdmissionDecision, AdmissionOutcome};
 pub use trace::{AdmissionTrace, TraceEvidence, WebhookInvocation, WebhookOutcome};
