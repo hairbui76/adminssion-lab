@@ -1,0 +1,70 @@
+{
+  "value": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+      "annotations": {
+        "test.admissionlab.io/add-label": "admissionlab.dev/mutated=true"
+      },
+      "generation": 1,
+      "labels": {
+        "admissionlab.dev/mutated": "true",
+        "app.kubernetes.io/part-of": "admission-lab"
+      },
+      "name": "add-label",
+      "namespace": "admissionlab-fixtures"
+    },
+    "spec": {
+      "containers": [
+        {
+          "image": "registry.k8s.io/pause:3.10",
+          "imagePullPolicy": "IfNotPresent",
+          "name": "app",
+          "terminationMessagePath": "/dev/termination-log",
+          "volumeMounts": [
+            {
+              "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+              "name": "kube-api-access-x8k2p",
+              "readOnly": true
+            }
+          ]
+        }
+      ],
+      "dnsPolicy": "ClusterFirst",
+      "restartPolicy": "Always",
+      "schedulerName": "default-scheduler",
+      "serviceAccount": "default",
+      "serviceAccountName": "default",
+      "volumes": [
+        {
+          "name": "kube-api-access-x8k2p",
+          "projected": {
+            "defaultMode": 420,
+            "sources": [
+              {
+                "serviceAccountToken": {
+                  "expirationSeconds": 3607,
+                  "path": "token"
+                }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    "status": {
+      "phase": "Pending",
+      "qosClass": "BestEffort"
+    }
+  },
+  "evidence": {
+    "applied_rules": [
+      "built_in: remove-pointer /metadata/uid",
+      "built_in: remove-pointer /metadata/resourceVersion",
+      "built_in: remove-pointer /metadata/creationTimestamp",
+      "built_in: remove-pointer /metadata/managedFields",
+      "built_in: remove-annotation kubectl.kubernetes.io/last-applied-configuration"
+    ],
+    "warnings": []
+  }
+}

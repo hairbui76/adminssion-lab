@@ -7,3 +7,17 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `NormalizedObject`/`NormalizationEvidence` (Task 4.1) are what the
+# golden files under `testdata/objects/normalization/` are written as,
+# and what a later task's JSON report renders, so both derive
+# `Serialize`/`Deserialize`.
+serde = { workspace = true, features = ["derive"] }
+# The whole crate is a `serde_json::Value` transformation:
+# `normalize_object` takes and returns one, `pointer.rs` walks
+# `Value::Object`/`Value::Array` directly, and `object.rs` names
+# `serde_json::Map` when it prunes an emptied annotations map.
+serde_json = { workspace = true }
+# `NormalizeError` (`object.rs`) and `PointerError` (`pointer.rs`).
+thiserror = { workspace = true }

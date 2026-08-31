@@ -1,0 +1,74 @@
+{
+  "value": {
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": {
+      "name": "unsorted-workload",
+      "namespace": "admissionlab-fixtures"
+    },
+    "spec": {
+      "containers": [
+        {
+          "image": "registry.k8s.io/pause:3.10",
+          "name": "app"
+        },
+        {
+          "args": [
+            "--listen",
+            "0.0.0.0:15000",
+            "--log-level",
+            "warn"
+          ],
+          "command": [
+            "/usr/local/bin/proxy"
+          ],
+          "env": [
+            {
+              "name": "PROXY_MODE",
+              "value": "sidecar"
+            },
+            {
+              "name": "ADDRESS",
+              "value": "0.0.0.0:15000"
+            }
+          ],
+          "image": "registry.k8s.io/pause:3.10",
+          "name": "proxy"
+        },
+        {
+          "image": "registry.k8s.io/pause:3.10"
+        }
+      ],
+      "initContainers": [
+        {
+          "image": "registry.k8s.io/pause:3.10",
+          "name": "migrate-schema"
+        },
+        {
+          "image": "registry.k8s.io/pause:3.10",
+          "name": "await-database"
+        }
+      ],
+      "volumes": [
+        {
+          "configMap": {
+            "name": "app-config"
+          },
+          "name": "config"
+        },
+        {
+          "emptyDir": {},
+          "name": "scratch"
+        }
+      ]
+    }
+  },
+  "evidence": {
+    "applied_rules": [
+      "built_in: remove-pointer /metadata/uid",
+      "built_in: sort-named-array /spec/containers by name",
+      "built_in: sort-named-array /spec/volumes by name"
+    ],
+    "warnings": []
+  }
+}

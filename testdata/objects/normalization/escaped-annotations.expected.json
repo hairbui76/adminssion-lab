@@ -1,0 +1,23 @@
+{
+  "value": {
+    "apiVersion": "v1",
+    "data": {
+      "app.properties": "mode=production\n"
+    },
+    "kind": "ConfigMap",
+    "metadata": {
+      "name": "escaped-annotations",
+      "namespace": "admissionlab-fixtures"
+    }
+  },
+  "evidence": {
+    "applied_rules": [
+      "built_in: remove-pointer /metadata/uid",
+      "built_in: remove-pointer /metadata/resourceVersion",
+      "built_in: remove-pointer /metadata/creationTimestamp",
+      "built_in: remove-annotation kubectl.kubernetes.io/last-applied-configuration",
+      "user: remove-annotation example.com/a~b"
+    ],
+    "warnings": []
+  }
+}
