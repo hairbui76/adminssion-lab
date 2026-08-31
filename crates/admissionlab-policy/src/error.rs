@@ -10,6 +10,8 @@
 //! different crates.
 
 use std::fmt;
+use std::io;
+use std::path::PathBuf;
 
 use thiserror::Error;
 
@@ -66,6 +68,51 @@ impl PolicySpecErrors {
     pub fn into_vec(self) -> Vec<PolicyValidationError> {
         self.0
     }
+}
+
+/// Something went wrong reading, parsing, or checking an
+/// `expectations.yaml` (Task 4.9).
+///
+/// Shaped deliberately like `admissionlab_spec::SpecError`: every
+/// variant names the file it came from, `Parse` leans on
+/// `serde_norway`'s own message (which already carries the line, the
+/// column, and -- for an unknown `kind` -- the list of valid semantic
+/// kind names), and `Validation` carries the same dotted-locator
+/// problems [`PolicyValidationError`] represents everywhere else in this
+/// crate. A user who has seen one bad `admissionlab.yaml` message can
+/// read a bad `expectations.yaml` message without learning anything new.
+#[derive(Debug, Error)]
+pub enum ExpectationsError {
+    /// The expectations file could not be read.
+    #[error("failed to read expectations at {}: {source}", path.display())]
+    Io {
+        /// The path that could not be read.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        #[source]
+        source: io::Error,
+    },
+
+    /// The file's contents are not a valid expectations document.
+    #[error("failed to parse expectations at {}: {source}", path.display())]
+    Parse {
+        /// The path that failed to parse.
+        path: PathBuf,
+        /// The underlying parse failure, including the YAML location.
+        #[source]
+        source: serde_norway::Error,
+    },
+
+    /// The file parsed but breaks one or more of the expectation rules.
+    ///
+    /// Carries **every** problem found, never just the first.
+    #[error("invalid expectations at {}: {}", path.display(), render_all(problems))]
+    Validation {
+        /// The path that failed validation.
+        path: PathBuf,
+        /// Every problem, in document order.
+        problems: Vec<PolicyValidationError>,
+    },
 }
 
 /// Renders every problem on one line, separated by `; `.

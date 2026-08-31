@@ -1,0 +1,54 @@
+# A realistic `expectations.yaml`: the file a team keeps next to their
+# `admissionlab.yaml` to record the behavior changes they already know
+# about and have decided to accept.
+#
+# Every entry here is a change Admission Lab would otherwise report as
+# unexpected. Marking one expected does not change its severity and does
+# not hide it from the report -- it only stops it from failing the run.
+#
+# `apiVersion` matches the lab file's own; the two are written and
+# reviewed together.
+apiVersion: admissionlab.io/v1alpha1
+kind: Expectations
+expectations:
+  # Fixture glob plus a subject selector: the sidecar is injected into
+  # every web-facing fixture, but only that one container is expected to
+  # appear. A second, unexplained container in the same pod still fails.
+  - id: istio-sidecar-injection
+    fixtures: "web-*"
+    kind: container_added
+    selector:
+      subject: istio-proxy
+    reason: >-
+      The candidate stack enables Istio automatic sidecar injection in
+      the `web` namespace, so every web-facing fixture gains an
+      `istio-proxy` container. Tracked in PLATFORM-2291; remove this
+      entry once the baseline stack also injects it.
+
+  # Fixture glob plus an exact object path: the mesh sets exactly one
+  # securityContext field. Scoping to the path keeps this entry from
+  # quietly accepting any other securityContext change on the same
+  # fixtures, which is the whole reason `security_context_changed`
+  # defaults to critical.
+  - id: istio-proxy-run-as-user
+    fixtures: "web-*"
+    kind: security_context_changed
+    selector:
+      subject: istio-proxy
+      objectPath: /spec/containers/1/securityContext/runAsUser
+    reason: >-
+      The injected `istio-proxy` container runs as UID 1337, which the
+      baseline stack never set because it never injected the container.
+      Reviewed by the platform security team on 2026-08-20.
+
+  # No selector at all: this one is scoped by fixture glob and kind
+  # alone, which is enough because nightly builds are expected to move
+  # their image tags on every run.
+  - id: nightly-image-tag-drift
+    fixtures: "nightly-*"
+    kind: image_changed
+    reason: >-
+      Nightly fixtures pin a floating `:nightly` tag by design, so the
+      admitted image reference differs between any two runs. This is
+      informational by default; the entry exists so a lab that escalates
+      `image_changed` via `policy.failOn` does not fail on it.

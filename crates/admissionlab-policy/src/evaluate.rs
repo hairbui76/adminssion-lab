@@ -76,6 +76,7 @@ use admissionlab_spec::PolicySpec;
 use serde::Serialize;
 
 use crate::error::{PolicySpecErrors, PolicyValidationError};
+use crate::expectation::{ResolvedExpectations, match_expectations};
 use crate::selector::{ChangeSelector, CompiledSelector};
 use crate::severity::severity_name_list;
 use crate::severity::{Severity, default_severity, kind_from_name, kind_name_list};
@@ -104,11 +105,13 @@ pub struct ClassifiedChange {
     ///
     /// An expected change keeps its real severity and stays visible in
     /// the report; it simply does not contribute to
-    /// [`PolicyResult::disposition`]. Always `false` until Task 4.9
-    /// wires expectation matching in -- Task 4.8 builds the seam and
-    /// the disposition rule that reads it, so that turning expectations
-    /// on later changes which changes are *counted*, never how any
-    /// change is *graded*.
+    /// [`PolicyResult::disposition`]. Expectations decide which changes
+    /// are *counted*, never how any change is *graded* -- which is why
+    /// this is a separate flag rather than a severity downgrade.
+    ///
+    /// Always `false` when reached through [`evaluate`], which evaluates
+    /// against no expectations; [`evaluate_with_expectations`] is what
+    /// sets it. See [`crate::expectation`].
     pub expected: bool,
 }
 
@@ -119,8 +122,10 @@ pub struct ClassifiedChange {
 /// has since been fixed keeps suppressing nothing, and the only way a
 /// user finds out is if the tool says so.
 ///
-/// Always empty until Task 4.9; declared here because
-/// [`PolicyResult`]'s frozen shape carries it.
+/// Produced by [`crate::match_expectations`]; declared here rather than
+/// in [`crate::expectation`] because it is a *result* type,
+/// [`PolicyResult`]'s frozen shape carries it, and Task 4.8 needed it
+/// before expectations existed.
 ///
 /// Derives no `Default`, and its `reason` is required: a stale
 /// expectation with no account of what did not happen is not usable
@@ -386,23 +391,51 @@ pub fn validate_policy_spec(spec: &PolicySpec) -> Vec<PolicyValidationError> {
 /// downgraded to [`Severity::Info`] by an override is still reported, it
 /// just stops driving the verdict.
 ///
-/// Task 4.9 adds expectation matching on top of this; until then every
-/// [`ClassifiedChange::expected`] is `false` and
+/// Equivalent to [`evaluate_with_expectations`] with no expectations, so
+/// every [`ClassifiedChange::expected`] is `false` and
 /// [`PolicyResult::stale_expectations`] is empty.
 #[must_use]
 pub fn evaluate(policy: &ResolvedPolicy, changes: &[SemanticChange]) -> PolicyResult {
-    let classified = classify_changes(policy, changes);
+    evaluate_with_expectations(policy, &ResolvedExpectations::none(), changes)
+}
+
+/// Grades `changes` against `policy`, marking those an explicit
+/// expectation accounts for.
+///
+/// An expected change keeps its severity and its place in
+/// [`PolicyResult::changes`]; it simply stops driving
+/// [`PolicyResult::disposition`] (Task 4.9 step 4). A run whose only
+/// critical change was expected therefore passes *with that critical
+/// change still listed* -- which is the point: the tool never hides a
+/// difference, it only stops treating an accounted-for one as a reason
+/// to fail.
+///
+/// Expectations are matched against the changes **after** grading and
+/// sorting, so [`crate::ExpectationMatch::change_index`] indexes the
+/// same list a report renders. See [`crate::expectation`] for the exact
+/// matching rule and the contested-change tiebreaker.
+#[must_use]
+pub fn evaluate_with_expectations(
+    policy: &ResolvedPolicy,
+    expectations: &ResolvedExpectations,
+    changes: &[SemanticChange],
+) -> PolicyResult {
+    let mut classified = classify_changes(policy, changes);
+    let matching = match_expectations(expectations, &classified);
+    for matched in &matching.matches {
+        classified[matched.change_index].expected = true;
+    }
     let disposition = disposition_of(&classified);
     PolicyResult {
         disposition,
         changes: classified,
-        stale_expectations: Vec::new(),
+        stale_expectations: matching.stale,
     }
 }
 
 /// Grades and orders `changes`, with every `expected` flag left `false`.
 ///
-/// Split out from [`evaluate`] because Task 4.9 needs the graded,
+/// Split out because [`evaluate_with_expectations`] needs the graded,
 /// *ordered* list before it can decide which entries an expectation
 /// accounts for: matching is defined against the same indices a report
 /// shows, so it has to run after this sort, not before.

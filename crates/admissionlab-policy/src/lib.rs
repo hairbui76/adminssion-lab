@@ -24,6 +24,10 @@
 //! - [`evaluate`] holds [`resolve_policy`] (which rejects every unknown
 //!   or impossible name at load time) and [`evaluate`](evaluate())
 //!   (which grades a run and produces a [`PolicyResult`]).
+//! - [`expectation`] holds the `expectations.yaml` contract: the loader,
+//!   the rules that make a file reviewable (unique `id`, non-empty
+//!   `reason`), and the deterministic matching that marks a change
+//!   [`ClassifiedChange::expected`] or an entry [`StaleExpectation`].
 //! - [`error`] holds the rejection vocabulary, which follows
 //!   `admissionlab_spec::SpecError`'s dotted-locator convention so a
 //!   policy complaint and a configuration complaint read alike.
@@ -41,13 +45,19 @@
 
 pub mod error;
 pub mod evaluate;
+pub mod expectation;
 pub mod selector;
 pub mod severity;
 
-pub use error::{PolicySpecErrors, PolicyValidationError};
+pub use error::{ExpectationsError, PolicySpecErrors, PolicyValidationError};
 pub use evaluate::{
     ClassifiedChange, PolicyDisposition, PolicyResult, ResolvedPolicy, StaleExpectation, evaluate,
-    resolve_policy, validate_policy_spec,
+    evaluate_with_expectations, resolve_policy, validate_policy_spec,
+};
+pub use expectation::{
+    EXPECTATIONS_KIND, ExpectationMatch, ExpectationMatching, ExpectationsSpec, ExpectedChange,
+    ResolvedExpectations, load_expectations, match_expectations, parse_expectations,
+    resolve_expectations,
 };
 pub use selector::{ChangeSelector, CompiledSelector};
 pub use severity::{ALL_KINDS, Severity, default_severity, kind_from_name, kind_index};

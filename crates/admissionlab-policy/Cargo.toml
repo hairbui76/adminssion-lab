@@ -42,13 +42,19 @@ admissionlab-spec = { workspace = true }
 # pattern means the same thing in both places.
 globset = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# `expectation.rs` (Task 4.9) owns the `expectations.yaml` loader, so
+# this crate parses YAML itself rather than routing through
+# `admissionlab-spec`: an expectations file names `SemanticChangeKind`
+# values directly, which `spec` cannot see (see `evaluate::
+# validate_policy_spec` for the same argument applied to policy name
+# validation). Same crate `admissionlab-spec` uses, so a user's two
+# configuration files are parsed by one YAML implementation with one set
+# of quirks and one error format.
+serde_norway = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# The tests build `PolicySpec` values by parsing the same YAML a user
-# would write, rather than by constructing the struct in Rust: a
-# hand-built struct cannot catch a policy section that fails to parse at
-# all, and the load-time validation seam this crate exposes is only
-# meaningful if it is exercised against parsed configuration.
-serde_norway = { workspace = true }
+# The tests assert on serialized JSON text rather than on round trips:
+# the severity and disposition names are a public contract, and a round
+# trip passes for almost any consistent-but-wrong encoding.
 serde_json = { workspace = true }
