@@ -32,13 +32,22 @@ dependencies = [
 name = "admissionlab-cli"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-admission",
  "admissionlab-cluster",
  "admissionlab-core",
+ "admissionlab-diff",
+ "admissionlab-fixtures",
+ "admissionlab-installer",
+ "admissionlab-normalize",
+ "admissionlab-policy",
+ "admissionlab-report",
  "admissionlab-spec",
  "assert_cmd",
  "async-trait",
  "clap",
  "predicates",
+ "serde",
+ "serde_json",
  "tokio",
  "tracing",
  "tracing-subscriber",

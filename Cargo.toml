@@ -76,6 +76,16 @@ admissionlab-policy = { path = "crates/admissionlab-policy" }
 # this crate — loading `recipes/test-webhook/recipe.yaml` through Task
 # 2.5's own public loader.
 admissionlab-recipes = { path = "crates/admissionlab-recipes" }
+# `admissionlab-cli`'s `pipeline` module (Task 4.14) is the first
+# cross-crate consumer of this crate: it builds the `LabResult` every
+# renderer reads, redacts it once, and writes the terminal/JSON/HTML
+# artifacts. This is the last edge in §1.1's chain (`cli -> report ->
+# policy -> diff -> ...`), and it can never be part of a cycle: nothing
+# in this workspace depends on `admissionlab-cli`, which is exactly why
+# the compare-and-report half of the pipeline is assembled there rather
+# than in `admissionlab-core` -- see `admissionlab_core::run`'s own
+# module documentation for that argument in full.
+admissionlab-report = { path = "crates/admissionlab-report" }
 admissionlab-spec = { path = "crates/admissionlab-spec" }
 assert_cmd = "2.2.2"
 async-trait = "0.1.92"

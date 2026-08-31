@@ -13,12 +13,14 @@
 //! # One check, two callers
 //!
 //! [`run_with`] calls `admissionlab_core::collect_doctor_report` and
-//! [`DoctorReport::meets_prerequisites`] — the exact same functions a
-//! future task wiring a prerequisite gate into `test` will call — rather
-//! than re-implementing any probing or pass/fail logic here. This
-//! module's own job is strictly the `doctor`-specific parts: argument
-//! parsing, rendering, choosing *this command's* exit code, and (only
-//! when `--deep` is passed) the temporary-cluster probe itself.
+//! [`DoctorReport::meets_prerequisites`] — the exact same functions
+//! `admissionlab test`'s own prerequisite gate calls (Task 4.14; see
+//! `crate::pipeline`'s stage order and `crate::exit`'s note on why a
+//! missing host tool is exit `2` in *both* commands) — rather than
+//! re-implementing any probing or pass/fail logic here. This module's
+//! own job is strictly the `doctor`-specific parts: argument parsing,
+//! rendering, choosing *this command's* exit code, and (only when
+//! `--deep` is passed) the temporary-cluster probe itself.
 //!
 //! # `--deep`: only when asked, and never touching user state
 //!

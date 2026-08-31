@@ -1,65 +1,64 @@
-//! `admissionlab test` argument parsing and entry point.
+//! `admissionlab test`: arguments, the production backends, and the exit
+//! code.
 //!
-//! As of Task 1.10, this loads and validates a lab configuration and
-//! creates/destroys its baseline and candidate clusters through
-//! [`admissionlab_core::LabRunner`]. Stack installation, fixture
-//! discovery/replay, semantic diff, and reporting are still Task 4.14's
-//! job — this module never implements, wires, or claims to have run any
-//! of them.
+//! The run itself — configuration, prerequisites, clusters, stacks,
+//! fixtures, comparison, policy, reports, cleanup — is
+//! [`crate::pipeline::run_lab`], and that module's documentation is the
+//! authoritative description of the stage order and why it is that
+//! order. This module contributes three things and nothing else: the
+//! command's argument surface, the concrete backends
+//! [`crate::pipeline::LabBackend`] is satisfied with in production, and
+//! the translation from the run's [`RunDisposition`] to the process's
+//! [`ExitCode`] (via [`crate::exit`], which owns the mapping).
 //!
-//! # Honesty constraint
+//! # What changed with Task 4.14
 //!
-//! `admissionlab test` must never exit `0` (as [`RunDisposition::Passed`]
-//! does) and must never print anything implying a lab actually ran to
-//! completion: no `PASS`/`FAIL`, no regression verdict, nothing
-//! suggesting a fixture was replayed or baseline/candidate behavior was
-//! compared. What it *can* now truthfully report is exactly what it did:
-//! whether the configuration loaded, and whether the two clusters were
-//! created and then deleted (or preserved). [`run_async`] prints those
-//! facts plainly, then states just as plainly, every time it gets that
-//! far, that fixture execution and comparison are not implemented yet —
-//! so a user reading either stream comes away with an accurate picture
-//! of how far the tool got, never a false impression that more happened.
+//! Until this task, this command deliberately refused to pretend: it
+//! created and destroyed two clusters and then said plainly that fixture
+//! execution and comparison were not implemented, exiting `6` so nothing
+//! could mistake it for a pass. That constraint has been *satisfied*,
+//! not relaxed — the pipeline now genuinely replays fixtures through two
+//! real API servers and compares what they did, so exit `0` finally
+//! means what it says. The honesty rule underneath it is unchanged and
+//! still load-bearing everywhere in the pipeline: a run that could not
+//! observe something reports it as unavailable
+//! (`FixtureBucket::Inconclusive`, `TraceEvidence::Unavailable`,
+//! `DivergenceConfidence::Unknown`) rather than as agreement.
 //!
-//! # Exit codes
+//! # Per-webhook metrics are collected
 //!
-//! - [`RunDisposition::InvalidInput`] (2): `args.config` failed to load
-//!   or resolve ([`load_lab`]/[`resolve_lab`]), *or* a configured
-//!   Kubernetes version could not be resolved to a node image
-//!   ([`RunError::NodeImageResolutionFailed`] — Controller Ruling R25).
-//!   The latter is still the user's configuration at fault (they asked
-//!   for a version Admission Lab does not know how to provision), not
-//!   the lab's infrastructure, and it is always discovered before any
-//!   cluster is created — the same reason an empty or malformed
-//!   `kubernetes:` field is `InvalidInput` rather than
-//!   `InfrastructureFailed`.
-//! - [`RunDisposition::InfrastructureFailed`] (3): cluster creation
-//!   itself failed, or cleanup could not fully delete both clusters. A
-//!   cluster that might still be running is a more urgent, more specific
-//!   problem than "the rest of the pipeline isn't implemented," so it
-//!   earns its own distinct code rather than being folded into the
-//!   generic not-yet-implemented outcome below.
-//! - [`RunDisposition::InternalError`] (6): everything this phase
-//!   implements succeeded (configuration loaded, both clusters created,
-//!   then deleted or preserved as requested) but fixture execution and
-//!   comparison — required for any real pass/fail verdict — are not
-//!   implemented yet. This is deliberately *not* `0`: nothing this run
-//!   did amounts to a completed lab, so there is no result to call a
-//!   pass, even though both clusters genuinely existed for a moment.
+//! [`KubeFixtureCapture`] takes no `/metrics` samples by default,
+//! because they are optional by construction (Global Constraint 19) and
+//! cost one full kube-apiserver `/metrics` render per fixture request,
+//! serially. This command turns them **on**, and the reason is that
+//! `policy.latency` is a real, documented, user-configurable part of the
+//! product (`admissionlab_spec::LatencyPolicy`, with an Alpha default of
+//! "100ms slower *and* 2x baseline"): without metric samples every
+//! observed latency is `None`, `webhook_latency_changed` can never be
+//! emitted, and that configuration silently does nothing. Paying two
+//! scrapes per fixture to make a configured policy mean something is the
+//! right trade, and it stays non-fatal in every failure mode — a scrape
+//! that fails leaves the latency `None`, exactly as if metrics were off,
+//! and never fails a fixture or a run.
 
+use std::io::IsTerminal as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
 
+use admissionlab_admission::{KubeFixtureCapture, KubeMetricsSource};
 use admissionlab_cluster::KindClusterManager;
 use admissionlab_core::{
-    ArtifactStore, LabRunner, ProcessRunner, RunDisposition, RunError, RunOptions,
-    TokioProcessRunner, preserved_cluster_report,
+    ArtifactStore, DoctorReport, ProcessRunner, RunPaths, TokioProcessRunner, collect_doctor_report,
 };
-use admissionlab_spec::{load_lab, resolve_lab};
+use admissionlab_fixtures::FixtureSource;
+use admissionlab_report::TerminalOptions;
+use async_trait::async_trait;
 use clap::Args;
 
 use crate::exit;
+use crate::pipeline::install::KubeStackInstaller;
+use crate::pipeline::{Console, LabBackend, RunRequest, run_lab};
 
 /// Arguments for `admissionlab test`.
 #[derive(Debug, Args)]
@@ -69,30 +68,101 @@ pub struct TestArgs {
     pub config: PathBuf,
 
     /// Preserve baseline/candidate clusters after the run instead of
-    /// deleting them. On success, prints each cluster's name, its
-    /// kubeconfig path, and the exact `kind delete cluster` command to
-    /// remove it by hand (PRODUCT.md §10.4).
+    /// deleting them. Prints each cluster's name, its kubeconfig path,
+    /// and the exact `kind delete cluster` command to remove it by hand
+    /// (PRODUCT.md §10.4).
     #[arg(long)]
     pub keep_clusters: bool,
+
+    /// Write `result.json` and `report.html` into this directory instead
+    /// of the run's own `reports/` directory. Created if it does not
+    /// exist. The raw per-fixture evidence bundles always stay in the
+    /// run workspace, which is where every path inside the reports
+    /// points.
+    #[arg(long, value_name = "DIR")]
+    pub report_dir: Option<PathBuf>,
 }
 
 /// The directory this run's on-disk workspace is created under.
 ///
 /// PRODUCT.md §10.3 describes this as "the configured cache/run root",
-/// but no task before this one has added a way to configure it (no
-/// `--run-root` flag, no config file setting), so this is a fixed
-/// default under the OS temp directory — consistent with this
-/// codebase's existing ephemeral-workspace precedents
-/// (`admissionlab-cluster`'s `tests/kind_smoke.rs`,
-/// `admissionlab-cli`'s own `doctor --deep` probe). Making this
-/// configurable is left to whichever later task actually needs runs to
-/// persist somewhere the user chose.
+/// but nothing has added a way to configure it yet (no `--run-root`
+/// flag, no config file setting), so this is a fixed default under the
+/// OS temp directory — consistent with this codebase's existing
+/// ephemeral-workspace precedents (`admissionlab-cluster`'s
+/// `tests/kind_smoke.rs`, `admissionlab-cli`'s own `doctor --deep`
+/// probe). `--report-dir` is the escape hatch that matters in practice:
+/// it puts the artifacts a user actually reads wherever they want them,
+/// without moving the workspace `kind` bind-mounts into.
 fn default_run_root() -> PathBuf {
     std::env::temp_dir().join("admissionlab-runs")
 }
 
-/// Runs `admissionlab test`. See this module's documentation for the
-/// exact honesty constraint and exit-code mapping this implements.
+/// The production [`LabBackend`]: real `kind` clusters, real
+/// `helm`/`kubectl` installs, real server-side dry-run capture against
+/// real API servers (Global Constraints 2, 3, and 16).
+struct KindBackend {
+    /// Every external command — `kind`, `helm`, `kubectl`, `docker` —
+    /// goes through this one runner, so every invocation inherits its
+    /// timeout, separate stdout/stderr capture, and structured error
+    /// context (Global Constraint 13).
+    process_runner: Arc<dyn ProcessRunner>,
+    /// The `kind` backend, built once from `process_runner`.
+    cluster_manager: Arc<KindClusterManager>,
+    /// Which filesystem the free-space check reports on. The run
+    /// workspace and every `kind` node's storage live under the OS temp
+    /// directory, so that is the filesystem whose free space actually
+    /// decides whether this run can finish.
+    disk_check_path: PathBuf,
+}
+
+impl KindBackend {
+    /// Builds the production backend for a run rooted at `run_root`.
+    fn new(run_root: &std::path::Path) -> Self {
+        let process_runner: Arc<dyn ProcessRunner> = Arc::new(TokioProcessRunner::new());
+        Self {
+            cluster_manager: Arc::new(KindClusterManager::new(Arc::clone(&process_runner))),
+            process_runner,
+            // The root itself may not exist yet on a first run, and the
+            // free-space check needs an existing path; its parent (the
+            // OS temp directory) is on the same filesystem and always
+            // exists.
+            disk_check_path: run_root
+                .parent()
+                .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf),
+        }
+    }
+}
+
+#[async_trait]
+impl LabBackend for KindBackend {
+    type Clusters = KindClusterManager;
+    type Installer = KubeStackInstaller;
+    type Capture = KubeFixtureCapture;
+
+    async fn doctor_report(&self) -> DoctorReport {
+        // The same function `admissionlab doctor` calls, rather than a
+        // second prerequisite check that could disagree with it (see
+        // `commands::doctor`'s "One check, two callers").
+        collect_doctor_report(self.process_runner.as_ref(), &self.disk_check_path).await
+    }
+
+    fn cluster_manager(&self) -> Arc<Self::Clusters> {
+        Arc::clone(&self.cluster_manager)
+    }
+
+    fn stack_installer(&self, paths: &RunPaths) -> Self::Installer {
+        KubeStackInstaller::new(Arc::clone(&self.process_runner), paths)
+    }
+
+    fn fixture_capture(&self, fixtures: Vec<FixtureSource>, store: ArtifactStore) -> Self::Capture {
+        // Metrics on: see this module's documentation for why the cost
+        // is worth it and why it can never fail a run.
+        KubeFixtureCapture::new(fixtures, store).with_metrics(Arc::new(KubeMetricsSource::new()))
+    }
+}
+
+/// Runs `admissionlab test`.
 ///
 /// # Panics
 ///
@@ -107,103 +177,31 @@ pub fn run(args: &TestArgs) -> ExitCode {
         .enable_all()
         .build()
         .expect("failed to build the test command's tokio runtime");
-    runtime.block_on(run_async(args))
-}
-
-/// [`run`]'s async core.
-async fn run_async(args: &TestArgs) -> ExitCode {
-    let loaded = match load_lab(&args.config) {
-        Ok(loaded) => loaded,
-        Err(error) => {
-            eprintln!("admissionlab test: failed to load lab configuration: {error}");
-            return exit::code_for_disposition(RunDisposition::InvalidInput);
-        }
-    };
-    let lab = match resolve_lab(loaded) {
-        Ok(lab) => lab,
-        Err(error) => {
-            eprintln!("admissionlab test: invalid lab configuration: {error}");
-            return exit::code_for_disposition(RunDisposition::InvalidInput);
-        }
-    };
 
     let run_root = default_run_root();
-    let process_runner: Arc<dyn ProcessRunner> = Arc::new(TokioProcessRunner::new());
-    let runner = LabRunner {
-        cluster_manager: Arc::new(KindClusterManager::new(process_runner)),
-        artifact_store: ArtifactStore::new(&run_root),
-    };
-    let options = RunOptions {
+    let backend = KindBackend::new(&run_root);
+    let request = RunRequest {
+        config: &args.config,
         keep_clusters: args.keep_clusters,
+        report_dir: args.report_dir.as_deref(),
         run_root,
     };
 
-    let prepared = match runner.prepare_clusters(&lab, &options).await {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            eprintln!("admissionlab test: failed to prepare lab clusters: {error}");
-            if let RunError::ClusterCreationFailed { rollback, .. } = &error {
-                for diagnostic in rollback {
-                    eprintln!("admissionlab test: {}", diagnostic.message);
-                }
-            }
-            // An unresolvable Kubernetes version is the user's
-            // configuration at fault (see this module's documentation)
-            // — every other `prepare_clusters` failure is a genuine
-            // infrastructure problem. Matched exhaustively (no `_` arm)
-            // so a future `RunError` variant forces a deliberate choice
-            // here rather than silently falling into one bucket.
-            let disposition = match &error {
-                RunError::NodeImageResolutionFailed { .. } => RunDisposition::InvalidInput,
-                RunError::NonAbsoluteRunRoot(_)
-                | RunError::Workspace(_)
-                | RunError::ClusterCreationFailed { .. } => RunDisposition::InfrastructureFailed,
-            };
-            return exit::code_for_disposition(disposition);
-        }
+    let mut out = std::io::stdout();
+    let mut err = std::io::stderr();
+    let mut console = Console {
+        // The two observations `TerminalOptions::for_stream` documents
+        // as the caller's to make, made here where the streams actually
+        // are: color only for a real terminal, and never when `NO_COLOR`
+        // is set to anything at all (its *presence* is the signal).
+        terminal: TerminalOptions::for_stream(
+            out.is_terminal(),
+            std::env::var_os("NO_COLOR").is_none(),
+        ),
+        out: &mut out,
+        err: &mut err,
     };
 
-    println!(
-        "admissionlab test: created baseline cluster {:?} and candidate cluster {:?}.",
-        prepared.baseline.spec.name, prepared.candidate.spec.name
-    );
-
-    // What became of the two clusters, folded into the disclaimer below
-    // so it reads accurately — and completely, on its own, without
-    // requiring the earlier stdout lines — regardless of which mode
-    // this run took.
-    let cluster_outcome = if options.keep_clusters {
-        println!("{}", preserved_cluster_report(&prepared));
-        "left running, as requested by --keep-clusters"
-    } else {
-        let cleanup_diagnostics = runner.cleanup(&prepared).await;
-        if cleanup_diagnostics.is_empty() {
-            println!("admissionlab test: baseline and candidate clusters deleted.");
-            "destroyed"
-        } else {
-            for diagnostic in &cleanup_diagnostics {
-                eprintln!("admissionlab test: {}", diagnostic.message);
-            }
-            eprintln!(
-                "admissionlab test: cleanup did not fully succeed; a cluster may still exist — \
-                 see the delete command(s) above."
-            );
-            return exit::code_for_disposition(RunDisposition::InfrastructureFailed);
-        }
-    };
-
-    // Reachable only once both clusters genuinely existed — never on a
-    // configuration or infrastructure failure above, both of which
-    // already returned their own, more specific exit code. Stated
-    // plainly and unconditionally regardless: creating and destroying
-    // (or preserving) two clusters is real infrastructure work, but it
-    // is not a lab result, so this can never read as, or be mistaken
-    // for, a pass.
-    eprintln!(
-        "admissionlab test: fixture execution and comparison are not implemented in this phase \
-         of Admission Lab. Both clusters were created and {cluster_outcome}, but no fixtures \
-         were replayed against them and no baseline/candidate behavior was compared — this is \
-         not a pass or a fail."
-    );
-    exit::code_for_disposition(RunDisposition::InternalError)
+    let disposition = runtime.block_on(run_lab(&backend, &request, &mut console));
+    exit::code_for_disposition(disposition)
 }

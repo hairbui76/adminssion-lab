@@ -8,11 +8,62 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# Task 4.14 gives this crate a library target alongside its binary. The
+# whole compare-and-report half of `admissionlab test` is assembled here
+# (see `pipeline`'s module documentation for why it cannot live in
+# `admissionlab-core`), and the only way to drive that assembly through
+# fake `ClusterManager`/`StackInstaller`/`FixtureCapture` backends from
+# `tests/test_command.rs` — rather than only end-to-end through a real
+# `kind` — is for those backends to be nameable from an integration test,
+# which requires a `[lib]`. `tests/cli.rs` still exercises the compiled
+# binary as a black box; the two are complementary, not redundant.
+#
+# Nothing outside this workspace consumes the library: it exists for
+# testability, and `admissionlab` (the binary) is the product surface.
+[lib]
+name = "admissionlab_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "admissionlab"
 path = "src/main.rs"
 
 [dependencies]
+# The Phase 3/4 pipeline `pipeline::run_lab` assembles end to end (Task
+# 4.14). Every one of these is *downstream* of `admissionlab-core`, which
+# is exactly why the assembly lands in this crate rather than in `core`:
+# `core -> policy -> diff -> admission -> fixtures -> core` would be a
+# cycle. Nothing depends on this bin+lib crate, so its own edges can
+# never become part of one.
+#
+# - `admission`: `KubeFixtureCapture` (the `FixtureCapture` backend) and
+#   the `AdmissionOutcome`/`AdmissionDecision` values the comparison reads.
+# - `fixtures`: `discover_fixtures` over the resolved fixture selection.
+# - `installer`: the `ComponentInstaller`/`ReadinessProbe` implementations
+#   `pipeline::install::KubeStackInstaller` drives `install_stack` with.
+# - `normalize`: `normalize_object`/`normalize_trace` plus the profile the
+#   recipe-rule conversion seam builds.
+# - `diff`: the semantic comparison and first-divergence attribution.
+# - `policy`: `validate_policy_spec` (called before any cluster is
+#   created), expectations loading, and `evaluate_with_expectations`.
+# - `report`: `LabResult`, redaction, and the three renderers.
+admissionlab-admission = { workspace = true }
+admissionlab-diff = { workspace = true }
+admissionlab-fixtures = { workspace = true }
+admissionlab-installer = { workspace = true }
+admissionlab-normalize = { workspace = true }
+admissionlab-policy = { workspace = true }
+admissionlab-report = { workspace = true }
+# `pipeline::install::KubeStackInstaller` implements
+# `admissionlab_core::StackInstaller`, and `pipeline::LabBackend` is the
+# injection seam tests substitute fakes through: both are async traits.
+async-trait = { workspace = true }
+# The failure-path `diagnostics.json` artifact
+# (`pipeline::report::FailureArtifact`) is serialized directly rather
+# than hand-formatted, so it stays machine-readable alongside
+# `result.json`.
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 # Read-only lookup of the Kubernetes compatibility matrix
 # (`compatibility/kubernetes.yaml`) for `doctor`'s kubectl client/server
 # skew warning. Depending on both `admissionlab-cluster` and
@@ -52,5 +103,10 @@ tokio = { workspace = true, features = ["rt", "fs"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
-async-trait = { workspace = true }
 predicates = { workspace = true }
+# `tests/test_command.rs` drives `pipeline::run_lab` against fakes on a
+# hand-rolled current-thread runtime and parses the `result.json` it
+# writes back as generic JSON (`LabResult` is emit-only by design, so
+# there is no typed reader to use instead).
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt", "fs", "time"] }

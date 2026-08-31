@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
-
-mod commands;
-mod exit;
-mod output;
+//! The `admissionlab` binary: argument parsing and dispatch, and nothing
+//! else. Every behavior it invokes lives in this crate's library half
+//! (see `lib.rs`'s module documentation for why that split exists).
 
 use std::process::ExitCode;
 
+use admissionlab_cli::commands;
+use admissionlab_cli::output;
 use clap::{Parser, Subcommand};
 
 use commands::doctor::DoctorArgs;

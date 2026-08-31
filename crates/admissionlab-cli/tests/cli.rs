@@ -1,26 +1,27 @@
-//! Black-box tests for the Admission Lab CLI's command surface.
+//! Black-box tests for the Admission Lab CLI's command surface: this
+//! file spawns the actual compiled `admissionlab` binary via
+//! `assert_cmd` and inspects its real stdout, stderr, and process exit
+//! code, the way a user's shell would.
 //!
-//! `admissionlab-cli` has no `[lib]` target, so this file — which spawns
-//! the actual compiled `admissionlab` binary via `assert_cmd` and
-//! inspects its real stdout, stderr, and process exit code, the way a
-//! user's shell would — is the only place these behaviors can be
-//! observed and pinned down.
+//! It is the *outer* half of `admissionlab test`'s coverage.
+//! `tests/test_command.rs` is the inner half: it drives
+//! `admissionlab_cli::pipeline::run_lab` against fake
+//! cluster/install/capture backends, which is the only way to reach the
+//! outcomes that need two real API servers disagreeing (a policy
+//! failure, a written `result.json` with findings in it). The two are
+//! complementary — this file proves the *binary* wires arguments,
+//! streams, and exit codes to that pipeline; that file proves the
+//! pipeline's own decisions.
 //!
-//! Several tests below exist specifically to enforce the honesty
-//! constraint on `test` (see `commands::test`'s own module
-//! documentation): it must never look like a lab actually ran to a
-//! pass/fail verdict, whether it fails before touching any
-//! infrastructure (an invalid configuration) or after genuinely
-//! creating and destroying both clusters.
-//!
-//! Tests in the "genuine cluster lifecycle, through a stubbed `kind`"
-//! section stub only `kind` on a controlled `PATH` — mirroring
-//! `tests/doctor.rs`'s own stubbing approach for its `--deep` probe —
-//! so this file still never depends on, or executes, whatever real
-//! `kind`/`docker` may or may not be installed on the machine running
-//! this suite. `admissionlab-cluster`'s `tests/kind_smoke.rs` (run with
-//! `-- --ignored`) is where the fully real, unstubbed create/delete
-//! cycle is exercised.
+//! Tests in the "genuine cluster lifecycle, through stubbed host tools"
+//! section put stand-ins for `kind`/`kubectl`/`helm`/`docker` on a
+//! controlled `PATH` — mirroring `tests/doctor.rs`'s own stubbing
+//! approach for its `--deep` probe — so this file never depends on, or
+//! executes, whatever real tools may or may not be installed on the
+//! machine running this suite. `admissionlab-cluster`'s
+//! `tests/kind_smoke.rs` (run with `-- --ignored`) is where the fully
+//! real, unstubbed create/delete cycle is exercised, and Task 4.15's
+//! `alpha_e2e` is where a whole real lab is.
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -168,40 +169,40 @@ fn invalid_config_content_exits_invalid_input() {
 }
 
 // ---------------------------------------------------------------------
-// The honesty constraint: `test` must never exit 0, and must never
-// print anything implying a lab actually ran to a verdict — even when
-// it fails before touching any infrastructure.
+// A run that fails before it touches any infrastructure must never look
+// like a lab that reached a verdict.
 // ---------------------------------------------------------------------
 
 #[test]
-fn test_command_does_not_exit_success() {
+fn a_failed_configuration_load_never_exits_success() {
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.arg("test").arg("somefile.yaml").assert().failure();
 }
 
 #[test]
-fn test_command_does_not_emit_lab_success_looking_output() {
+fn a_failed_configuration_load_emits_no_verdict_looking_output() {
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.arg("test")
         .arg("somefile.yaml")
         .assert()
         .failure()
-        .stdout(predicates::str::contains("PASS").not())
+        // The terminal report — the only thing that renders a verdict —
+        // is written by a run that got as far as comparing two sides.
+        // A configuration that never loaded produces none of it.
+        .stdout(predicates::str::contains("Result:").not())
+        .stdout(predicates::str::contains("Summary").not())
         .stdout(predicates::str::contains("cluster").not())
-        .stdout(predicates::str::contains("baseline").not())
-        .stdout(predicates::str::contains("candidate").not())
-        .stdout(predicates::str::contains("regression").not())
-        .stderr(predicates::str::contains("cluster").not())
-        .stderr(predicates::str::contains("baseline").not())
-        .stderr(predicates::str::contains("candidate").not());
+        .stderr(predicates::str::contains("Result:").not())
+        .stderr(predicates::str::contains("cluster").not());
 }
 
 // ---------------------------------------------------------------------
-// Genuine cluster lifecycle, through a stubbed `kind` (Task 1.10).
+// Genuine cluster lifecycle, through stubbed host tools.
 //
-// `KindClusterManager::create`/`delete` invoke only `kind` — never
-// `kubectl`/`helm`/`docker` — so this section's stub `PATH` needs only a
-// `kind` stand-in.
+// The pipeline's prerequisite gate probes all four tools before it
+// creates anything, so the stub `PATH` provides all four; `kind` is the
+// only one whose behavior beyond `version` matters here, because these
+// configurations declare no components for `helm`/`kubectl` to install.
 // ---------------------------------------------------------------------
 
 /// A fresh, guaranteed-unique scratch directory under the OS temp dir.
@@ -235,10 +236,25 @@ fn write_raw_stub(dir: &Path, name: &str, script: &str) {
 /// Every invocation is appended to the returned invocations-log path
 /// (one line, the full argv, per call) so a test can assert exactly
 /// which clusters were created and/or deleted.
+///
+/// `kubectl`, `helm`, and `docker` stand-ins are written alongside it,
+/// answering only the version probes `admissionlab_core::probe_tool`
+/// makes, so the pipeline's prerequisite gate passes on a `PATH` that
+/// contains nothing real. Their exact output shapes are the ones
+/// `admissionlab-core`'s own `tests/tool.rs` validated against the real
+/// tools.
 fn kind_stub_dir(label: &str) -> (PathBuf, PathBuf) {
     let dir = unique_stub_dir(label);
     let invocations_log = dir.join("kind-invocations.log");
     std::fs::write(&invocations_log, "").expect("create invocations log");
+
+    write_raw_stub(
+        &dir,
+        "kubectl",
+        "#!/bin/sh\nprintf '{\"clientVersion\":{\"gitVersion\":\"v1.36.4\"}}'\n",
+    );
+    write_raw_stub(&dir, "helm", "#!/bin/sh\nprintf 'v3.15.2'\n");
+    write_raw_stub(&dir, "docker", "#!/bin/sh\nprintf '\"27.5.0\"\\n'\n");
 
     let kind_script = format!(
         "#!/bin/sh\n\
@@ -278,30 +294,60 @@ fn stub_kind_verbs(invocations_log: &Path) -> Vec<String> {
         .collect()
 }
 
+/// Writes one minimal, valid fixture under `dir/fixtures/`, so a
+/// configuration written by [`write_lab_config`] (whose include pattern
+/// is `fixtures/**/*.yaml`) actually selects something.
+///
+/// A lab with no fixtures is refused outright as invalid input — a run
+/// that replayed nothing must never exit 0 — so every test below that
+/// needs the pipeline to get past discovery writes one of these.
+fn write_fixture(dir: &Path) {
+    let fixtures = dir.join("fixtures");
+    std::fs::create_dir_all(&fixtures).expect("failed to create fixtures dir");
+    std::fs::write(
+        fixtures.join("pod.yaml"),
+        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: probe\nspec:\n  containers:\n\
+         \x20\x20\x20\x20- name: app\n      image: registry.k8s.io/pause:3.10\n",
+    )
+    .expect("failed to write test fixture");
+}
+
 #[test]
-fn deletes_both_clusters_and_honestly_reports_the_pipeline_gap() {
-    let (dir, invocations_log) = kind_stub_dir("delete-both");
+fn a_capture_failure_still_writes_diagnostics_and_deletes_both_clusters() {
+    // The stub `kind` writes a syntactically valid kubeconfig that names
+    // no cluster at all, so both sides come up, both stacks install
+    // (neither declares a component), and fixture capture then fails on
+    // both sides the moment it tries to reach an API server. That is the
+    // exact shape ROADMAP Task 4.14 steps 3 and 4 are about: a
+    // later-stage failure must still write what it knows *and* still
+    // clean up.
+    let (dir, invocations_log) = kind_stub_dir("capture-failure");
     let config = write_lab_config(&dir, "1.36.4");
+    write_fixture(&dir);
+    let reports = dir.join("artifacts");
 
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.env("PATH", &dir)
         .arg("test")
         .arg(&config)
+        .arg("--report-dir")
+        .arg(&reports)
         .assert()
-        // 6 is `RunDisposition::InternalError`'s discriminant: both
-        // clusters genuinely came up and were torn down, but fixture
-        // execution/comparison — required for any real verdict — are
-        // not implemented yet, so this can never be 0.
-        .code(6)
+        // 5 is `RunDisposition::FixtureFailed`'s discriminant.
+        .code(5)
         .stdout(predicates::str::contains("created baseline cluster"))
-        .stdout(predicates::str::contains("candidate cluster"))
         .stdout(predicates::str::contains("clusters deleted"))
-        // The honesty constraint holds even on the genuine-cluster path:
-        // nothing here may look like a completed, let alone passing, lab.
-        .stdout(predicates::str::contains("PASS").not())
-        .stdout(predicates::str::contains("regression").not())
-        .stderr(predicates::str::contains("not implemented"))
-        .stderr(predicates::str::contains("not a pass or a fail"));
+        // No verdict was reached, so none is printed.
+        .stdout(predicates::str::contains("Result:").not());
+
+    assert!(
+        reports.join("diagnostics.json").is_file(),
+        "a later-stage failure must still leave its diagnostics behind"
+    );
+    assert!(
+        !reports.join("result.json").exists(),
+        "a run that never compared both sides must not write a result claiming a verdict"
+    );
 
     let verbs = stub_kind_verbs(&invocations_log);
     assert_eq!(
@@ -312,7 +358,7 @@ fn deletes_both_clusters_and_honestly_reports_the_pipeline_gap() {
     assert_eq!(
         verbs.iter().filter(|verb| *verb == "delete").count(),
         2,
-        "expected one `kind delete ...` per side (cleanup), got:\n{verbs:?}"
+        "cleanup must still run after a capture failure, got:\n{verbs:?}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -322,6 +368,7 @@ fn deletes_both_clusters_and_honestly_reports_the_pipeline_gap() {
 fn keep_clusters_preserves_both_and_prints_exact_delete_commands() {
     let (dir, invocations_log) = kind_stub_dir("keep-clusters");
     let config = write_lab_config(&dir, "1.36.4");
+    write_fixture(&dir);
 
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.env("PATH", &dir)
@@ -329,7 +376,7 @@ fn keep_clusters_preserves_both_and_prints_exact_delete_commands() {
         .arg(&config)
         .arg("--keep-clusters")
         .assert()
-        .code(6)
+        .code(5)
         .stdout(predicates::str::contains("preserved"))
         .stdout(predicates::str::contains(
             "kind delete cluster --name adlab-baseline-",
@@ -354,14 +401,16 @@ fn keep_clusters_preserves_both_and_prints_exact_delete_commands() {
 }
 
 #[test]
-fn unsupported_kubernetes_version_exits_invalid_input_before_touching_kind() {
-    // A stub `PATH` that would fail loudly if `kind` were ever invoked
-    // (see `kind_stub_dir`'s own `*) exit 1` catch-all) -- this test's
-    // whole point is that it never gets that far, so this also proves
-    // the failure is caught at resolution time, not by a `kind` command
-    // failing.
+fn unsupported_kubernetes_version_exits_invalid_input_before_creating_a_cluster() {
+    // The stub `kind` fails loudly on any verb but `create`/`delete`
+    // (see `kind_stub_dir`'s own `*) exit 1` catch-all), so this test's
+    // point stands: the failure is caught at version-resolution time,
+    // not by a `kind create` that went wrong. `kind version` *is*
+    // invoked first — the prerequisite gate probes it — which is why
+    // this asserts on the verbs rather than on an empty log.
     let (dir, invocations_log) = kind_stub_dir("unsupported-version");
     let config = write_lab_config(&dir, "0.1.0");
+    write_fixture(&dir);
 
     let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
     cmd.env("PATH", &dir)
@@ -377,10 +426,66 @@ fn unsupported_kubernetes_version_exits_invalid_input_before_touching_kind() {
         .stderr(predicates::str::contains("0.1.0"))
         .stdout(predicates::str::contains("created baseline cluster").not());
 
+    let verbs = stub_kind_verbs(&invocations_log);
     assert!(
-        stub_kind_verbs(&invocations_log).is_empty(),
-        "an unresolvable version must be caught before `kind` is ever invoked"
+        verbs.iter().all(|verb| verb != "create"),
+        "an unresolvable version must be caught before any cluster is created, got:\n{verbs:?}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_fixture_selection_that_matches_nothing_exits_invalid_input_before_any_cluster() {
+    // `fixtures.include` is non-empty (that much `resolve_lab` already
+    // enforces), but nothing on disk matches it. A run with nothing to
+    // replay cannot produce a comparison, so it must be refused rather
+    // than pass trivially.
+    let (dir, invocations_log) = kind_stub_dir("no-fixtures");
+    let config = write_lab_config(&dir, "1.36.4");
+
+    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
+    cmd.env("PATH", &dir)
+        .arg("test")
+        .arg(&config)
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("no fixtures matched"))
+        .stderr(predicates::str::contains("fixtures/**/*.yaml"));
+
+    let verbs = stub_kind_verbs(&invocations_log);
+    assert!(
+        verbs.iter().all(|verb| verb != "create"),
+        "nothing to replay must be caught before any cluster is created, got:\n{verbs:?}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_missing_host_tool_exits_invalid_input_and_points_at_doctor() {
+    // A `PATH` with `kind` and nothing else. `admissionlab doctor`
+    // answers this with exit 2 (Task 1.4), and `test` must agree — the
+    // host does not satisfy what the tool documents it needs, which is
+    // the user's to fix, not an infrastructure failure.
+    let dir = unique_stub_dir("missing-tools");
+    write_raw_stub(
+        &dir,
+        "kind",
+        "#!/bin/sh\nprintf 'kind v0.33.0 go1.26.7 linux/amd64\\n'\n",
+    );
+    let config = write_lab_config(&dir, "1.36.4");
+    write_fixture(&dir);
+
+    let mut cmd = assert_cmd::Command::cargo_bin("admissionlab").unwrap();
+    cmd.env("PATH", &dir)
+        .arg("test")
+        .arg(&config)
+        .assert()
+        .code(2)
+        .stderr(predicates::str::contains("host prerequisites are not met"))
+        .stderr(predicates::str::contains("admissionlab doctor"))
+        .stdout(predicates::str::contains("created baseline cluster").not());
 
     let _ = std::fs::remove_dir_all(&dir);
 }

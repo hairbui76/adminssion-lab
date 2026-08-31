@@ -153,7 +153,7 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
 use admissionlab_core::{
@@ -805,6 +805,29 @@ fn rfc3339(time: SystemTime) -> Option<String> {
 /// dependency direction this whole trait exists to respect), so
 /// discovery happens in the caller and its result is handed to this type
 /// once, for both sides.
+///
+/// # Why it also retains every [`AdmissionOutcome`] it captured
+///
+/// [`KubeFixtureCapture::captured_outcomes`] hands back, in capture
+/// order, the very outcomes this capture observed. That is not a
+/// convenience: it is the only way a caller can obtain them.
+///
+/// - `admissionlab_core::CapturedFixture` — what
+///   [`FixtureCapture::capture_side`]'s core-visible return type carries
+///   — deliberately holds *paths* and nothing else, because
+///   `admissionlab-core` cannot name [`AdmissionOutcome`] without the
+///   `core -> admission` edge that would close a dependency cycle (see
+///   `admissionlab_core::run`'s own module documentation).
+/// - `outcome.json` cannot be read back to recover it either:
+///   [`AdmissionOutcome`] implements `Serialize` and deliberately not
+///   `Deserialize` (its `diagnostics` are `admissionlab_core::Diagnostic`
+///   values, a one-way, emit-only vocabulary whose `[REDACTED]` rendering
+///   has no faithful inverse — see that type's own documentation).
+///
+/// So the comparison stage — Phase 4's normalize/diff/report pipeline,
+/// wired in `admissionlab-cli` by Task 4.14 — receives the outcomes from
+/// the capture implementation it constructed, rather than by re-reading
+/// an artifact that was never designed to round-trip.
 pub struct KubeFixtureCapture {
     /// The fixtures to replay, in discovery order.
     fixtures: Vec<FixtureSource>,
@@ -823,6 +846,13 @@ pub struct KubeFixtureCapture {
     /// disables metric collection entirely: no `.prom` artifacts, and
     /// every observed latency stays `None`.
     metrics: Option<Arc<dyn AdmissionMetricsSource>>,
+    /// Every outcome captured so far, in capture order — see this type's
+    /// documentation for why they are retained. Behind a [`Mutex`]
+    /// because [`FixtureCapture::capture_side`] takes `&self` and is
+    /// driven concurrently for both sides by
+    /// `admissionlab_core::LabRunner::capture_fixtures`; the lock is only
+    /// ever held for one `push`, never across an `await`.
+    outcomes: Mutex<Vec<AdmissionOutcome>>,
 }
 
 impl std::fmt::Debug for KubeFixtureCapture {
@@ -858,6 +888,7 @@ impl KubeFixtureCapture {
             resolver: Arc::new(admissionlab_fixtures::KubeResourceResolver::new()),
             executor: Arc::new(KubeAdmissionExecutor::new()),
             metrics: None,
+            outcomes: Mutex::new(Vec::new()),
         }
     }
 
@@ -888,6 +919,32 @@ impl KubeFixtureCapture {
     #[must_use]
     pub fn fixtures(&self) -> &[FixtureSource] {
         &self.fixtures
+    }
+
+    /// Every [`AdmissionOutcome`] this capture has produced so far, in
+    /// the order it produced them (both sides interleaved — each
+    /// outcome names its own [`AdmissionOutcome::side`] and
+    /// `fixture_id`, so a caller pairs them by those rather than by
+    /// position).
+    ///
+    /// See this type's documentation for why the outcomes are retained
+    /// here at all rather than being recovered from
+    /// `admissionlab_core::CapturedFixture` or from `outcome.json`.
+    ///
+    /// Also populated on a *failed* `capture_side`: every fixture
+    /// captured before the failing one is still a real observation, and
+    /// a caller writing whatever evidence exists before it gives up
+    /// (Task 4.14 step 3) needs exactly those.
+    #[must_use]
+    pub fn captured_outcomes(&self) -> Vec<AdmissionOutcome> {
+        // Never panics on a poisoned lock: a panic in some other
+        // fixture's capture must not also destroy the evidence this one
+        // already collected, which is precisely what this accessor
+        // exists to hand back on a failure path.
+        self.outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 }
 
@@ -922,6 +979,14 @@ impl FixtureCapture for KubeFixtureCapture {
             let artifact_dir = write_evidence(&self.store, paths, &evidence)
                 .await
                 .map_err(|error| capture_error(fixture, &error))?;
+
+            // Recorded after the bundle is written, so an outcome this
+            // accessor hands back is always one whose evidence is also
+            // on disk. The guard is dropped before the next `await`.
+            self.outcomes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(evidence.outcome.clone());
 
             captured.push(CapturedFixture {
                 fixture_id: fixture.id.clone(),

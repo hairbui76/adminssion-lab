@@ -122,14 +122,13 @@
 //! `admissionlab-cluster`'s own crate-specific errors that this crate
 //! cannot name either.
 //!
-//! No caller in this workspace constructs a real [`StackInstaller`] yet
-//! (that is CLI wiring, deliberately out of scope for Task 2.6 — see
-//! `admissionlab-cli`'s `commands::test` module documentation); this
-//! trait and [`LabRunner::install_stacks`] exist so a later caller has
-//! one, tested, DRY entry point for "both sides, concurrently, in
+//! `admissionlab-cli`'s `pipeline::install::KubeStackInstaller` is the
+//! concrete implementation (Task 4.14), delegating to
+//! `admissionlab_installer::stack::install_stack` exactly as described
+//! above. [`LabRunner::install_stacks`] exists so that caller has one,
+//! tested, DRY entry point for "both sides, concurrently, in
 //! deterministic per-side order" rather than needing to hand-write its
-//! own `tokio::join!` over `admissionlab_installer::stack::install_stack`
-//! every time.
+//! own `tokio::join!` over that function every time.
 //!
 //! # Fixture capture (Task 3.10): [`FixtureCapture`]
 //!
@@ -189,17 +188,51 @@
 //! caller cannot accidentally present it as a lab result: it holds no
 //! verdict field to misread, and
 //! [`crate::artifact::RunDisposition::Passed`] is not
-//! reachable from it. Phase 4 is what turns a [`CapturedLab`] into a
-//! comparison, by reading the `outcome.json` files it points at.
+//! reachable from it.
 //!
-//! As with [`StackInstaller`] before it, no caller in this workspace
-//! constructs a real [`FixtureCapture`] yet: `admissionlab test` still
-//! stops after cluster creation (see `admissionlab-cli`'s
-//! `commands::test` module documentation for the honesty constraint that
-//! keeps it from claiming otherwise), and wiring the full
-//! prepare → install → capture → compare chain into the CLI is Task
-//! 4.14's job. `admissionlab-admission`'s own `tests/kind_capture.rs`
-//! drives this method against a real `kind` cluster today.
+//! `admissionlab_admission::capture::KubeFixtureCapture` is the concrete
+//! implementation; `admissionlab-admission`'s own `tests/kind_capture.rs`
+//! drives this method against a real `kind` cluster.
+//!
+//! # Where the rest of the run lives, and why it is not here (Task 4.14)
+//!
+//! [`LabRunner`] takes a run as far as [`CapturedLab`] and no further.
+//! The second half — normalize, semantic diff, first divergence, policy
+//! and expectations, redact, render terminal/JSON/HTML — is assembled in
+//! `admissionlab-cli`'s own `pipeline` module, not in this crate, and
+//! that is a hard constraint rather than a preference.
+//!
+//! Every crate that half needs is *downstream* of this one:
+//! `admissionlab-diff` depends on `admissionlab-admission`, which
+//! depends on `admissionlab-fixtures`, which depends on
+//! `admissionlab-core`; `admissionlab-policy` depends on
+//! `admissionlab-diff`; `admissionlab-report` depends on all three. So a
+//! `core -> policy` (or `core -> diff`, or `core -> report`) edge would
+//! close `core -> policy -> diff -> admission -> fixtures -> core`, a
+//! cycle Cargo rejects outright — the same shape Controller Ruling R22
+//! already forced [`ClusterManager`] to live here for, arriving at the
+//! opposite answer because the direction is reversed: R22 pulls an
+//! abstraction *up* into `core` so `LabRunner` can drive it, while the
+//! comparison stage needs concrete types `core` can never name, so it
+//! settles *above* every crate that owns one. `admissionlab-cli` is that
+//! place: it already depends on everything, and nothing depends on it,
+//! so its edges cannot become part of a cycle either way.
+//!
+//! Two consequences a reader of this module should know:
+//!
+//! - **[`CapturedFixture`] deliberately carries no outcome, and that is
+//!   not the caller's loss.** The comparison stage gets each
+//!   `AdmissionOutcome` from the [`FixtureCapture`] implementation it
+//!   constructed (`KubeFixtureCapture::captured_outcomes`), not by
+//!   re-reading `outcome.json` — which is emit-only by design and does
+//!   not round-trip. Adding an outcome-shaped field here would require
+//!   exactly the dependency edge above.
+//! - **Nothing in this crate decides a lab's verdict.**
+//!   [`crate::artifact::RunDisposition`] is declared here because the
+//!   run's own failure modes are, but the mapping from each pipeline
+//!   error to a disposition (and from a disposition to a process exit
+//!   code) lives in `admissionlab-cli`'s `exit` module, where every one
+//!   of those error types is nameable at once.
 
 use std::collections::BTreeMap;
 use std::fmt;
