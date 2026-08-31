@@ -32,6 +32,11 @@
 //!   byte-deterministic, and why it mirrors
 //!   `admissionlab_core::ArtifactStore`'s atomic write rather than
 //!   calling it.
+//! - [`github`] holds [`render_github_summary`], the capped Markdown a
+//!   GitHub Actions job summary shows in the pull request. Its module
+//!   documentation covers why it is the one renderer that deliberately
+//!   shows less than everything, the byte budget the caps buy, and why
+//!   escaping is a security property rather than a cosmetic one there.
 //! - [`html`] holds [`write_html_report`], the standalone page a human
 //!   drills into. Its module documentation covers what "self-contained"
 //!   guarantees, why there is no templating dependency and no
@@ -72,6 +77,7 @@
 //! [`FixtureComparison::bucket`]: model::FixtureComparison::bucket
 
 pub mod error;
+pub mod github;
 pub mod html;
 pub mod json;
 pub mod model;
@@ -79,6 +85,10 @@ pub mod redact;
 pub mod terminal;
 
 pub use error::ReportError;
+pub use github::{
+    MAX_CELL_CHARS, MAX_LISTED_FINDINGS, SUMMARY_BYTE_BUDGET, escape_markdown,
+    render_github_summary,
+};
 pub use html::{escape_html, render_html, write_html_report};
 pub use json::{render_json, write_json_report};
 pub use model::{
