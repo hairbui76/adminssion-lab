@@ -65,6 +65,7 @@ fn recipe_loads_and_validates_through_the_public_loader() {
         "00-namespace.yaml",
         "10-rbac.yaml",
         "20-webhook-configuration.yaml",
+        "21-mutating-webhook-configurations.yaml",
         "30-deployment.yaml",
     ];
     assert_eq!(manifests.paths.len(), expected_files.len());
@@ -104,20 +105,30 @@ fn recipe_loads_and_validates_through_the_public_loader() {
             ReadinessCheck::WebhookConfigurationPresent {
                 name: "admissionlab-test-webhook".to_owned(),
             },
+            ReadinessCheck::WebhookConfigurationPresent {
+                name: "admissionlab-test-webhook-mutate-containers".to_owned(),
+            },
+            ReadinessCheck::WebhookConfigurationPresent {
+                name: "admissionlab-test-webhook-mutate-labels".to_owned(),
+            },
         ],
-        "readiness must gate on both Deployment availability and the webhook configuration \
-         object existing -- a Deployment that is Available with no webhook configuration yet is \
-         not usable"
+        "readiness must gate on Deployment availability and on *every* webhook configuration \
+         object existing -- with failurePolicy: Fail on all three, a fixture submitted while one \
+         of them is still missing gets a quietly different answer rather than an error"
     );
 
+    // Claimed as of Task 3.9, and only because it is now true: this
+    // recipe installs real mutating and validating webhook
+    // configurations backed by a server that answers admission reviews
+    // (`crates/admissionlab-test-webhook/tests/behavior.rs` is the
+    // regression test for the behavior itself). Task 2.7's version of
+    // this test asserted the opposite for exactly the same reason --
+    // Global Constraint 15: never claim a capability the component does
+    // not functionally provide.
     assert!(
-        recipe.capabilities.is_empty(),
-        "this recipe must not yet claim Capability::Admission -- Task 3.9 implements the \
-         admission-review handling that would make that claim true"
-    );
-    assert!(
-        !recipe.capabilities.contains(&Capability::Admission),
-        "explicit check for the specific capability a reader might expect, not only emptiness"
+        recipe.capabilities.contains(&Capability::Admission),
+        "this recipe installs a working admission webhook, so it must claim \
+         Capability::Admission"
     );
     assert!(recipe.normalize_rules.is_empty());
 }

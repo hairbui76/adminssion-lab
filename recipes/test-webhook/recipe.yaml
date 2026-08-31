@@ -1,5 +1,5 @@
 # Admission Lab's own deterministic dogfood admission webhook
-# (PRODUCT.md §30, Task 2.7) — see `crates/admissionlab-test-webhook`'s
+# (PRODUCT.md §30, Tasks 2.7 and 3.9) — see `crates/admissionlab-test-webhook`'s
 # own module documentation for what it does and why it exists: a
 # component whose admission behavior is *known and deterministic*, so
 # Admission Lab's own test suite never breaks for reasons that are
@@ -21,7 +21,7 @@
 # relative `install.paths` entry against the directory the recipe file
 # itself was found in — mirroring `admissionlab_spec::resolve_lab`'s own
 # established pattern for a lab file's relative paths (Task 2.10). So
-# the four `manifests/...` entries below are plain, literal, relative
+# the five `manifests/...` entries below are plain, literal, relative
 # paths: loading this file completely unmodified (for example pointing
 # `load_recipe_overrides` directly at this directory, exactly what
 # `crates/admissionlab-test-webhook/tests/recipe_loads.rs` and
@@ -35,17 +35,18 @@
 # documentation for exactly what that confinement does and does not
 # stop.
 #
-# No `capabilities:` yet, deliberately: this recipe does not yet claim
-# `admission` (PRODUCT.md §14 / `admissionlab_spec::Capability::Admission`)
-# because the webhook it installs implements no admission-review request
-# handling at all in Phase 2 (see
-# `crates/admissionlab-test-webhook/src/serve.rs`'s own module
-# documentation) and its `namespaceSelector` never routes a request to it
-# regardless (`manifests/20-webhook-configuration.yaml`) — claiming a
-# capability this component does not yet functionally provide would be
-# exactly the kind of fabrication Global Constraint 15 rules out. Task
-# 3.9, which implements that behavior for real, is the right place to add
-# it.
+# `capabilities: [admission]` is claimed as of Task 3.9, and not before.
+# Task 2.7 deliberately left it off: the webhook implemented no
+# admission-review handling at all and its `namespaceSelector` routed
+# nothing to it, so claiming a capability the component did not
+# functionally provide would have been exactly the fabrication Global
+# Constraint 15 rules out. Both halves of that are now true —
+# `crates/admissionlab-test-webhook/src/{behavior,mutate,validate}.rs`
+# implement PRODUCT.md §30's controlled behaviors, and
+# `manifests/20-webhook-configuration.yaml` plus
+# `manifests/21-mutating-webhook-configurations.yaml` really do route
+# fixture pods to them — so the claim is now a statement of fact
+# (PRODUCT.md §14 / `admissionlab_spec::Capability::Admission`).
 name: test-webhook
 version: 0.1.0
 install:
@@ -54,6 +55,7 @@ install:
     - manifests/00-namespace.yaml
     - manifests/10-rbac.yaml
     - manifests/20-webhook-configuration.yaml
+    - manifests/21-mutating-webhook-configurations.yaml
     - manifests/30-deployment.yaml
 readiness:
   # Gates on the Deployment actually being Available (Task 2.4) --not
@@ -62,12 +64,27 @@ readiness:
   # comments for why that object is applied directly by this recipe
   # rather than created at runtime the way a real controller like
   # Kyverno's would be). A Deployment that is Available but whose webhook
-  # configuration does not yet exist is not usable -- and the reverse
-  # (webhook configuration present, Deployment not yet Available) is
+  # configurations do not yet exist is not usable -- and the reverse
+  # (webhook configurations present, Deployment not yet Available) is
   # exactly the ordering `admissionlab-installer::readiness`'s own module
   # documentation warns a readiness model must not silently accept.
+  #
+  # All three webhook configuration objects are named, not just the
+  # validating one: with `failurePolicy: Fail` on every webhook, a
+  # fixture submitted while one configuration is missing gets a
+  # different (and quietly wrong) result rather than an error, so
+  # "installed" has to mean all of them. `webhookConfigurationPresent`
+  # looks up the validating kind first and then the mutating kind
+  # (`admissionlab_installer::readiness`), so one check type covers
+  # both.
   - type: deploymentAvailable
     namespace: admissionlab-test-webhook
     name: admissionlab-test-webhook
   - type: webhookConfigurationPresent
     name: admissionlab-test-webhook
+  - type: webhookConfigurationPresent
+    name: admissionlab-test-webhook-mutate-containers
+  - type: webhookConfigurationPresent
+    name: admissionlab-test-webhook-mutate-labels
+capabilities:
+  - admission

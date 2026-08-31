@@ -1,47 +1,87 @@
-# A `ValidatingWebhookConfiguration` with no working admission-review
-# handler behind it yet — see `crates/admissionlab-test-webhook/src/serve.rs`'s
-# own module documentation: PRODUCT.md §30's controlled behaviors (allow,
-# deny, add label, add/remove container, and so on) are Task 3.9's job,
-# not this task's. This object exists now, applied with `caBundle`
-# omitted entirely (a Kubernetes-valid state — the API falls back to the
-# apiserver's own system trust roots, which will never trust the
-# self-signed certificate this recipe generates; irrelevant here, since
-# `namespaceSelector` below means nothing ever calls this webhook during
-# Phase 2 regardless), purely so that:
+# The validating half of this recipe's admission surface: the one
+# `ValidatingWebhookConfiguration` behind
+# `crates/admissionlab-test-webhook/src/validate.rs`. It answers
+# `test.admissionlab.io/deny`, `.../delay-ms` and `.../fail` — and, as
+# `crates/admissionlab-test-webhook/src/behavior.rs` documents, denies
+# any fixture carrying an annotation under `test.admissionlab.io/` that
+# it cannot parse.
 #
-#   - Task 2.4's `webhookConfigurationPresent` readiness check
-#     (`recipe.yaml`) has a real object to observe. A webhook
-#     configuration is created at *runtime* by many real controllers
-#     (Kyverno among them — see `admissionlab-installer::readiness`'s own
-#     module documentation), so a readiness model that only waits on
-#     chart/manifest-installed objects would not reflect real-world
-#     webhook lifecycles; this recipe's own manifest installs it
-#     directly instead, but the check still needs a real object to find.
-#   - the `bootstrap` init container
-#     (`crates/admissionlab-test-webhook/src/bootstrap.rs`) has an
-#     already-applied object to update with a real `caBundle` — proving
-#     that path end to end now, ready for Task 3.9 to build real
-#     admission-review handling on top of unchanged.
+# Task 2.7 applied this object as a deliberately inert placeholder (no
+# handler behind it, a `namespaceSelector` nothing matched, and
+# `failurePolicy: Ignore` as a second layer). Task 3.9 makes it real:
+# there is a `/validate` route now, and the `failurePolicy` below is
+# `Fail`. Everything that changed is a change of *intent*, not of
+# blast radius — the scoping rules that made it unable to touch anything
+# outside this repository's own fixtures are unchanged and are, if
+# anything, the load-bearing part now that the handler exists.
 #
-# `install.paths` in `recipe.yaml` applies this file *before*
-# `30-deployment.yaml`, so in the common case this object already exists
-# by the time the bootstrap init container starts; `bootstrap` mode does
-# not assume that ordering held regardless (it retries a "not found"
-# lookup — see that module's own documentation).
+# The mutating half lives in `21-mutating-webhook-configurations.yaml`
+# (two configurations, for reinvocation); that file's comments explain
+# why they are split and why the split is what makes reinvocation
+# testable at all.
 #
-# # Why this webhook can never actually fire during Phase 2
+# `caBundle` is omitted here, exactly as it was: it is filled in at
+# runtime by the `bootstrap` init container
+# (`crates/admissionlab-test-webhook/src/bootstrap.rs`), which patches
+# this object *and* both mutating configurations with the CA it
+# generates for this cluster. Omitting the field is a Kubernetes-valid
+# state (the API server falls back to its own system trust roots, which
+# will never trust a freshly generated self-signed CA), so between
+# `kubectl apply` and the init container's `replace` this webhook simply
+# cannot be called successfully — with `failurePolicy: Fail` that would
+# reject a matching request, which is why the recipe's own readiness
+# gate (`deploymentAvailable`, which cannot pass until the init
+# container has finished) is what callers wait on before creating any
+# fixture.
 #
-# Two independent, deliberately redundant layers, so neither one alone
-# has to be perfectly relied on:
+# # What this webhook can and cannot intercept
 #
-#   1. `namespaceSelector` requires the opt-in label below. Nothing in
-#      this repository's own Phase 2 tests creates a namespace carrying
-#      it, so the API server never even considers routing a request
-#      here — structural, not merely "there is no handler yet".
-#   2. `failurePolicy: Ignore`: even a request that somehow matched
-#      anyway, calling a server with no route for `/validate` at all
-#      (`serve` mode implements only `GET /healthz`), is treated as
-#      "webhook skipped" rather than a cluster-wide admission failure.
+# Three independent layers, in the order the API server evaluates them:
+#
+#   1. `namespaceSelector` requires an explicit opt-in label on the
+#      *namespace*. `kube-system`, `kube-node-lease`, `kube-public`,
+#      `local-path-storage` and this recipe's own
+#      `admissionlab-test-webhook` namespace (`00-namespace.yaml`, which
+#      deliberately does not carry the label) can therefore never route
+#      a pod here, no matter what the pod itself looks like. That
+#      exclusion is structural rather than a denylist that a future
+#      Kubernetes release could add a new system namespace to. It also
+#      rules out the one genuinely dangerous shape a `failurePolicy:
+#      Fail` webhook can take: this webhook can never block the
+#      recreation of its own backing pod, because that pod's namespace
+#      is not opted in.
+#   2. `rules` narrows to `v1` `Pod` `CREATE`/`UPDATE` — the only
+#      resource Admission Lab's Alpha fixtures submit
+#      (`admissionlab-fixtures`), and `scope: Namespaced` so a
+#      cluster-scoped object never reaches it.
+#   3. `matchPolicy: Equivalent` so a request arriving through some
+#      other API version of the same resource is still matched, rather
+#      than silently bypassing the webhook — the safe direction for a
+#      component whose purpose is to be *observed*.
+#
+# # `failurePolicy: Fail`
+#
+# The opposite of Task 2.7's `Ignore`, and deliberately so. This webhook
+# exists to make behavior observable; `Ignore` would convert every
+# webhook outage — an unready pod, an expired certificate, a timeout —
+# into a silent allow, which is indistinguishable in a captured result
+# from "the stack chose to allow this". Global Constraint 15 rules that
+# out: unavailable is not the same as allowed. `Fail` also makes
+# `test.admissionlab.io/fail: "true"` mean something — a fixture can
+# manufacture a webhook-call failure and see the API server reject the
+# request, which is a distinct outcome from a deny and is exactly the
+# kind of regression Admission Lab is built to catch.
+#
+# # `timeoutSeconds: 10` and `delay-ms`
+#
+# Chosen against the delay vocabulary, not picked round: a fixture
+# asking for a delay at or under 10 000 ms gets a normal, if slow,
+# admission response, and a fixture asking for more than that
+# deliberately manufactures a webhook *timeout* (which `failurePolicy:
+# Fail` then turns into a rejection). `behavior::MAX_DELAY_MS` is 60 000
+# ms, comfortably above this, so that second case is reachable on
+# purpose rather than only by accident. Kubernetes caps this field at 30
+# seconds regardless.
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingWebhookConfiguration
 metadata:
@@ -51,10 +91,18 @@ metadata:
 webhooks:
   - name: validate.test-webhook.admissionlab.dev
     admissionReviewVersions: ["v1"]
+    # This webhook mutates no cluster state of its own — it reads the
+    # object in the request and answers. `None` is therefore literally
+    # true, not merely the least restrictive value that works, which
+    # matters because the API server is allowed to skip a webhook
+    # declaring side effects during a dry-run request, and Global
+    # Constraint 16 makes server-side dry-run the authoritative fixture
+    # execution mode for Alpha: a wrong value here would make this
+    # webhook invisible to every fixture Admission Lab actually runs.
     sideEffects: None
     matchPolicy: Equivalent
-    failurePolicy: Ignore
-    timeoutSeconds: 5
+    failurePolicy: Fail
+    timeoutSeconds: 10
     namespaceSelector:
       matchLabels:
         admissionlab.dev/test-webhook: "enabled"
@@ -63,9 +111,15 @@ webhooks:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["pods"]
+        scope: "Namespaced"
     clientConfig:
       service:
         name: admissionlab-test-webhook
         namespace: admissionlab-test-webhook
+        # Must equal `admissionlab_test_webhook::serve::VALIDATE_PATH`.
+        # `crates/admissionlab-test-webhook/tests/behavior.rs` asserts
+        # exactly that against this file, so a rename on either side
+        # fails a cluster-free test rather than surfacing as every
+        # fixture's request being rejected by a 404.
         path: /validate
         port: 443

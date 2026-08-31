@@ -77,6 +77,16 @@ spec:
             # `metadata.name` exactly.
             - name: ADMISSIONLAB_TEST_WEBHOOK_WEBHOOK_CONFIGURATION_NAME
               value: admissionlab-test-webhook
+            # Comma-separated; must list every `metadata.name` in
+            # `21-mutating-webhook-configurations.yaml`, and match
+            # `10-rbac.yaml`'s `resourceNames` for
+            # `mutatingwebhookconfigurations`. The init container
+            # patches each one's `caBundle` in turn and fails the pod if
+            # any of them is missing, so a name added here but not to
+            # the RBAC rule (or vice versa) fails loudly at install time
+            # rather than leaving one webhook silently untrusted.
+            - name: ADMISSIONLAB_TEST_WEBHOOK_MUTATING_WEBHOOK_CONFIGURATION_NAMES
+              value: admissionlab-test-webhook-mutate-containers,admissionlab-test-webhook-mutate-labels
           volumeMounts:
             - name: certs
               mountPath: /certs

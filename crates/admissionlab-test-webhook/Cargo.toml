@@ -8,6 +8,14 @@ repository.workspace = true
 [lints]
 workspace = true
 
+# A library as well as a binary since Task 3.9 — see `src/lib.rs`'s own
+# module documentation for why (`tests/behavior.rs` has to reach the
+# route constants and the request handler; `src/main.rs` is a thin
+# `clap` front end over this library).
+[lib]
+name = "admissionlab_test_webhook"
+path = "src/lib.rs"
+
 [[bin]]
 name = "admissionlab-test-webhook"
 path = "src/main.rs"
@@ -43,6 +51,19 @@ hyper-util = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }
 tokio-rustls = { workspace = true }
+# Task 3.9's admission-review handling: `serde` derives the four
+# hand-written wire structs in `src/serve.rs` (see that module's own
+# documentation for why they are hand-written rather than taken from
+# `kube::core::admission`), and `serde_json` both parses the incoming
+# object and builds the RFC 6902 patch operations `src/mutate.rs`
+# emits. Both were already workspace dependencies and already in
+# `Cargo.lock` -- `serde_json` was already a dev-dependency of this very
+# crate -- so neither adds a crate to the resolved graph. The base64
+# encoding `AdmissionResponse.patch` needs on the wire comes from
+# `k8s-openapi`'s own `ByteString` (already a dependency, above), not
+# from a new `base64` entry.
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
 tracing = { workspace = true }
@@ -66,7 +87,18 @@ admissionlab-installer = { workspace = true }
 admissionlab-cluster = { workspace = true }
 admissionlab-core = { workspace = true }
 admissionlab-spec = { workspace = true }
-# `bundle.documents` (above) is `Vec<serde_json::Value>` --
-# `deployment_replicas_is_pinned_to_one` reads `spec.replicas` back out
-# of it via `serde_json::Value`'s own inherent methods directly.
-serde_json = { workspace = true }
+# `test-util` gives `src/validate.rs`'s own tests Tokio's paused clock
+# (`#[tokio::test(start_paused = true)]`), so a fixture's controlled
+# delay -- up to `behavior::MAX_DELAY_MS`, a full minute -- is asserted
+# in full without any wall-clock cost (Task 3.9 Step 2). A
+# dev-dependency only: nothing in the shipped binary needs it, and the
+# feature must not reach the image. The other features repeat the
+# `[dependencies]` entry's because Cargo unifies the two, not because
+# they are needed twice.
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "test-util",
+] }

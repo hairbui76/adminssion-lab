@@ -14,11 +14,16 @@
 //! drives it through the real Task 2.4/2.6 install-and-wait pipeline
 //! (`admissionlab_installer::install_stack`); and — beyond what
 //! `install_stack`'s own success already proves — independently confirms
-//! the `bootstrap` init container actually did its job by fetching the
-//! live `ValidatingWebhookConfiguration` and checking its `caBundle` is
-//! now populated with real PEM certificate text, not merely that the
-//! object exists (which `install_stack`'s own `webhookConfigurationPresent`
-//! readiness check already established).
+//! the `bootstrap` init container actually did its job by fetching every
+//! live webhook configuration the recipe declares (Task 3.9 added two
+//! `MutatingWebhookConfiguration`s alongside the original
+//! `ValidatingWebhookConfiguration`) and checking each one's `caBundle`
+//! is now populated with real PEM certificate text, not merely that the
+//! objects exist (which `install_stack`'s own `webhookConfigurationPresent`
+//! readiness checks already established). With `failurePolicy: Fail` on
+//! all three, one un-patched `caBundle` would fail every fixture
+//! request routed to it, so "the validating one is fine" is no longer a
+//! sufficient check.
 //!
 //! What this test does *not* separately verify: that `/healthz` itself
 //! returns `200 OK` to an outside caller. `install_stack`'s own
@@ -45,7 +50,9 @@ use admissionlab_core::{
 use admissionlab_installer::{KubeReadinessProbe, ManifestsInstaller, install_stack};
 use admissionlab_recipes::load_recipe_overrides;
 use admissionlab_spec::{ReadinessCheck, ResolvedComponent};
-use k8s_openapi::api::admissionregistration::v1::ValidatingWebhookConfiguration;
+use k8s_openapi::api::admissionregistration::v1::{
+    MutatingWebhookConfiguration, ValidatingWebhookConfiguration,
+};
 use kube::api::Api;
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::{Client, Config};
@@ -199,24 +206,27 @@ async fn install_and_verify(
         .into_iter()
         .next()
         .ok_or_else(|| "recipe.yaml produced no recipes".to_string())?;
-    // The K8s object name a `webhookConfigurationPresent` readiness
-    // check names -- not `recipe.name` (the recipe's own identifier,
-    // "test-webhook", a different string entirely from the
-    // `ValidatingWebhookConfiguration` object's own `metadata.name`,
-    // "admissionlab-test-webhook"). Read from the recipe's own declared
-    // readiness checks rather than assumed, so this assertion stays
-    // correct even if the object's name ever changes without this test
-    // file being updated by hand.
-    let webhook_configuration_name = recipe
+    // The K8s object names the `webhookConfigurationPresent` readiness
+    // checks name -- not `recipe.name` (the recipe's own identifier,
+    // "test-webhook", a different string entirely from any webhook
+    // configuration object's own `metadata.name`). Read from the
+    // recipe's own declared readiness checks rather than assumed, so
+    // this assertion stays correct as objects are renamed or added
+    // without this test file being updated by hand -- Task 3.9's two
+    // mutating configurations were picked up here for free.
+    let webhook_configuration_names: Vec<String> = recipe
         .readiness
         .iter()
-        .find_map(|check| match check {
+        .filter_map(|check| match check {
             ReadinessCheck::WebhookConfigurationPresent { name } => Some(name.clone()),
             _ => None,
         })
-        .ok_or_else(|| {
-            "recipe.yaml declares no webhookConfigurationPresent readiness check".to_string()
-        })?;
+        .collect();
+    if webhook_configuration_names.is_empty() {
+        return Err(
+            "recipe.yaml declares no webhookConfigurationPresent readiness check".to_string(),
+        );
+    }
 
     let component = ResolvedComponent {
         name: recipe.name,
@@ -246,7 +256,7 @@ async fn install_and_verify(
         return Err(format!("unexpected InstalledStack contents: {installed:?}"));
     }
 
-    assert_ca_bundle_populated(cluster, &webhook_configuration_name).await?;
+    assert_ca_bundles_populated(cluster, &webhook_configuration_names).await?;
 
     let _ = tokio::fs::remove_dir_all(&run_paths_root).await;
     Ok(())
@@ -311,12 +321,21 @@ async fn prepare_run_paths() -> Result<(PathBuf, RunPaths), String> {
     Ok((root, paths))
 }
 
-/// Fetches the named `ValidatingWebhookConfiguration` from `cluster` and
-/// confirms its `caBundle` was actually populated by the `bootstrap`
-/// init container — not merely that the object exists (that much is
-/// already covered by `install_stack`'s own `webhookConfigurationPresent`
-/// readiness check).
-async fn assert_ca_bundle_populated(cluster: &ClusterHandle, name: &str) -> Result<(), String> {
+/// Fetches each named webhook configuration from `cluster` and confirms
+/// its `caBundle` was actually populated by the `bootstrap` init
+/// container — not merely that the object exists (that much is already
+/// covered by `install_stack`'s own `webhookConfigurationPresent`
+/// readiness checks).
+///
+/// Each name is looked up as a `ValidatingWebhookConfiguration` first
+/// and then as a `MutatingWebhookConfiguration`, exactly as
+/// `admissionlab_installer::readiness` resolves the same check type, so
+/// the recipe's readiness list stays the single place object names are
+/// written.
+async fn assert_ca_bundles_populated(
+    cluster: &ClusterHandle,
+    names: &[String],
+) -> Result<(), String> {
     let kubeconfig = Kubeconfig::read_from(&cluster.kubeconfig)
         .map_err(|error| format!("failed to read kubeconfig: {error}"))?;
     let config = Config::from_custom_kubeconfig(kubeconfig, &KubeConfigOptions::default())
@@ -325,30 +344,65 @@ async fn assert_ca_bundle_populated(cluster: &ClusterHandle, name: &str) -> Resu
     let client = Client::try_from(config)
         .map_err(|error| format!("failed to build kube client: {error}"))?;
 
-    let api: Api<ValidatingWebhookConfiguration> = Api::all(client);
-    let found = api.get(name).await.map_err(|error| {
-        format!("failed to fetch ValidatingWebhookConfiguration {name:?}: {error}")
-    })?;
+    let validating: Api<ValidatingWebhookConfiguration> = Api::all(client.clone());
+    let mutating: Api<MutatingWebhookConfiguration> = Api::all(client);
 
-    let webhooks = found
-        .webhooks
-        .ok_or_else(|| format!("{name:?} has no `webhooks` field at all"))?;
-    let webhook = webhooks
-        .first()
-        .ok_or_else(|| format!("{name:?} has no `webhooks` entries"))?;
-    let ca_bundle = webhook.client_config.ca_bundle.as_ref().ok_or_else(|| {
-        "caBundle was never populated by the bootstrap init container".to_string()
-    })?;
-    if ca_bundle.0.is_empty() {
-        return Err("caBundle is present but empty".to_string());
-    }
-    let text = String::from_utf8_lossy(&ca_bundle.0);
-    if !text.contains("BEGIN CERTIFICATE") {
-        return Err(format!(
-            "caBundle does not look like a PEM certificate: {text:?}"
-        ));
+    for name in names {
+        let bundles = match validating.get_opt(name).await {
+            Ok(Some(found)) => ca_bundles(found.webhooks.map(|hooks| {
+                hooks
+                    .into_iter()
+                    .map(|hook| hook.client_config.ca_bundle)
+                    .collect()
+            })),
+            Ok(None) => match mutating.get_opt(name).await {
+                Ok(Some(found)) => ca_bundles(found.webhooks.map(|hooks| {
+                    hooks
+                        .into_iter()
+                        .map(|hook| hook.client_config.ca_bundle)
+                        .collect()
+                })),
+                Ok(None) => return Err(format!("no webhook configuration named {name:?} exists")),
+                Err(error) => return Err(format!("failed to fetch {name:?}: {error}")),
+            },
+            Err(error) => return Err(format!("failed to fetch {name:?}: {error}")),
+        };
+
+        let bundles = bundles.ok_or_else(|| format!("{name:?} has no `webhooks` entries"))?;
+        if bundles.is_empty() {
+            return Err(format!("{name:?} has no `webhooks` entries"));
+        }
+        for bundle in bundles {
+            let bundle = bundle.ok_or_else(|| {
+                format!("{name:?}: caBundle was never populated by the bootstrap init container")
+            })?;
+            if bundle.is_empty() {
+                return Err(format!("{name:?}: caBundle is present but empty"));
+            }
+            let text = String::from_utf8_lossy(&bundle);
+            if !text.contains("BEGIN CERTIFICATE") {
+                return Err(format!(
+                    "{name:?}: caBundle does not look like a PEM certificate: {text:?}"
+                ));
+            }
+        }
     }
     Ok(())
+}
+
+/// Flattens a fetched configuration's `webhooks[].clientConfig.caBundle`
+/// fields into plain byte vectors, dropping the two generated webhook
+/// entry types (`ValidatingWebhook`/`MutatingWebhook`) that have no
+/// common trait to abstract over here.
+fn ca_bundles(
+    webhooks: Option<Vec<Option<k8s_openapi::ByteString>>>,
+) -> Option<Vec<Option<Vec<u8>>>> {
+    Some(
+        webhooks?
+            .into_iter()
+            .map(|bundle| bundle.map(|bytes| bytes.0))
+            .collect(),
+    )
 }
 
 /// This checkout's own repository root — three levels above this

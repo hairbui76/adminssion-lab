@@ -20,17 +20,32 @@ metadata:
 ---
 # Scoped as narrowly as the Kubernetes RBAC API allows for a
 # cluster-scoped resource: `resourceNames` restricts every rule to the
-# single, exact `ValidatingWebhookConfiguration` this recipe installs
-# (`20-webhook-configuration.yaml`) — not "any webhook configuration in
-# the cluster". `get`+`update` only: the bootstrap init container fetches
-# the object and writes the *whole* object back (`kube`'s `Api::replace`,
-# an HTTP `PUT`, which RBAC maps to the `update` verb — not `patch`,
-# which this code never calls). No `list`/`watch`/`create`/`delete`, and
-# no other `apiGroups`/`resources` at all: in particular, nothing here
-# grants access to `secrets` — the generated private key is never a
-# Kubernetes `Secret` object in the first place (see
+# exact webhook configuration objects this recipe installs
+# (`20-webhook-configuration.yaml`, `21-mutating-webhook-configurations.yaml`)
+# — not "any webhook configuration in the cluster", and in particular
+# not any of the ones a real vendor's stack installs alongside this one
+# in the same lab cluster. `get`+`update` only: the bootstrap init
+# container fetches each object and writes the *whole* object back
+# (`kube`'s `Api::replace`, an HTTP `PUT`, which RBAC maps to the
+# `update` verb — not `patch`, which this code never calls). No
+# `list`/`watch`/`create`/`delete`, and no other `apiGroups`/`resources`
+# at all: in particular, nothing here grants access to `secrets` — the
+# generated private key is never a Kubernetes `Secret` object in the
+# first place (see
 # `crates/admissionlab-test-webhook/src/bootstrap.rs`'s own module
 # documentation for where it actually goes instead).
+#
+# Two rules rather than one because `resources` and `resourceNames`
+# combine as a cross product within a single rule: one merged rule would
+# additionally grant `get`/`update` on a
+# `ValidatingWebhookConfiguration` named
+# `admissionlab-test-webhook-mutate-containers` (and so on) — objects
+# that do not exist today, but that a later task could create with those
+# names and unintentionally hand this ServiceAccount write access to.
+# Splitting by kind keeps each grant exactly as wide as the objects it
+# is for. Every name below must match the corresponding manifest's
+# `metadata.name` and the init container's own environment variables
+# (`30-deployment.yaml`).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -41,6 +56,12 @@ rules:
   - apiGroups: ["admissionregistration.k8s.io"]
     resources: ["validatingwebhookconfigurations"]
     resourceNames: ["admissionlab-test-webhook"]
+    verbs: ["get", "update"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["mutatingwebhookconfigurations"]
+    resourceNames:
+      - admissionlab-test-webhook-mutate-containers
+      - admissionlab-test-webhook-mutate-labels
     verbs: ["get", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

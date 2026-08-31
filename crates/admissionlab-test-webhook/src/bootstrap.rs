@@ -1,9 +1,15 @@
 //! `bootstrap` mode: the init container step that makes this component
 //! self-bootstrapping. Generates this pod's CA/serving certificate
 //! ([`crate::cert::generate`]), writes the serving certificate/key where
-//! `serve` mode's main container will read them from, and updates the
-//! cluster's already-applied `ValidatingWebhookConfiguration` so its
-//! `caBundle` actually validates that serving certificate.
+//! `serve` mode's main container will read them from, and updates every
+//! webhook configuration this recipe already applied — the one
+//! `ValidatingWebhookConfiguration` and both
+//! `MutatingWebhookConfiguration`s (Task 3.9;
+//! `recipes/test-webhook/manifests/`) — so their `caBundle`s actually
+//! validate that serving certificate. All three are patched through one
+//! generic [`patch_ca_bundle`], via [`CaBundleTarget`]; see that trait's
+//! own documentation for why the two Kubernetes kinds need a trait at
+//! all.
 //!
 //! # Where the private key goes — and where it never goes
 //!
@@ -23,10 +29,11 @@
 //!   there is no separate object outliving the pod for anything to leak
 //!   from.
 //! - It needs no RBAC of its own: this init container's `ServiceAccount`
-//!   is granted exactly `get`/`update` on one named
-//!   `ValidatingWebhookConfiguration` (see the RBAC manifest and this
-//!   crate's own top-level report) — nothing that would let it create,
-//!   read, or list `Secret` objects anywhere in the cluster.
+//!   is granted exactly `get`/`update` on the three named webhook
+//!   configuration objects this recipe installs, by `resourceNames` (see
+//!   the RBAC manifest and this crate's own top-level report) — nothing
+//!   that would let it create, read, or list `Secret` objects anywhere in
+//!   the cluster.
 //! - Kubernetes guarantees init containers run to completion, in order,
 //!   *before* any regular container in the same pod starts — so there is
 //!   no window in which `serve` mode's main container could start before
@@ -52,9 +59,9 @@
 //! [`crate::cert::generate`]" — is reasoned entirely about *one* pod in
 //! isolation. None of it says anything about what happens if *two*
 //! pods of this Deployment ever run at once, and the honest answer is:
-//! nothing good. [`patch_ca_bundle`] writes to a single, cluster-wide
-//! `ValidatingWebhookConfiguration.webhooks[].clientConfig.caBundle` —
-//! there is exactly one of these per cluster, not one per pod — via
+//! nothing good. [`patch_ca_bundle`] writes to single, cluster-wide
+//! `webhooks[].clientConfig.caBundle` fields — there is exactly one of
+//! each per cluster, not one per pod — via
 //! fetch-mutate-[`Api::replace`], with no lease, no leader election, no
 //! compare-and-swap beyond what `resourceVersion` already gives a
 //! single writer racing nothing. Two pods each generate their own
@@ -87,16 +94,17 @@
 //!
 //! # `caBundle`: retried, never assumed present on the first attempt
 //!
-//! `recipes/test-webhook/manifests/20-webhook-configuration.yaml`
-//! applies with no `caBundle` set at all (omitted, not a placeholder
-//! value — Kubernetes accepts that; nothing trusts this webhook's TLS
-//! server until [`patch_ca_bundle`] fills it in). This crate's own
-//! recipe applies that manifest file *before* the Deployment's manifest
-//! file (`install.paths`, in `recipes/test-webhook/recipe.yaml` —
+//! `recipes/test-webhook/manifests/20-webhook-configuration.yaml` and
+//! `21-mutating-webhook-configurations.yaml` both apply with no
+//! `caBundle` set at all (omitted, not a placeholder value — Kubernetes
+//! accepts that; nothing trusts this webhook's TLS server until
+//! [`patch_ca_bundle`] fills it in). This crate's own recipe applies
+//! both files *before* the Deployment's manifest file (`install.paths`,
+//! in `recipes/test-webhook/recipe.yaml` —
 //! `admissionlab-installer`'s `ManifestsInstaller` applies each file in
 //! that declared order, one `kubectl apply` at a time), so in the common
-//! case the `ValidatingWebhookConfiguration` object already exists by
-//! the time this init container starts. [`patch_ca_bundle`] does not
+//! case every webhook configuration object already exists by the time
+//! this init container starts. [`patch_ca_bundle`] does not
 //! *assume* that ordering held, though: a "not found" `get` is retried
 //! with a short fixed interval up to [`GET_RETRY_DEADLINE`], the same
 //! "poll, do not assume immediate consistency" discipline
@@ -109,11 +117,17 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use k8s_openapi::ByteString;
-use k8s_openapi::api::admissionregistration::v1::ValidatingWebhookConfiguration;
+use k8s_openapi::Resource as _;
+use k8s_openapi::api::admissionregistration::v1::{
+    MutatingWebhookConfiguration, ValidatingWebhookConfiguration,
+};
 use kube::api::{Api, PostParams};
 
 use crate::cert::{self, GeneratedCerts};
-use crate::config::{self, SERVICE_NAME_ENV, WEBHOOK_CONFIGURATION_NAME_ENV};
+use crate::config::{
+    self, MUTATING_WEBHOOK_CONFIGURATION_NAMES_ENV, SERVICE_NAME_ENV,
+    WEBHOOK_CONFIGURATION_NAME_ENV,
+};
 
 /// Where `serve` mode's main container expects `tls.crt`/`tls.key`
 /// (`ca.crt` is written alongside them for operator debugging — nothing
@@ -180,13 +194,13 @@ pub enum BootstrapError {
     /// configuration.
     #[error("failed to build an in-cluster Kubernetes client: {0}")]
     Client(#[source] Box<kube::Error>),
-    /// The named `ValidatingWebhookConfiguration` never appeared within
+    /// The named webhook configuration never appeared within
     /// [`GET_RETRY_DEADLINE`].
-    #[error(
-        "ValidatingWebhookConfiguration {name:?} was not found within {GET_RETRY_DEADLINE:?}: \
-         {source}"
-    )]
+    #[error("{kind} {name:?} was not found within {GET_RETRY_DEADLINE:?}: {source}")]
     WebhookConfigurationNotFound {
+        /// Which webhook configuration kind this was — that type's own
+        /// `k8s_openapi::Resource::KIND` constant.
+        kind: &'static str,
         /// The webhook configuration name that was never found.
         name: String,
         /// The last "not found" (or other) error observed while
@@ -198,21 +212,24 @@ pub enum BootstrapError {
         #[source]
         source: Box<kube::Error>,
     },
-    /// The named `ValidatingWebhookConfiguration` exists but declares no
-    /// `webhooks` entries — this recipe's own manifest always declares
-    /// exactly one, so this can only mean something else already
-    /// replaced the object with an unexpected shape.
-    #[error(
-        "ValidatingWebhookConfiguration {name:?} has no `webhooks` entries; expected exactly one"
-    )]
+    /// The named webhook configuration exists but declares no
+    /// `webhooks` entries — this recipe's own manifests always declare
+    /// at least one per configuration, so this can only mean something
+    /// else already replaced the object with an unexpected shape.
+    #[error("{kind} {name:?} has no `webhooks` entries; expected at least one")]
     NoWebhookEntries {
+        /// Which webhook configuration kind this was — that type's own
+        /// `k8s_openapi::Resource::KIND` constant.
+        kind: &'static str,
         /// The webhook configuration name with no entries.
         name: String,
     },
-    /// The updated `ValidatingWebhookConfiguration` could not be written
-    /// back.
-    #[error("failed to update ValidatingWebhookConfiguration {name:?}'s caBundle: {source}")]
+    /// The updated webhook configuration could not be written back.
+    #[error("failed to update {kind} {name:?}'s caBundle: {source}")]
     Replace {
+        /// Which webhook configuration kind this was — that type's own
+        /// `k8s_openapi::Resource::KIND` constant.
+        kind: &'static str,
         /// The webhook configuration name that could not be updated.
         name: String,
         /// The underlying Kubernetes API failure. Boxed — see
@@ -225,11 +242,21 @@ pub enum BootstrapError {
 
 /// Runs `bootstrap` mode end to end: generate this pod's CA/serving
 /// certificate, write the serving certificate/key for `serve` mode to
-/// pick up, and update the cluster's `ValidatingWebhookConfiguration` so
-/// its `caBundle` matches. Idempotent in effect (a re-run generates a
-/// *different* CA/cert pair and simply overwrites both destinations),
-/// but never re-run in practice: Kubernetes runs an init container
-/// exactly once per pod (see this module's own documentation).
+/// pick up, and update every webhook configuration this recipe installs
+/// — the one `ValidatingWebhookConfiguration` *and* each
+/// `MutatingWebhookConfiguration` named by
+/// [`MUTATING_WEBHOOK_CONFIGURATION_NAMES_ENV`] — so their `caBundle`s
+/// match. Idempotent in effect (a re-run generates a *different* CA/cert
+/// pair and simply overwrites every destination), but never re-run in
+/// practice: Kubernetes runs an init container exactly once per pod (see
+/// this module's own documentation).
+///
+/// The configurations are patched one at a time, and the first failure
+/// aborts the rest: a partially-trusted install (some webhooks trusting
+/// this pod's CA, others still trusting nothing) is not a state worth
+/// continuing into, and failing the init container instead means the pod
+/// never becomes Ready and the recipe's own `deploymentAvailable`
+/// readiness check surfaces it (`recipes/test-webhook/recipe.yaml`).
 ///
 /// # Errors
 ///
@@ -238,12 +265,14 @@ pub enum BootstrapError {
 pub async fn run() -> Result<(), BootstrapError> {
     let namespace = read_namespace()?;
     let service_name = config::read_required(SERVICE_NAME_ENV)?;
-    let webhook_configuration_name = config::read_required(WEBHOOK_CONFIGURATION_NAME_ENV)?;
+    let validating_name = config::read_required(WEBHOOK_CONFIGURATION_NAME_ENV)?;
+    let mutating_names = config::read_required_list(MUTATING_WEBHOOK_CONFIGURATION_NAMES_ENV)?;
 
     tracing::info!(
         namespace = %namespace,
         service_name = %service_name,
-        webhook_configuration_name = %webhook_configuration_name,
+        validating_webhook_configuration = %validating_name,
+        mutating_webhook_configurations = %mutating_names.join(","),
         "generating a deterministic, test-only CA and serving certificate for this cluster"
     );
     let certs = cert::generate(&service_name, &namespace)?;
@@ -254,13 +283,81 @@ pub async fn run() -> Result<(), BootstrapError> {
     let client = kube::Client::try_default()
         .await
         .map_err(|source| BootstrapError::Client(Box::new(source)))?;
-    patch_ca_bundle(&client, &webhook_configuration_name, &certs.ca_cert_pem).await?;
+
+    patch_ca_bundle::<ValidatingWebhookConfiguration>(
+        &client,
+        &validating_name,
+        &certs.ca_cert_pem,
+    )
+    .await?;
     tracing::info!(
-        name = %webhook_configuration_name,
-        "updated ValidatingWebhookConfiguration caBundle"
+        kind = ValidatingWebhookConfiguration::KIND,
+        name = %validating_name,
+        "updated caBundle"
     );
+    for name in &mutating_names {
+        patch_ca_bundle::<MutatingWebhookConfiguration>(&client, name, &certs.ca_cert_pem).await?;
+        tracing::info!(
+            kind = MutatingWebhookConfiguration::KIND,
+            name = %name,
+            "updated caBundle"
+        );
+    }
 
     Ok(())
+}
+
+/// The one thing [`patch_ca_bundle`] needs from a webhook configuration
+/// object that `k8s-openapi`'s generated types do not already express
+/// uniformly: `ValidatingWebhookConfiguration` and
+/// `MutatingWebhookConfiguration` are structurally identical for this
+/// purpose but have entirely separate generated entry types
+/// (`ValidatingWebhook` / `MutatingWebhook`), so there is no shared
+/// trait upstream to reach `clientConfig.caBundle` through.
+///
+/// Deliberately narrow: a `&mut` borrow of each entry's own `caBundle`
+/// slot, nothing else. [`patch_ca_bundle`] then contains exactly one
+/// copy of the fetch-retry/mutate/`replace` logic rather than one copy
+/// per kind — two copies that would then have to be kept in sync by
+/// hand, which is precisely the drift this crate elsewhere writes
+/// dedicated tests to prevent (see [`crate::serve`]'s own
+/// `cert_dir_matches_bootstrap`).
+/// The `kind` string used in this module's error messages and log
+/// fields comes from `k8s_openapi::Resource::KIND`, that type's own
+/// generated constant, rather than a hand-spelled literal — one fewer
+/// pair of strings that could drift apart.
+trait CaBundleTarget:
+    kube::Resource<DynamicType = ()>
+    + k8s_openapi::Resource
+    + Clone
+    + std::fmt::Debug
+    + serde::de::DeserializeOwned
+    + serde::Serialize
+{
+    /// Every `webhooks[].clientConfig.caBundle` slot in this object, in
+    /// declaration order. Empty exactly when the object declares no
+    /// `webhooks` entries at all.
+    fn ca_bundle_slots(&mut self) -> Vec<&mut Option<ByteString>>;
+}
+
+impl CaBundleTarget for ValidatingWebhookConfiguration {
+    fn ca_bundle_slots(&mut self) -> Vec<&mut Option<ByteString>> {
+        self.webhooks
+            .iter_mut()
+            .flatten()
+            .map(|webhook| &mut webhook.client_config.ca_bundle)
+            .collect()
+    }
+}
+
+impl CaBundleTarget for MutatingWebhookConfiguration {
+    fn ca_bundle_slots(&mut self) -> Vec<&mut Option<ByteString>> {
+        self.webhooks
+            .iter_mut()
+            .flatten()
+            .map(|webhook| &mut webhook.client_config.ca_bundle)
+            .collect()
+    }
 }
 
 /// Reads this pod's own namespace from [`SERVICE_ACCOUNT_NAMESPACE_FILE`].
@@ -297,7 +394,7 @@ fn write_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), BootstrapEr
     })
 }
 
-/// Fetches the named `ValidatingWebhookConfiguration` (retrying "not
+/// Fetches the named webhook configuration of kind `K` (retrying "not
 /// found" up to [`GET_RETRY_DEADLINE`] — see this module's own
 /// documentation), sets every one of its `webhooks[].clientConfig.caBundle`
 /// entries to `ca_cert_pem`, and writes the object back with
@@ -312,29 +409,31 @@ fn write_file(path: &Path, contents: &[u8], mode: u32) -> Result<(), BootstrapEr
 /// entry (`rules`, `namespaceSelector`, `failurePolicy`, and so on) from
 /// this Rust code too, or risk silently clobbering them back to
 /// whatever this code happened to send.
-async fn patch_ca_bundle(
+async fn patch_ca_bundle<K: CaBundleTarget>(
     client: &kube::Client,
     name: &str,
     ca_cert_pem: &str,
 ) -> Result<(), BootstrapError> {
-    let api: Api<ValidatingWebhookConfiguration> = Api::all(client.clone());
+    let api: Api<K> = Api::all(client.clone());
 
-    let mut config = get_with_retry(&api, name).await?;
+    let mut config = get_with_retry::<K>(&api, name).await?;
 
-    let webhooks = config.webhooks.get_or_insert_with(Vec::new);
-    if webhooks.is_empty() {
+    let slots = config.ca_bundle_slots();
+    if slots.is_empty() {
         return Err(BootstrapError::NoWebhookEntries {
+            kind: K::KIND,
             name: name.to_owned(),
         });
     }
-    for webhook in webhooks {
-        webhook.client_config.ca_bundle = Some(ByteString(ca_cert_pem.as_bytes().to_vec()));
+    for slot in slots {
+        *slot = Some(ByteString(ca_cert_pem.as_bytes().to_vec()));
     }
 
     api.replace(name, &PostParams::default(), &config)
         .await
         .map(|_| ())
         .map_err(|source| BootstrapError::Replace {
+            kind: K::KIND,
             name: name.to_owned(),
             source: Box::new(source),
         })
@@ -343,10 +442,7 @@ async fn patch_ca_bundle(
 /// Retries `api.get(name)` at [`GET_RETRY_INTERVAL`] until it succeeds
 /// or [`GET_RETRY_DEADLINE`] elapses. Always attempts at least once, even
 /// if the deadline were somehow already past.
-async fn get_with_retry(
-    api: &Api<ValidatingWebhookConfiguration>,
-    name: &str,
-) -> Result<ValidatingWebhookConfiguration, BootstrapError> {
+async fn get_with_retry<K: CaBundleTarget>(api: &Api<K>, name: &str) -> Result<K, BootstrapError> {
     let deadline = Instant::now() + GET_RETRY_DEADLINE;
     loop {
         match api.get(name).await {
@@ -354,14 +450,16 @@ async fn get_with_retry(
             Err(source) => {
                 if Instant::now() >= deadline {
                     return Err(BootstrapError::WebhookConfigurationNotFound {
+                        kind: K::KIND,
                         name: name.to_owned(),
                         source: Box::new(source),
                     });
                 }
                 tracing::debug!(
+                    kind = K::KIND,
                     name,
                     error = %source,
-                    "ValidatingWebhookConfiguration not found yet; retrying"
+                    "webhook configuration not found yet; retrying"
                 );
                 tokio::time::sleep(GET_RETRY_INTERVAL).await;
             }

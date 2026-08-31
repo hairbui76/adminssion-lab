@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 #
-# Builds `admissionlab-test-webhook` (Task 2.7) — Admission Lab's own
-# deterministic dogfood admission webhook (PRODUCT.md §30). See
-# `src/main.rs`'s own module documentation for what the resulting binary
-# does (`bootstrap`/`serve` subcommands) and why.
+# Builds `admissionlab-test-webhook` (Tasks 2.7 and 3.9) — Admission
+# Lab's own deterministic dogfood admission webhook (PRODUCT.md §30).
+# See `src/lib.rs`'s own module documentation for what the resulting
+# binary does (`bootstrap`/`serve` subcommands, and the admission
+# behaviors `serve` implements) and why.
 #
 # Built and loaded into a `kind` cluster by `scripts/build-test-images.sh`
 # — see that script for the exact `docker build`/`kind load` invocation

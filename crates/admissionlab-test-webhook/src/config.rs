@@ -1,5 +1,5 @@
 //! Environment-variable configuration this binary reads. Deliberately
-//! tiny: only the two names that genuinely vary with how this recipe's
+//! tiny: only the names that genuinely vary with how this recipe's
 //! manifests name their own objects live here as environment variables.
 //! Everything else that could plausibly be "configuration" (the shared
 //! certificate directory, the listen port, the in-cluster service
@@ -9,10 +9,11 @@
 //! environment variables would only be an extra way for the manifest and
 //! the binary to silently disagree with each other.
 //!
-//! Both variables below are read only by `bootstrap` mode
-//! ([`crate::bootstrap::run`]): `serve` mode needs neither (it only reads
-//! certificate files and answers `/healthz` — see [`crate::serve`]'s own
-//! module documentation for why it talks to no Kubernetes API at all).
+//! Every variable below is read only by `bootstrap` mode
+//! ([`crate::bootstrap::run`]): `serve` mode needs none of them (it only
+//! reads certificate files and answers HTTP requests — see
+//! [`crate::serve`]'s own module documentation for why it talks to no
+//! Kubernetes API at all).
 //!
 //! Required, not defaulted: a missing value here is a manifest/binary
 //! wiring bug, and Global Constraint 15 ("unavailable data is unknown,
@@ -45,6 +46,25 @@ pub const SERVICE_NAME_ENV: &str = "ADMISSIONLAB_TEST_WEBHOOK_SERVICE_NAME";
 pub const WEBHOOK_CONFIGURATION_NAME_ENV: &str =
     "ADMISSIONLAB_TEST_WEBHOOK_WEBHOOK_CONFIGURATION_NAME";
 
+/// The `MutatingWebhookConfiguration` object names this recipe installs,
+/// comma-separated — `bootstrap` mode fetches each one by name and
+/// updates its `caBundle` exactly as it already does for the single
+/// `ValidatingWebhookConfiguration` above (see
+/// [`crate::bootstrap::patch_ca_bundle`]).
+///
+/// A *list*, not a second single-valued variable, because Task 3.9
+/// installs two of these deliberately (`recipes/test-webhook/manifests/21-mutating-webhook-configurations.yaml`
+/// — see that file's own comments on the reinvocation design), and
+/// "however many mutating configurations this recipe declares" is a
+/// property of the manifests, not of this binary: a future third
+/// configuration must be a one-line manifest edit, not a new environment
+/// variable plus a new code path to read it. Read through
+/// [`read_required_list`], which applies exactly the same
+/// required-never-defaulted discipline as [`read_required`] to every
+/// entry.
+pub const MUTATING_WEBHOOK_CONFIGURATION_NAMES_ENV: &str =
+    "ADMISSIONLAB_TEST_WEBHOOK_MUTATING_WEBHOOK_CONFIGURATION_NAMES";
+
 /// Something went wrong reading a required environment variable.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ConfigError {
@@ -66,6 +86,23 @@ pub enum ConfigError {
         /// The variable that was not valid Unicode.
         name: &'static str,
     },
+    /// `name` is a comma-separated list ([`read_required_list`]) and one
+    /// of its entries is empty — a trailing comma, a doubled comma, or a
+    /// comma-only entry. Reported rather than silently skipped for the
+    /// same reason a missing variable is reported rather than defaulted
+    /// (see this module's own documentation): an empty entry is a
+    /// manifest typo, and quietly dropping it would install one fewer
+    /// webhook configuration's `caBundle` than the manifests declare,
+    /// with nothing failing until a fixture request hit the untrusted
+    /// webhook much later.
+    #[error("required environment variable {name} has an empty entry at position {index}")]
+    EmptyEntry {
+        /// The variable with an empty entry.
+        name: &'static str,
+        /// The zero-based position of the empty entry within the
+        /// comma-separated value.
+        index: usize,
+    },
 }
 
 /// Reads `name` from the real process environment, trimmed. Never falls
@@ -77,6 +114,39 @@ pub enum ConfigError {
 /// trimming), or set but not valid Unicode.
 pub fn read_required(name: &'static str) -> Result<String, ConfigError> {
     read_required_with(name, |key| std::env::var(key))
+}
+
+/// Reads `name` from the real process environment as a comma-separated
+/// list, trimming the whole value and every entry. Never falls back to a
+/// default and never silently drops an entry — see this module's own
+/// documentation and [`ConfigError::EmptyEntry`].
+///
+/// # Errors
+///
+/// Returns [`ConfigError`] if `name` is unset, set but empty (after
+/// trimming), set but not valid Unicode, or contains an empty entry.
+pub fn read_required_list(name: &'static str) -> Result<Vec<String>, ConfigError> {
+    read_required_list_with(name, |key| std::env::var(key))
+}
+
+/// [`read_required_list`]'s implementation, generic over the lookup
+/// function for exactly the same reason [`read_required_with`] is.
+fn read_required_list_with(
+    name: &'static str,
+    lookup: impl FnOnce(&str) -> Result<String, VarError>,
+) -> Result<Vec<String>, ConfigError> {
+    let raw = read_required_with(name, lookup)?;
+    raw.split(',')
+        .enumerate()
+        .map(|(index, entry)| {
+            let trimmed = entry.trim();
+            if trimmed.is_empty() {
+                Err(ConfigError::EmptyEntry { name, index })
+            } else {
+                Ok(trimmed.to_owned())
+            }
+        })
+        .collect()
 }
 
 /// [`read_required`]'s implementation, generic over the lookup function
@@ -102,7 +172,7 @@ fn read_required_with(
 mod tests {
     use std::env::VarError;
 
-    use super::{ConfigError, read_required_with};
+    use super::{ConfigError, read_required_list_with, read_required_with};
 
     const TEST_VAR: &str = "ADMISSIONLAB_TEST_WEBHOOK_CONFIG_TEST_VAR";
 
@@ -133,6 +203,44 @@ mod tests {
             read_required_with(TEST_VAR, |_| Ok("  admissionlab-test-webhook  ".to_owned()))
                 .expect("set, non-empty variable must succeed");
         assert_eq!(value, "admissionlab-test-webhook");
+    }
+
+    #[test]
+    fn list_splits_on_commas_and_trims_every_entry() {
+        let values =
+            read_required_list_with(TEST_VAR, |_| Ok("  first ,second,  third  ".to_owned()))
+                .expect("a well-formed comma-separated list must parse");
+        assert_eq!(values, vec!["first", "second", "third"]);
+    }
+
+    #[test]
+    fn list_of_one_needs_no_comma() {
+        let values = read_required_list_with(TEST_VAR, |_| Ok("only".to_owned()))
+            .expect("a single entry is a valid list");
+        assert_eq!(values, vec!["only"]);
+    }
+
+    /// A trailing comma is a manifest typo, not "the same list with one
+    /// fewer entry" -- see [`ConfigError::EmptyEntry`]'s own
+    /// documentation for why this is an error rather than a silent skip.
+    #[test]
+    fn list_rejects_an_empty_entry_instead_of_skipping_it() {
+        let error = read_required_list_with(TEST_VAR, |_| Ok("first,,third".to_owned()))
+            .expect_err("an empty entry must be an error");
+        assert_eq!(
+            error,
+            ConfigError::EmptyEntry {
+                name: TEST_VAR,
+                index: 1
+            }
+        );
+    }
+
+    #[test]
+    fn list_reports_a_missing_variable_the_same_way_a_scalar_does() {
+        let error = read_required_list_with(TEST_VAR, |_| Err(VarError::NotPresent))
+            .expect_err("unset variable must be an error");
+        assert_eq!(error, ConfigError::Missing { name: TEST_VAR });
     }
 
     #[test]

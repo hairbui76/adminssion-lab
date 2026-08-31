@@ -1,0 +1,167 @@
+# The mutating half of this recipe's admission surface: two
+# `MutatingWebhookConfiguration`s, not one (Task 3.9 Step 4). Both call
+# the same server, on different paths, and each performs a disjoint set
+# of `test.admissionlab.io/*` actions
+# (`crates/admissionlab-test-webhook/src/mutate.rs`'s `MutationScope`):
+#
+#   - `...-mutate-containers` -> `/mutate-containers`: `add-container`,
+#     `add-init-container`, `remove-container`, `remove-init-container`,
+#     `add-volume`.
+#   - `...-mutate-labels`     -> `/mutate-labels`:     `add-label`.
+#
+# # Why two, and how the reinvocation chain works
+#
+# Kubernetes reinvokes a mutating webhook only when *another* admission
+# plugin changed the object after it ran, so a single webhook can never
+# exercise `reinvocationPolicy` at all. Two are the minimum, and they
+# have to be able to affect each other. That is what the
+# `objectSelector` on `...-mutate-containers` is for:
+#
+#   - `...-mutate-containers` only matches pods labelled
+#     `test.admissionlab.io/containers: "enabled"`.
+#   - `...-mutate-labels` can *add* that label, because adding a label
+#     is what it does, and the label to add is chosen by the fixture:
+#     `test.admissionlab.io/add-label: "test.admissionlab.io/containers=enabled"`.
+#
+# So the dedicated reinvocation fixture is a pod that carries the
+# container/volume annotations but *not* the gate label, plus that
+# `add-label` annotation. The containers webhook cannot match it on the
+# first pass; the labels webhook adds the gate label; the object has now
+# changed, so the API server reinvokes the containers webhook, whose
+# selector now matches, and the sidecar is added on the second round.
+# An ordinary fixture that just wants a sidecar sets the gate label in
+# its own manifest and is mutated on the first pass with no reinvocation
+# at all.
+#
+# # Correctness does not depend on the invocation order
+#
+# The roadmap is explicit that it must not, and this design satisfies
+# that in two independent ways.
+#
+# First, `reinvocationPolicy: IfNeeded` is set on *both* webhooks, not
+# only on the one the chain happens to need. Whichever the API server
+# calls first, the other's output can still reach it. Kubernetes'
+# documented ordering (configurations in lexicographic name order) means
+# `...-mutate-containers` is in practice evaluated before
+# `...-mutate-labels`, which is what makes the reinvocation round
+# reliably *happen* rather than being skipped because the gate label was
+# already there — but that is about exercising the machinery, not about
+# the result. If that ordering ever changed, the reinvocation fixture
+# would simply be mutated in one round instead of two, with the same
+# final object.
+#
+# Second, every action the server performs is idempotent: an add whose
+# target is already present emits no patch at all
+# (`crates/admissionlab-test-webhook/src/mutate.rs`, and
+# `tests/behavior.rs` asserts it). Reinvocation therefore converges
+# instead of appending duplicate containers, and "how many times was
+# this webhook called" is never something a fixture's outcome depends
+# on.
+#
+# # Scoping, `failurePolicy`, `sideEffects`, `timeoutSeconds`
+#
+# Identical in shape and reasoning to
+# `20-webhook-configuration.yaml` — read that file's comments, which
+# cover the namespace opt-in (and why it structurally excludes
+# `kube-system` and this recipe's own namespace), `sideEffects: None`
+# and dry-run visibility, `matchPolicy: Equivalent`, and why
+# `failurePolicy: Fail` is the honest choice for a component that exists
+# to be observed. The one difference is `timeoutSeconds: 5` rather than
+# 10: the mutating routes never sleep — `test.admissionlab.io/delay-ms`
+# is the validating webhook's alone, deliberately, so a fixture's delay
+# is applied exactly once per request regardless of how many mutating
+# configurations are installed (see
+# `crates/admissionlab-test-webhook/src/validate.rs`) — so 5 seconds
+# here is pure scheduling and network headroom, not a budget a fixture
+# can spend.
+#
+# `caBundle` is omitted in both, and filled in at runtime by the
+# `bootstrap` init container, exactly as for the validating
+# configuration. Both names below must appear in that container's
+# `ADMISSIONLAB_TEST_WEBHOOK_MUTATING_WEBHOOK_CONFIGURATION_NAMES`
+# environment variable (`30-deployment.yaml`) and in the `resourceNames`
+# of the ClusterRole that lets it write them (`10-rbac.yaml`).
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  # Sorts before `...-mutate-labels`, which is what makes the
+  # reinvocation round actually occur for the dedicated fixture — see
+  # this file's own comments on why nothing about the *result* depends
+  # on that.
+  name: admissionlab-test-webhook-mutate-containers
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+webhooks:
+  - name: mutate-containers.test-webhook.admissionlab.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    matchPolicy: Equivalent
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    reinvocationPolicy: IfNeeded
+    namespaceSelector:
+      matchLabels:
+        admissionlab.dev/test-webhook: "enabled"
+    # The gate the chain turns on — see this file's own comments. A pod
+    # that does not carry this label is never sent to
+    # `/mutate-containers` at all, which is what lets the labels webhook
+    # below decide (per fixture) whether this one runs.
+    objectSelector:
+      matchLabels:
+        test.admissionlab.io/containers: "enabled"
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
+    clientConfig:
+      service:
+        name: admissionlab-test-webhook
+        namespace: admissionlab-test-webhook
+        # Must equal
+        # `admissionlab_test_webhook::serve::MUTATE_CONTAINERS_PATH`;
+        # `crates/admissionlab-test-webhook/tests/behavior.rs` asserts it.
+        path: /mutate-containers
+        port: 443
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: admissionlab-test-webhook-mutate-labels
+  labels:
+    app.kubernetes.io/name: admissionlab-test-webhook
+webhooks:
+  - name: mutate-labels.test-webhook.admissionlab.dev
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    matchPolicy: Equivalent
+    failurePolicy: Fail
+    timeoutSeconds: 5
+    # `IfNeeded` here too, even though the chain as written only needs
+    # it on the containers webhook — see this file's own comments on
+    # order independence. It costs nothing: this webhook's own action is
+    # idempotent, so a reinvocation of it emits no patch.
+    reinvocationPolicy: IfNeeded
+    namespaceSelector:
+      matchLabels:
+        admissionlab.dev/test-webhook: "enabled"
+    # Deliberately no `objectSelector`: this is the webhook that has to
+    # be able to run on a pod that does not yet carry the gate label, so
+    # gating it on any label of its own would break the chain it exists
+    # to start.
+    rules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+        scope: "Namespaced"
+    clientConfig:
+      service:
+        name: admissionlab-test-webhook
+        namespace: admissionlab-test-webhook
+        # Must equal
+        # `admissionlab_test_webhook::serve::MUTATE_LABELS_PATH`;
+        # `crates/admissionlab-test-webhook/tests/behavior.rs` asserts it.
+        path: /mutate-labels
+        port: 443
