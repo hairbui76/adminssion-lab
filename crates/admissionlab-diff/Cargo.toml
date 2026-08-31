@@ -7,3 +7,27 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `SemanticChange::fixture_id` (Task 4.3) is an
+# `admissionlab_core::FixtureId` -- the same identifier
+# `admissionlab_admission::AdmissionOutcome` already carries, so a change
+# and the outcomes it was derived from name the same fixture with the
+# same type. This is this crate's only edge today, and a one-way one:
+# `admissionlab-core` must never depend back on `admissionlab-diff` (the
+# roadmap's own layering has `core` beneath everything, and Task 4.10's
+# report reaches diff results through `admissionlab-report`, not through
+# `core`).
+admissionlab-core = { workspace = true }
+# `raw.rs` (Task 4.3) wraps `json_patch::diff` to produce this crate's
+# own RFC 6902 `RawChange` diagnostics. See the root `Cargo.toml`'s own
+# comment on this entry for the crate/library name mismatch and license
+# status; see `raw.rs`'s module documentation for why the output type is
+# this crate's own rather than `json_patch::PatchOperation` directly, and
+# for the determinism argument that rests on `serde_json`'s
+# `preserve_order` feature staying off in this graph.
+json-patch = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# `SemanticChange::baseline`/`candidate` and `RawChange::value` are
+# `serde_json::Value` directly, not merely serde-generic.
+serde_json = { workspace = true }

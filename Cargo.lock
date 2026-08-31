@@ -74,6 +74,12 @@ dependencies = [
 [[package]]
 name = "admissionlab-diff"
 version = "0.1.0"
+dependencies = [
+ "admissionlab-core",
+ "json-patch",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "admissionlab-echo"
