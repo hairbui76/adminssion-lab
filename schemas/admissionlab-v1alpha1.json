@@ -233,17 +233,17 @@
       "type": "object",
       "properties": {
         "absoluteIncrease": {
-          "description": "The absolute latency increase, in milliseconds, tolerated before a\ncandidate observation counts as a regression. Defaults to zero\n(no tolerance) when `policy.latency` is omitted.",
+          "description": "The absolute latency increase, in milliseconds, tolerated before a\ncandidate observation counts as a regression. Defaults to 100\nmilliseconds when `policy.latency` is omitted (the Alpha default\nROADMAP Task 4.6 Step 3 fixes: a latency increase is reported only\nwhen the candidate is at least 100ms slower *and* at least 2x the\nbaseline for the same webhook).",
           "type": "integer",
           "format": "uint64",
-          "default": 0,
+          "default": 100,
           "minimum": 0
         },
         "relativeMultiplier": {
-          "description": "The multiplier on baseline latency tolerated before a candidate\nobservation counts as a regression. Defaults to `1.0` (no\ntolerance) when `policy.latency` is omitted.",
+          "description": "The multiplier on baseline latency tolerated before a candidate\nobservation counts as a regression. Defaults to `2.0` when\n`policy.latency` is omitted -- see\n[`LatencyPolicy::absolute_increase`] for the paired Alpha default\nand its source.",
           "type": "number",
           "format": "double",
-          "default": 1.0
+          "default": 2.0
         }
       },
       "additionalProperties": false

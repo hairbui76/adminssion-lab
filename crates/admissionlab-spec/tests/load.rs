@@ -142,11 +142,14 @@ fn policy_defaults_when_omitted() {
     let loaded = load_lab(&testdata_config("minimal-valid.yaml")).unwrap();
     assert!(loaded.raw.policy.fail_on.is_empty());
     assert!(loaded.raw.policy.overrides.is_empty());
+    // The Alpha latency defaults ROADMAP Task 4.6 Step 3 fixes: at least
+    // 100ms slower *and* at least 2x baseline before a latency increase
+    // is reported.
     assert_eq!(
         loaded.raw.policy.latency.absolute_increase,
-        std::time::Duration::ZERO
+        std::time::Duration::from_millis(100)
     );
-    assert!((loaded.raw.policy.latency.relative_multiplier - 1.0).abs() < f64::EPSILON);
+    assert!((loaded.raw.policy.latency.relative_multiplier - 2.0).abs() < f64::EPSILON);
 }
 
 // ---------------------------------------------------------------------

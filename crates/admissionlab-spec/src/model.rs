@@ -352,22 +352,32 @@ pub struct PolicyOverrideSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct LatencyPolicy {
     /// The absolute latency increase, in milliseconds, tolerated before a
-    /// candidate observation counts as a regression. Defaults to zero
-    /// (no tolerance) when `policy.latency` is omitted.
+    /// candidate observation counts as a regression. Defaults to 100
+    /// milliseconds when `policy.latency` is omitted (the Alpha default
+    /// ROADMAP Task 4.6 Step 3 fixes: a latency increase is reported only
+    /// when the candidate is at least 100ms slower *and* at least 2x the
+    /// baseline for the same webhook).
     #[serde(with = "duration_millis")]
     #[schemars(with = "u64")]
     pub absolute_increase: Duration,
     /// The multiplier on baseline latency tolerated before a candidate
-    /// observation counts as a regression. Defaults to `1.0` (no
-    /// tolerance) when `policy.latency` is omitted.
+    /// observation counts as a regression. Defaults to `2.0` when
+    /// `policy.latency` is omitted -- see
+    /// [`LatencyPolicy::absolute_increase`] for the paired Alpha default
+    /// and its source.
     pub relative_multiplier: f64,
 }
 
 impl Default for LatencyPolicy {
     fn default() -> Self {
+        // ROADMAP Task 4.6 Step 3's Alpha default: report a latency
+        // regression only when the candidate is at least 100ms slower
+        // *and* at least 2x baseline. A zero/1.0x default would make the
+        // conjunctive rule flag every webhook whose latency merely failed
+        // to improve, drowning real regressions in noise.
         Self {
-            absolute_increase: Duration::ZERO,
-            relative_multiplier: 1.0,
+            absolute_increase: Duration::from_millis(100),
+            relative_multiplier: 2.0,
         }
     }
 }

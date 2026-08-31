@@ -31,15 +31,34 @@ use serde_json::json;
 /// The Alpha latency policy the roadmap states for Task 4.6 Step 3: at
 /// least 100ms slower *and* at least twice the baseline.
 ///
-/// Written out here rather than taken from `LatencyPolicy::default()`,
-/// which is the zero-tolerance policy (`0ms` / `1.0x`) --
-/// `latency_policy_default_still_ignores_an_unchanged_duration` covers
-/// that one separately.
+/// Written out here rather than taken from `LatencyPolicy::default()`
+/// (which is now this same pair) so these tests keep pinning the
+/// roadmap's numbers even if the spec crate's `Default` drifts --
+/// `default_policy_matches_the_alpha_thresholds` asserts the two agree.
 fn alpha_policy() -> LatencyPolicy {
     LatencyPolicy {
         absolute_increase: Duration::from_millis(100),
         relative_multiplier: 2.0,
     }
+}
+
+/// The zero-tolerance policy a user may legitimately configure
+/// (`absoluteIncrease: 0` / `relativeMultiplier: 1.0`) --
+/// `zero_tolerance_policy_still_ignores_an_unchanged_duration` exists
+/// for it.
+fn zero_tolerance_policy() -> LatencyPolicy {
+    LatencyPolicy {
+        absolute_increase: Duration::ZERO,
+        relative_multiplier: 1.0,
+    }
+}
+
+/// Fails if `LatencyPolicy::default()` stops being the Alpha 100ms/2x
+/// pair ROADMAP Task 4.6 Step 3 fixes (reconciled by the PM after Task
+/// 4.6 found the original `Default` was zero-tolerance).
+#[test]
+fn default_policy_matches_the_alpha_thresholds() {
+    assert_eq!(LatencyPolicy::default(), alpha_policy());
 }
 
 /// One invocation of `webhook` in round 0 at index 0 that allowed the
@@ -398,21 +417,23 @@ fn a_missing_latency_is_never_compared_and_never_a_zero() {
     );
 }
 
-/// Fails if the zero-tolerance default policy turns an unchanged (or
-/// improved) latency into a regression.
+/// Fails if a zero-tolerance policy turns an unchanged (or improved)
+/// latency into a regression.
 ///
-/// `LatencyPolicy::default()` is `0ms` / `1.0x`, under which both
-/// configured thresholds are satisfied by an identical duration. A
-/// regression is an increase, which is why the comparison requires one
-/// before it consults either threshold.
+/// Under `absoluteIncrease: 0` / `relativeMultiplier: 1.0` -- a
+/// configuration a user may legitimately write -- both configured
+/// thresholds are satisfied by an identical duration. A regression is an
+/// increase, which is why the comparison requires one before it consults
+/// either threshold. (The `Default` is the Alpha 100ms/2x pair, so the
+/// zero-tolerance policy is spelled out explicitly here.)
 #[test]
-fn latency_policy_default_still_ignores_an_unchanged_duration() {
+fn zero_tolerance_policy_still_ignores_an_unchanged_duration() {
     let (baseline, candidate) = latency_pair(
         Some(Duration::from_millis(40)),
         Some(Duration::from_millis(40)),
     );
     assert_eq!(
-        diff_admission_trace(&baseline, &candidate, &LatencyPolicy::default()),
+        diff_admission_trace(&baseline, &candidate, &zero_tolerance_policy()),
         Vec::new()
     );
 
@@ -421,7 +442,7 @@ fn latency_policy_default_still_ignores_an_unchanged_duration() {
         Some(Duration::from_millis(10)),
     );
     assert_eq!(
-        diff_admission_trace(&baseline, &candidate, &LatencyPolicy::default()),
+        diff_admission_trace(&baseline, &candidate, &zero_tolerance_policy()),
         Vec::new(),
         "an improvement is never a latency regression"
     );

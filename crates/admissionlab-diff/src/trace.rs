@@ -117,13 +117,14 @@
 //!
 //! Conditions 2 and 3 are the roadmap's conjunctive thresholds, and
 //! [`LatencyPolicy`]'s own documentation states the same pair. Condition
-//! 1 is this module's addition and it is load-bearing:
-//! `LatencyPolicy::default()` is `absolute_increase: 0` /
-//! `relative_multiplier: 1.0`, under which conditions 2 and 3 are
-//! satisfied by an *identical* latency, and every webhook in a run would
-//! be reported as a regression. A regression is an increase; an
-//! unchanged or improved latency is never one, whatever the thresholds
-//! say.
+//! 1 is this module's addition and it is load-bearing: a user may
+//! legitimately configure `absoluteIncrease: 0` / `relativeMultiplier:
+//! 1.0` (zero tolerance), under which conditions 2 and 3 are satisfied
+//! by an *identical* latency, and every webhook in a run would be
+//! reported as a regression. A regression is an increase; an unchanged
+//! or improved latency is never one, whatever the thresholds say.
+//! (`LatencyPolicy::default()` itself is the Alpha 100ms + 2x pair, but
+//! this guard must not depend on that.)
 //!
 //! Two arithmetic notes. The absolute threshold uses
 //! [`Duration::checked_add`], so an absurd configured tolerance saturates
