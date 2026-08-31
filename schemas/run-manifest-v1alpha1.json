@@ -61,9 +61,17 @@
       "description": "Always [`SCHEMA_VERSION`] for documents this crate writes; kept as\na field rather than implied so a reader that only has the file can\ntell what it is holding.",
       "type": "string"
     },
+    "stage": {
+      "description": "Where this run got to — the last stage that completed while it is\nin progress, or the stage that failed once it has (Task 5.2). See\n[`RunStage`].",
+      "$ref": "#/$defs/RunStage"
+    },
     "startedAt": {
       "description": "When the run began.",
       "type": "string"
+    },
+    "status": {
+      "description": "Whether this run is still going, finished, or failed (Task 5.2).",
+      "$ref": "#/$defs/RunStatus"
     },
     "tools": {
       "description": "The external tool versions this run actually used.",
@@ -75,6 +83,8 @@
     "schemaVersion",
     "runId",
     "admissionlabVersion",
+    "status",
+    "stage",
     "host",
     "tools",
     "baseline",
@@ -163,6 +173,66 @@
       "required": [
         "os",
         "arch"
+      ]
+    },
+    "RunStage": {
+      "description": "The stages of a run, in execution order (Task 5.2).\n\nRead together with [`RunManifest::status`]:\n\n- [`RunStatus::InProgress`] — the last stage that **completed**. A\n  manifest at [`RunStage::Started`] has recorded its inputs, tools,\n  and node images and has not yet created a cluster.\n- [`RunStatus::Failed`] — the stage that **failed**.\n- [`RunStatus::Completed`] — always [`RunStage::Completed`].\n\nWire values are pinned snake-case literals, matching how\n`admissionlab-normalize`'s `RuleTier` pins its own text form and for\nthe same reason: a variant rename must never silently change a\nchecked-in golden file or a consumer's parser.",
+      "oneOf": [
+        {
+          "description": "The run workspace exists and every pre-cluster input has been\nrecorded: configuration, fixtures, expectations, normalization,\npolicy, host, tool versions, and both sides' resolved node images.\nNothing has been provisioned.",
+          "type": "string",
+          "const": "started"
+        },
+        {
+          "description": "Both ephemeral clusters were created.",
+          "type": "string",
+          "const": "cluster_creation"
+        },
+        {
+          "description": "Both sides' component stacks were installed and became ready.",
+          "type": "string",
+          "const": "installation"
+        },
+        {
+          "description": "Every fixture was replayed through both sides and its evidence\nwritten.",
+          "type": "string",
+          "const": "fixture_capture"
+        },
+        {
+          "description": "Both sides' evidence was normalized, compared, and graded.",
+          "type": "string",
+          "const": "comparison"
+        },
+        {
+          "description": "The run's reports were rendered and written.",
+          "type": "string",
+          "const": "reporting"
+        },
+        {
+          "description": "The run finished. Paired only with [`RunStatus::Completed`].",
+          "type": "string",
+          "const": "completed"
+        }
+      ]
+    },
+    "RunStatus": {
+      "description": "Whether the run a manifest describes is still going, finished, or\nfailed (Task 5.2).\n\nDeliberately separate from [`RunStage`]: \"we are at the install stage\"\nand \"we failed at the install stage\" are different claims, and a\nsingle enum trying to encode both would either lose one of them or\ndouble the variant count. Wire values are pinned literals so renaming\na Rust variant cannot change what a written manifest says.\n\nThis carries no verdict. Whether the regression *policy* passed is\n`admissionlab-report`'s `result.json`, not this document:\n[`RunStatus::Completed`] means \"the run finished\", never \"the run\npassed\".",
+      "oneOf": [
+        {
+          "description": "The run is still executing (or was interrupted so abruptly that\nnothing got to record an outcome — a `SIGKILL`, a lost machine).",
+          "type": "string",
+          "const": "in_progress"
+        },
+        {
+          "description": "Every stage finished. [`RunManifest::completed_at`] is `Some` for\nexactly this variant and no other.",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "A stage failed; [`RunManifest::stage`] names which.",
+          "type": "string",
+          "const": "failed"
+        }
       ]
     },
     "ToolProvenance": {

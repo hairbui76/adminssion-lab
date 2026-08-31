@@ -287,6 +287,23 @@ pub struct RunOptions {
     pub run_root: PathBuf,
 }
 
+/// Both sides' node image references, already resolved from their
+/// configured Kubernetes versions (see
+/// [`LabRunner::resolve_node_images`]).
+///
+/// Exists so a caller can perform that resolution as its own step — Task
+/// 5.2 needs the resolved images to write a complete run manifest
+/// *before* any cluster is created — without either re-implementing the
+/// per-side error mapping [`LabRunner::prepare_clusters`] already does or
+/// resolving twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedNodeImages {
+    /// The baseline cluster's node image reference.
+    pub baseline: String,
+    /// The candidate cluster's node image reference.
+    pub candidate: String,
+}
+
 /// Both clusters of one run, ready for whatever comes next.
 ///
 /// Kept to exactly what two later concerns need: [`LabRunner::cleanup`]
@@ -504,18 +521,60 @@ impl<C: ClusterManager> LabRunner<C> {
         lab: &ResolvedLab,
         options: &RunOptions,
     ) -> Result<PreparedLab, RunError> {
+        let (run_id, paths) = self.create_workspace(options).await?;
+        let images = self.resolve_node_images(lab).await?;
+        self.create_clusters(lab, &run_id, &paths, &images).await
+    }
+
+    /// Validates `options.run_root` and creates this run's on-disk
+    /// workspace, returning the generated identifier and layout.
+    ///
+    /// Split out of [`LabRunner::prepare_clusters`] (which now calls it)
+    /// so a caller can obtain [`RunPaths`] — and therefore
+    /// [`RunPaths::run_json`] — *before* any cluster is created. Task
+    /// 5.2's contract requires the run manifest to exist by then, and it
+    /// cannot exist before the directory that holds it does.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::NonAbsoluteRunRoot`] if `options.run_root` is
+    /// not absolute, before anything is created, and
+    /// [`RunError::Workspace`] if the workspace could not be created.
+    pub async fn create_workspace(
+        &self,
+        options: &RunOptions,
+    ) -> Result<(RunId, RunPaths), RunError> {
         if !options.run_root.is_absolute() {
             return Err(RunError::NonAbsoluteRunRoot(options.run_root.clone()));
         }
 
         let run_id = RunId::generate();
         let paths = self.artifact_store.create_run(&run_id).await?;
+        Ok((run_id, paths))
+    }
 
-        // Resolved sequentially (not `tokio::join!`): resolving
-        // allocates or provisions nothing, so failing fast on baseline's
-        // own bad version loses nothing and needs no rollback — see this
-        // module's documentation ("Node image resolution").
-        let baseline_image = self
+    /// Resolves both sides' configured Kubernetes versions to concrete
+    /// node image references (Controller Ruling R25).
+    ///
+    /// Resolved sequentially (not `tokio::join!`): resolving allocates or
+    /// provisions nothing, so failing fast on baseline's own bad version
+    /// loses nothing and needs no rollback — see this module's
+    /// documentation ("Node image resolution").
+    ///
+    /// Split out of [`LabRunner::prepare_clusters`] (which now calls it)
+    /// for the same reason [`LabRunner::create_workspace`] is: a complete
+    /// pre-cluster run manifest names the images each side will run, and
+    /// they are known here, one step before anything is provisioned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::NodeImageResolutionFailed`] if either side's
+    /// version cannot be resolved.
+    pub async fn resolve_node_images(
+        &self,
+        lab: &ResolvedLab,
+    ) -> Result<ResolvedNodeImages, RunError> {
+        let baseline = self
             .cluster_manager
             .resolve_node_image(&lab.baseline.kubernetes)
             .await
@@ -523,7 +582,7 @@ impl<C: ClusterManager> LabRunner<C> {
                 side: Side::Baseline,
                 source: Box::new(source),
             })?;
-        let candidate_image = self
+        let candidate = self
             .cluster_manager
             .resolve_node_image(&lab.candidate.kubernetes)
             .await
@@ -532,17 +591,46 @@ impl<C: ClusterManager> LabRunner<C> {
                 source: Box::new(source),
             })?;
 
+        Ok(ResolvedNodeImages {
+            baseline,
+            candidate,
+        })
+    }
+
+    /// Creates both clusters concurrently, into the already-created
+    /// workspace `paths`, using the already-resolved `images`.
+    ///
+    /// The third and last part of [`LabRunner::prepare_clusters`], and
+    /// the only one that provisions anything — which is why the whole
+    /// rollback discipline this module documents lives here rather than
+    /// in either of its two siblings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`RunError::ClusterCreationFailed`] if either cluster
+    /// failed to create — see this module's documentation for exactly how
+    /// the other, successfully created side is handled in that case.
+    pub async fn create_clusters(
+        &self,
+        lab: &ResolvedLab,
+        run_id: &RunId,
+        paths: &RunPaths,
+        images: &ResolvedNodeImages,
+    ) -> Result<PreparedLab, RunError> {
+        let run_id = run_id.clone();
+        let paths = paths.clone();
+
         let baseline_spec = build_cluster_spec(
             Side::Baseline,
             &run_id,
             &lab.baseline.kubernetes,
-            baseline_image,
+            images.baseline.clone(),
         );
         let candidate_spec = build_cluster_spec(
             Side::Candidate,
             &run_id,
             &lab.candidate.kubernetes,
-            candidate_image,
+            images.candidate.clone(),
         );
 
         // `tokio::join!`, never `try_join!` — see this module's

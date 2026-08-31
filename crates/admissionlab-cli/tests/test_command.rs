@@ -805,6 +805,125 @@ fn an_install_failure_exits_four_writes_diagnostics_and_still_cleans_up() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The end-to-end half of Task 5.2, proved through the real pipeline
+/// rather than by driving the writer by hand (which
+/// `admissionlab-core`'s own `tests/run_manifest_failure.rs` does):
+/// `run_lab` itself writes `run.json` before it creates a cluster,
+/// advances it as stages pass, and leaves it valid — with
+/// `completedAt: null` and the failed stage named — when the install
+/// stage dies.
+#[test]
+fn a_failed_install_leaves_a_run_manifest_naming_the_stage() {
+    let dir = unique_dir("manifest-install-fail");
+    let config = write_lab(&dir, "");
+    let run_root = dir.join("runs");
+    let backend = FakeBackend::new(CaptureBehavior::Identical).failing_install();
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&dir.join("artifacts")),
+        run_root: run_root.clone(),
+    };
+
+    let output = run(&backend, &request);
+    assert_eq!(output.disposition, RunDisposition::InstallationFailed);
+
+    let manifest = read_result(&sole_run_manifest(&run_root));
+    assert_eq!(manifest["status"], serde_json::json!("failed"));
+    assert_eq!(manifest["stage"], serde_json::json!("installation"));
+    assert_eq!(manifest["completedAt"], serde_json::Value::Null);
+    assert_eq!(
+        manifest["schemaVersion"],
+        serde_json::json!(admissionlab_core::run_manifest::SCHEMA_VERSION)
+    );
+
+    // The provenance gathered before the failure survived it: the tool
+    // versions the run was gated on, both sides' resolved images, and
+    // every input digest.
+    assert_eq!(manifest["tools"]["kind"], serde_json::json!("1.0.0"));
+    assert_eq!(
+        manifest["baseline"]["kubernetesVersion"],
+        serde_json::json!("1.36.4")
+    );
+    assert_eq!(
+        manifest["baseline"]["nodeImage"],
+        serde_json::json!("kindest/node:v1.36.4")
+    );
+    assert_eq!(
+        manifest["fixtureHashes"]
+            .as_object()
+            .expect("fixtureHashes is an object")
+            .len(),
+        1
+    );
+    for key in ["configSha256", "normalizationSha256", "policySha256"] {
+        assert_eq!(
+            manifest[key]
+                .as_str()
+                .unwrap_or_else(|| panic!("{key} must be a string"))
+                .len(),
+            64,
+            "{key} must be a SHA-256 hex digest"
+        );
+    }
+    // No expectations file was configured, so this is honestly absent
+    // rather than an empty-string digest (Global Constraint 15).
+    assert_eq!(manifest["expectationsSha256"], serde_json::Value::Null);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A run that reaches a verdict marks its manifest completed — including
+/// one whose *policy* failed, because "completed" is not "passed".
+#[test]
+fn a_completed_run_marks_its_manifest_completed_even_when_the_policy_failed() {
+    let dir = unique_dir("manifest-complete");
+    let config = write_lab(&dir, "");
+    let run_root = dir.join("runs");
+    let backend = FakeBackend::new(CaptureBehavior::CandidateDenies);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: None,
+        run_root: run_root.clone(),
+    };
+
+    let output = run(&backend, &request);
+    assert_eq!(output.disposition, RunDisposition::PolicyFailed);
+
+    let manifest = read_result(&sole_run_manifest(&run_root));
+    assert_eq!(manifest["status"], serde_json::json!("completed"));
+    assert_eq!(manifest["stage"], serde_json::json!("completed"));
+    assert!(
+        manifest["completedAt"].is_string(),
+        "a completed run records a real completion time, got {:?}",
+        manifest["completedAt"]
+    );
+    // The install stage re-recorded what was actually installed; the
+    // minimal configuration installs nothing, so both sides are empty.
+    assert_eq!(manifest["baseline"]["components"], serde_json::json!([]));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `<run_root>/<run id>/run.json`, asserting there is exactly one run
+/// under `run_root` so a test can never silently read a stale one.
+fn sole_run_manifest(run_root: &Path) -> PathBuf {
+    let mut manifests: Vec<PathBuf> = std::fs::read_dir(run_root)
+        .expect("run root must exist")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("run.json"))
+        .filter(|path| path.is_file())
+        .collect();
+    assert_eq!(
+        manifests.len(),
+        1,
+        "expected exactly one run manifest under {}",
+        run_root.display()
+    );
+    manifests.remove(0)
+}
+
 #[test]
 fn a_capture_failure_exits_five_writes_what_it_knows_and_still_cleans_up() {
     let dir = unique_dir("capture-fail");

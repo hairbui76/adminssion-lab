@@ -87,22 +87,43 @@
 //! `fail` — would be exactly the fabrication Global Constraint 15
 //! forbids, and it is the reason the failure path has its own artifact
 //! shape rather than a half-filled result.
+//!
+//! ## The run manifest is written before anything is provisioned
+//!
+//! ROADMAP Task 5.2. `run.json` is created after every input has been
+//! validated and hashed, the host has been probed, and both sides' node
+//! images have been resolved — and *before* the first cluster is created
+//! — then atomically rewritten after each stage. A run that dies at
+//! install therefore leaves a valid manifest with `completedAt: null` and
+//! the failed stage recorded, which is the difference between "rerun the
+//! twenty-minute lab to find out what it was running" and reading a file.
+//! See `admissionlab_core::run_manifest`'s own "Incremental writes"
+//! section for the contract, and [`provenance`] for how the values are
+//! assembled.
+//!
+//! Only the *first* manifest write is fatal: at that moment nothing has
+//! been provisioned, and a run workspace that cannot be written to is one
+//! whose later evidence would be untrustworthy anyway. Every later
+//! rewrite failure is reported and the run continues — a manifest that
+//! stopped being updated is a smaller loss than abandoning a comparison
+//! whose clusters are already up.
 
 pub mod capture;
 pub mod compare;
 pub mod install;
+pub mod provenance;
 pub mod report;
 
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use admissionlab_admission::AdmissionOutcome;
 use admissionlab_core::{
     ArtifactStore, ClusterManager, Diagnostic, DoctorReport, InstalledLab, LabRunner, PreparedLab,
-    RedactedValue, RunDisposition, RunError, RunOptions, RunPaths, StackInstaller,
-    preserved_cluster_report,
+    RedactedValue, RunDisposition, RunError, RunManifestWriter, RunOptions, RunPaths, RunStage,
+    StackInstaller, preserved_cluster_report,
 };
 use admissionlab_fixtures::{FixtureSource, discover_fixtures};
 use admissionlab_policy::{
@@ -253,6 +274,25 @@ struct Inputs {
     expectations: ResolvedExpectations,
     /// Every discovered fixture, in discovery order.
     fixtures: Vec<FixtureSource>,
+    /// Every content digest the run manifest records for these inputs
+    /// (Task 5.1). Computed here, alongside the loading and validation
+    /// that already read the same files, rather than later — by the time
+    /// a cluster exists the manifest already needs them.
+    digests: provenance::InputDigests,
+}
+
+/// Where a post-cluster stage puts what it produced.
+///
+/// Bundled rather than threaded as two more parameters: every stage from
+/// install onward writes to both, and each stage function already carries
+/// enough arguments that adding two independent ones to each would make
+/// their signatures the least readable thing in the module.
+struct Outputs<'a> {
+    /// The directory `result.json`/`report.html`/`diagnostics.json` land
+    /// in.
+    report_dir: PathBuf,
+    /// This run's manifest, advanced (or failed) at every stage boundary.
+    manifest: &'a mut RunManifestWriter,
 }
 
 /// Runs one lab end to end and reports how it ended.
@@ -269,13 +309,15 @@ pub async fn run_lab<B: LabBackend>(
     request: &RunRequest<'_>,
     console: &mut Console<'_>,
 ) -> RunDisposition {
+    let started_at = SystemTime::now();
     let inputs = match prepare_inputs(request, console) {
         Ok(inputs) => inputs,
         Err(disposition) => return disposition,
     };
-    if let Some(disposition) = check_prerequisites(backend, console).await {
-        return disposition;
-    }
+    let doctor = match check_prerequisites(backend, console).await {
+        Ok(report) => report,
+        Err(disposition) => return disposition,
+    };
 
     let runner = LabRunner {
         cluster_manager: backend.cluster_manager(),
@@ -285,20 +327,122 @@ pub async fn run_lab<B: LabBackend>(
         keep_clusters: request.keep_clusters,
         run_root: request.run_root.clone(),
     };
-    let prepared = match runner.prepare_clusters(&inputs.lab, &options).await {
-        Ok(prepared) => prepared,
+
+    // `prepare_clusters`'s three parts, driven separately (Task 5.2):
+    // the manifest has to exist before a cluster does, and it cannot
+    // exist before the workspace that holds it — nor be complete before
+    // both sides' node images are known. Neither of the first two steps
+    // provisions anything, so a failure in either leaks nothing.
+    let (run_id, paths) = match runner.create_workspace(&options).await {
+        Ok(workspace) => workspace,
         Err(error) => return report_cluster_failure(&error, console),
+    };
+    let images = match runner.resolve_node_images(&inputs.lab).await {
+        Ok(images) => images,
+        Err(error) => return report_cluster_failure(&error, console),
+    };
+
+    let manifest = provenance::initial_manifest(
+        &run_id,
+        &doctor,
+        &inputs.lab,
+        &images,
+        inputs.digests.clone(),
+        started_at,
+    );
+    let mut manifest =
+        match RunManifestWriter::create(ArtifactStore::new(&request.run_root), &paths, manifest)
+            .await
+        {
+            Ok(writer) => writer,
+            Err(error) => {
+                // Fatal, and cheap to be fatal about: nothing is provisioned
+                // yet — see this module's "The run manifest is written before
+                // anything is provisioned" section.
+                console.problem(&format!("failed to write this run's manifest: {error}"));
+                return RunDisposition::InfrastructureFailed;
+            }
+        };
+    console.say(&format!("wrote {}.", manifest.path().display()));
+
+    let prepared = match runner
+        .create_clusters(&inputs.lab, &run_id, &paths, &images)
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            record_stage_failure(&mut manifest, RunStage::ClusterCreation, console).await;
+            return report_cluster_failure(&error, console);
+        }
     };
     console.say(&format!(
         "created baseline cluster {:?} and candidate cluster {:?}.",
         prepared.baseline.spec.name, prepared.candidate.spec.name
     ));
+    record_stage(&mut manifest, RunStage::ClusterCreation, |_| {}, console).await;
 
     // Exactly one path from here to this function's return, and
     // `finish` is on it — see this module's documentation.
-    let disposition =
-        run_with_clusters(backend, request, console, &inputs, &runner, &prepared).await;
-    finish(&runner, &prepared, request, console, disposition).await
+    let outcome = run_with_clusters(
+        backend,
+        request,
+        console,
+        &inputs,
+        &runner,
+        &prepared,
+        &mut manifest,
+    )
+    .await;
+    // Captured before `finish`, which may downgrade the disposition
+    // because *cleanup* failed: a run whose comparison produced a verdict
+    // did complete, and a cluster that would not delete afterwards does
+    // not retroactively unmake that.
+    let reached_verdict = matches!(
+        outcome,
+        RunDisposition::Passed | RunDisposition::PolicyFailed
+    );
+
+    let disposition = finish(&runner, &prepared, request, console, outcome).await;
+    if reached_verdict && let Err(error) = manifest.complete(SystemTime::now()).await {
+        console.problem(&format!("could not record this run's completion: {error}"));
+    }
+    disposition
+}
+
+/// Advances the manifest to `stage`, applying `update` first, and reports
+/// (without propagating) a write failure.
+///
+/// Non-fatal by design: see this module's "The run manifest is written
+/// before anything is provisioned" section.
+async fn record_stage<F>(
+    manifest: &mut RunManifestWriter,
+    stage: RunStage,
+    update: F,
+    console: &mut Console<'_>,
+) where
+    F: FnOnce(&mut admissionlab_core::RunManifest),
+{
+    if let Err(error) = manifest.record(stage, update).await {
+        console.problem(&format!(
+            "could not record the {stage} stage in this run's manifest: {error}"
+        ));
+    }
+}
+
+/// Records that `stage` failed, leaving `completedAt` null.
+///
+/// Reported but never propagated: a manifest that could not be updated
+/// must not replace, or obscure, the failure it was trying to describe.
+async fn record_stage_failure(
+    manifest: &mut RunManifestWriter,
+    stage: RunStage,
+    console: &mut Console<'_>,
+) {
+    if let Err(error) = manifest.fail(stage).await {
+        console.problem(&format!(
+            "could not record the {stage} failure in this run's manifest: {error}"
+        ));
+    }
 }
 
 /// Loads and checks everything that comes out of the user's own files.
@@ -388,25 +532,42 @@ fn prepare_inputs(
         expectations.len()
     ));
 
+    // Hashed here, with the same files still on disk and already known
+    // to parse, so the manifest can be complete the moment the run
+    // workspace exists. A read failure is the user's own input problem
+    // (the file vanished or became unreadable between parse and hash),
+    // which is what exit 2 means — see `provenance`'s own documentation
+    // for why this is not degraded to an absent digest.
+    let digests = provenance::input_digests(request.config, &lab, &fixtures).map_err(|error| {
+        console.problem(&format!(
+            "failed to hash this run's inputs for its manifest: {error}"
+        ));
+        RunDisposition::InvalidInput
+    })?;
+
     Ok(Inputs {
         lab,
         policy,
         expectations,
         fixtures,
+        digests,
     })
 }
 
 /// Refuses to start a lab on a host that cannot run one.
 ///
-/// Returns `Some(disposition)` when the run must stop. The report is
-/// printed in full either way when something is wrong, so a user learns
+/// Returns `Err(disposition)` when the run must stop, and otherwise the
+/// report itself — which the run manifest records as its
+/// `ToolProvenance` (Task 5.1), so the versions written down are the same
+/// ones the run was gated on rather than a second, later probe's. The
+/// report is printed in full when something is wrong, so a user learns
 /// every missing prerequisite at once rather than one rerun at a time —
 /// and `admissionlab doctor` is named explicitly, because it is the
 /// command that explains this in detail.
 async fn check_prerequisites<B: LabBackend>(
     backend: &B,
     console: &mut Console<'_>,
-) -> Option<RunDisposition> {
+) -> Result<DoctorReport, RunDisposition> {
     let report = backend.doctor_report().await;
     if let Some(warning) = &report.disk_warning {
         // Advisory only, exactly as `meets_prerequisites` treats it
@@ -415,7 +576,9 @@ async fn check_prerequisites<B: LabBackend>(
         // that later dies pulling images should not be the first hint.
         console.problem(&format!("disk space: {warning}"));
     }
-    let disposition = crate::exit::disposition_for_prerequisites(&report)?;
+    let Some(disposition) = crate::exit::disposition_for_prerequisites(&report) else {
+        return Ok(report);
+    };
 
     console.problem("host prerequisites are not met:");
     for tool in &report.tools {
@@ -428,7 +591,7 @@ async fn check_prerequisites<B: LabBackend>(
         console.problem("  docker daemon: unreachable");
     }
     console.problem("run `admissionlab doctor` for the full report.");
-    Some(disposition)
+    Err(disposition)
 }
 
 /// Reports a cluster-stage failure and maps it.
@@ -457,15 +620,24 @@ async fn run_with_clusters<B: LabBackend>(
     inputs: &Inputs,
     runner: &LabRunner<B::Clusters>,
     prepared: &PreparedLab,
+    manifest: &mut RunManifestWriter,
 ) -> RunDisposition {
     // Resolved before anything can fail, so every later stage has
-    // somewhere to write its evidence.
+    // somewhere to write its evidence. Recorded as a `reporting` failure
+    // when it fails: preparing where the reports go is the reporting
+    // stage's first act, even though it happens early for the reason
+    // above.
     let report_dir = match resolve_report_dir(request, prepared).await {
         Ok(directory) => directory,
         Err(error) => {
             console.problem(&format!("failed to prepare the report directory: {error}"));
+            record_stage_failure(manifest, RunStage::Reporting, console).await;
             return RunDisposition::InfrastructureFailed;
         }
+    };
+    let mut outputs = Outputs {
+        report_dir,
+        manifest,
     };
 
     let installer = backend.stack_installer(&prepared.paths);
@@ -481,8 +653,9 @@ async fn run_with_clusters<B: LabBackend>(
         Ok(stacks) => stacks,
         Err(failure) => {
             console.problem(&format!("{failure}"));
+            record_stage_failure(outputs.manifest, RunStage::Installation, console).await;
             write_failure(
-                &report_dir,
+                &outputs.report_dir,
                 prepared,
                 "install",
                 &failure.to_string(),
@@ -498,6 +671,21 @@ async fn run_with_clusters<B: LabBackend>(
         stacks.baseline.components.len(),
         stacks.candidate.components.len()
     ));
+    // Each side's components are re-recorded from what was actually
+    // installed, replacing the configured versions the first write used
+    // — see `provenance`'s "Components are recorded twice" section.
+    let baseline_components = provenance::installed_components(&stacks.baseline);
+    let candidate_components = provenance::installed_components(&stacks.candidate);
+    record_stage(
+        outputs.manifest,
+        RunStage::Installation,
+        |manifest| {
+            manifest.baseline.components = baseline_components;
+            manifest.candidate.components = candidate_components;
+        },
+        console,
+    )
+    .await;
 
     let capture = backend.fixture_capture(
         inputs.fixtures.clone(),
@@ -506,12 +694,13 @@ async fn run_with_clusters<B: LabBackend>(
     let mut diagnostics = install_diagnostics(&stacks);
     if let Err(failure) = runner.capture_fixtures(prepared, &capture).await {
         console.problem(&format!("{failure}"));
+        record_stage_failure(outputs.manifest, RunStage::FixtureCapture, console).await;
         // Whatever was captured before the failure is still a real
         // observation; its diagnostics go into the artifact rather than
         // being discarded with the run (ROADMAP step 3).
         diagnostics.extend(outcome_diagnostics(&capture.captured_outcomes()));
         write_failure(
-            &report_dir,
+            &outputs.report_dir,
             prepared,
             "capture",
             &failure.to_string(),
@@ -526,6 +715,7 @@ async fn run_with_clusters<B: LabBackend>(
         inputs.fixtures.len(),
         prepared.paths.raw().display()
     ));
+    record_stage(outputs.manifest, RunStage::FixtureCapture, |_| {}, console).await;
 
     compare_and_report(
         console,
@@ -533,7 +723,7 @@ async fn run_with_clusters<B: LabBackend>(
         prepared,
         &stacks,
         &capture.captured_outcomes(),
-        &report_dir,
+        &mut outputs,
         diagnostics,
     )
     .await
@@ -553,15 +743,16 @@ async fn compare_and_report(
     prepared: &PreparedLab,
     stacks: &InstalledLab,
     outcomes: &[AdmissionOutcome],
-    report_dir: &Path,
+    outputs: &mut Outputs<'_>,
     mut diagnostics: Vec<Diagnostic>,
 ) -> RunDisposition {
     let comparison = match compare::compare(&inputs.lab, &inputs.fixtures, outcomes) {
         Ok(comparison) => comparison,
         Err(error) => {
             console.problem(&format!("failed to normalize captured objects: {error}"));
+            record_stage_failure(outputs.manifest, RunStage::Comparison, console).await;
             write_failure(
-                report_dir,
+                &outputs.report_dir,
                 prepared,
                 "normalize",
                 &error.to_string(),
@@ -588,10 +779,13 @@ async fn compare_and_report(
         diagnostics,
     );
 
-    let written = match report::write_reports(report_dir, &result, console.terminal) {
+    record_stage(outputs.manifest, RunStage::Comparison, |_| {}, console).await;
+
+    let written = match report::write_reports(&outputs.report_dir, &result, console.terminal) {
         Ok(written) => written,
         Err(error) => {
             console.problem(&format!("failed to write the run's reports: {error}"));
+            record_stage_failure(outputs.manifest, RunStage::Reporting, console).await;
             return crate::exit::disposition_for_report_error(&error);
         }
     };
@@ -601,6 +795,7 @@ async fn compare_and_report(
         written.result_json.display(),
         written.report_html.display()
     ));
+    record_stage(outputs.manifest, RunStage::Reporting, |_| {}, console).await;
 
     crate::exit::disposition_for_policy(result.policy.disposition)
 }

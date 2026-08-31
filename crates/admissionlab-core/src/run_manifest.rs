@@ -116,6 +116,43 @@
 //! with. An instant outside the representable range fails the write
 //! rather than being clamped.
 //!
+//! # Incremental writes and partial provenance (Task 5.2)
+//!
+//! A manifest is not written once at the end. [`RunManifestWriter`]
+//! creates `run.json` **before any cluster exists** and atomically
+//! rewrites it after every major stage, so a run that dies at install
+//! still leaves a valid, parseable document saying what it was, what it
+//! ran on, and where it stopped. The alternative — writing only on
+//! success — throws the provenance away in exactly the situation a user
+//! most needs it (PRODUCT.md §33: enough on first failure that a rerun is
+//! not required to learn what happened).
+//!
+//! Two fields carry that state, and they answer different questions:
+//! [`RunManifest::status`] says whether the run is still going, finished,
+//! or failed, and [`RunManifest::stage`] says *where* — the last stage
+//! that completed while a run is in progress, or the stage that failed
+//! once it has. [`RunManifest::completed_at`] stays `None` for anything
+//! but a completed run, so `completedAt: null` alone already
+//! distinguishes a partial manifest from a whole one without a reader
+//! needing to understand the stage vocabulary at all.
+//!
+//! ## Where the first write actually happens, and why
+//!
+//! `admissionlab-cli`'s pipeline validates every user input, hashes the
+//! fixtures, probes host prerequisites, and resolves both sides' node
+//! images *before* it creates a cluster — see that module's own "every
+//! input check happens before any cluster is created" section for why
+//! that order exists independently of this task. The first manifest write
+//! therefore lands after all of those and before
+//! [`crate::ClusterManager::create`] is ever called, which means it is
+//! already a *complete* pre-cluster record: host, tool versions, every
+//! input digest, and both environments' resolved node images. Later
+//! writes revise it (component versions become the versions actually
+//! installed) and advance the stage; they do not fill in blanks the first
+//! write left behind, except for a side's `components` list, which is
+//! populated from the resolved configuration up front and re-recorded
+//! from the installer afterwards.
+//!
 //! # Schema
 //!
 //! [`run_manifest_v1alpha1_json_schema`] generates
@@ -128,6 +165,7 @@
 //! which applies here unchanged.
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use admissionlab_spec::PolicySpec;
@@ -135,6 +173,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::artifact::{ArtifactError, ArtifactStore, RunPaths};
 use crate::ids::{FixtureId, RunId};
 use crate::tool::{DoctorReport, ToolName};
 
@@ -179,6 +218,14 @@ pub struct RunManifest {
     /// reports it.
     #[serde(rename = "admissionlabVersion")]
     pub admissionlab_version: String,
+    /// Whether this run is still going, finished, or failed (Task 5.2).
+    #[serde(rename = "status")]
+    pub status: RunStatus,
+    /// Where this run got to — the last stage that completed while it is
+    /// in progress, or the stage that failed once it has (Task 5.2). See
+    /// [`RunStage`].
+    #[serde(rename = "stage")]
+    pub stage: RunStage,
     /// The machine the run executed on.
     #[serde(rename = "host")]
     pub host: HostProvenance,
@@ -230,6 +277,105 @@ pub struct RunManifest {
     #[serde(rename = "completedAt", with = "rfc3339_option")]
     #[schemars(with = "Option<String>")]
     pub completed_at: Option<SystemTime>,
+}
+
+/// Whether the run a manifest describes is still going, finished, or
+/// failed (Task 5.2).
+///
+/// Deliberately separate from [`RunStage`]: "we are at the install stage"
+/// and "we failed at the install stage" are different claims, and a
+/// single enum trying to encode both would either lose one of them or
+/// double the variant count. Wire values are pinned literals so renaming
+/// a Rust variant cannot change what a written manifest says.
+///
+/// This carries no verdict. Whether the regression *policy* passed is
+/// `admissionlab-report`'s `result.json`, not this document:
+/// [`RunStatus::Completed`] means "the run finished", never "the run
+/// passed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum RunStatus {
+    /// The run is still executing (or was interrupted so abruptly that
+    /// nothing got to record an outcome — a `SIGKILL`, a lost machine).
+    #[serde(rename = "in_progress")]
+    InProgress,
+    /// Every stage finished. [`RunManifest::completed_at`] is `Some` for
+    /// exactly this variant and no other.
+    #[serde(rename = "completed")]
+    Completed,
+    /// A stage failed; [`RunManifest::stage`] names which.
+    #[serde(rename = "failed")]
+    Failed,
+}
+
+/// The stages of a run, in execution order (Task 5.2).
+///
+/// Read together with [`RunManifest::status`]:
+///
+/// - [`RunStatus::InProgress`] — the last stage that **completed**. A
+///   manifest at [`RunStage::Started`] has recorded its inputs, tools,
+///   and node images and has not yet created a cluster.
+/// - [`RunStatus::Failed`] — the stage that **failed**.
+/// - [`RunStatus::Completed`] — always [`RunStage::Completed`].
+///
+/// Wire values are pinned snake-case literals, matching how
+/// `admissionlab-normalize`'s `RuleTier` pins its own text form and for
+/// the same reason: a variant rename must never silently change a
+/// checked-in golden file or a consumer's parser.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
+)]
+pub enum RunStage {
+    /// The run workspace exists and every pre-cluster input has been
+    /// recorded: configuration, fixtures, expectations, normalization,
+    /// policy, host, tool versions, and both sides' resolved node images.
+    /// Nothing has been provisioned.
+    #[serde(rename = "started")]
+    Started,
+    /// Both ephemeral clusters were created.
+    #[serde(rename = "cluster_creation")]
+    ClusterCreation,
+    /// Both sides' component stacks were installed and became ready.
+    #[serde(rename = "installation")]
+    Installation,
+    /// Every fixture was replayed through both sides and its evidence
+    /// written.
+    #[serde(rename = "fixture_capture")]
+    FixtureCapture,
+    /// Both sides' evidence was normalized, compared, and graded.
+    #[serde(rename = "comparison")]
+    Comparison,
+    /// The run's reports were rendered and written.
+    #[serde(rename = "reporting")]
+    Reporting,
+    /// The run finished. Paired only with [`RunStatus::Completed`].
+    #[serde(rename = "completed")]
+    Completed,
+}
+
+impl RunStage {
+    /// This stage's stable text form, identical to its serialized value.
+    ///
+    /// Exposed so a caller can name a stage in a console message or a
+    /// diagnostic without re-deriving the spelling (and without going
+    /// through `serde`), the same way `RuleTier::as_str` does upstream.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Started => "started",
+            Self::ClusterCreation => "cluster_creation",
+            Self::Installation => "installation",
+            Self::FixtureCapture => "fixture_capture",
+            Self::Comparison => "comparison",
+            Self::Reporting => "reporting",
+            Self::Completed => "completed",
+        }
+    }
+}
+
+impl std::fmt::Display for RunStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
 }
 
 /// The machine a run executed on.
@@ -602,6 +748,163 @@ pub fn policy_sha256(policy: &PolicySpec) -> String {
 
     canonical_sha256(&canonical)
         .expect("a serde_json::Value built here is already valid JSON and cannot fail to re-encode")
+}
+
+/// Owns one run's `run.json` and keeps it truthful as the run proceeds
+/// (Task 5.2).
+///
+/// See this module's "Incremental writes and partial provenance" section
+/// for the contract. In short: [`RunManifestWriter::create`] writes a
+/// complete pre-cluster manifest before anything is provisioned, and
+/// every later method mutates the in-memory manifest and rewrites the
+/// file in one call, so the file can never lag the value the run is
+/// actually working from.
+///
+/// # Atomicity, and what a crash leaves behind
+///
+/// Every write goes through [`ArtifactStore::write_json_atomic`], so a
+/// reader (or a crash) always observes either the previous manifest in
+/// full or the new one in full — never a truncated document. A process
+/// killed between two writes therefore leaves the *previous* stage's
+/// manifest intact, with `status: in_progress`, which is exactly the
+/// honest statement: something was still running and never reported an
+/// outcome.
+///
+/// # This type never decides anything
+///
+/// It advances no stage on its own and never infers a status from what it
+/// was told. The caller — which is the only thing that knows whether a
+/// stage succeeded — names the stage and the outcome explicitly. That is
+/// deliberate: a writer that guessed "the next stage must be
+/// installation" would silently record a stage that never ran the moment
+/// the pipeline's order changed.
+#[derive(Debug)]
+pub struct RunManifestWriter {
+    /// The store every write is routed through, for its atomicity and
+    /// path-containment guarantees.
+    store: ArtifactStore,
+    /// Where this run's manifest lives: [`RunPaths::run_json`].
+    path: PathBuf,
+    /// The current manifest, always equal to what was last written.
+    manifest: RunManifest,
+}
+
+impl RunManifestWriter {
+    /// Writes `manifest` to `paths`' [`RunPaths::run_json`] and returns a
+    /// writer that keeps it up to date.
+    ///
+    /// `manifest` is written exactly as given — this does not stamp a
+    /// stage or a status onto it, for the reason this type's "never
+    /// decides anything" note gives. A caller creating a pre-cluster
+    /// manifest sets [`RunStatus::InProgress`] and [`RunStage::Started`]
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactError`] if the manifest could not be serialized
+    /// or written. A caller should treat this as fatal *before* creating
+    /// any cluster: it means the run's own artifact directory is not
+    /// writable, so nothing later in the run would be recoverable either
+    /// — and at that point nothing has been provisioned, so failing costs
+    /// nothing.
+    pub async fn create(
+        store: ArtifactStore,
+        paths: &RunPaths,
+        manifest: RunManifest,
+    ) -> Result<Self, ArtifactError> {
+        let writer = Self {
+            store,
+            path: paths.run_json().to_path_buf(),
+            manifest,
+        };
+        writer.write().await?;
+        Ok(writer)
+    }
+
+    /// The manifest as last written.
+    #[must_use]
+    pub fn manifest(&self) -> &RunManifest {
+        &self.manifest
+    }
+
+    /// Where this run's manifest is written.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Records that `stage` completed, applying `update` to the manifest
+    /// first, and rewrites the file.
+    ///
+    /// Mutation and write are one call rather than a `manifest_mut()`
+    /// accessor plus a separate `flush()`, so there is no window in which
+    /// the in-memory manifest and the file disagree, and no way for a
+    /// caller to update one and forget the other.
+    ///
+    /// Leaves [`RunManifest::status`] at [`RunStatus::InProgress`] and
+    /// [`RunManifest::completed_at`] at `None`: only
+    /// [`RunManifestWriter::complete`] may set those, because only the
+    /// end of the run knows the run ended.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactError`] if the rewrite failed. A caller should
+    /// treat this as non-fatal and report it: a manifest that stopped
+    /// being updated is a lesser problem than abandoning a run whose
+    /// clusters are already up and whose comparison may still succeed.
+    pub async fn record<F>(&mut self, stage: RunStage, update: F) -> Result<(), ArtifactError>
+    where
+        F: FnOnce(&mut RunManifest),
+    {
+        update(&mut self.manifest);
+        self.manifest.status = RunStatus::InProgress;
+        self.manifest.stage = stage;
+        self.write().await
+    }
+
+    /// Records that `stage` **failed**: [`RunStatus::Failed`], the stage
+    /// named, and [`RunManifest::completed_at`] left `None`.
+    ///
+    /// `completed_at` is explicitly cleared rather than merely left
+    /// alone, so this is safe to call from a path that might follow a
+    /// [`RunManifestWriter::complete`] — a failed run must never carry a
+    /// completion time (Global Constraint 15).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactError`] if the rewrite failed. Report it; never
+    /// let it replace the failure being recorded.
+    pub async fn fail(&mut self, stage: RunStage) -> Result<(), ArtifactError> {
+        self.manifest.status = RunStatus::Failed;
+        self.manifest.stage = stage;
+        self.manifest.completed_at = None;
+        self.write().await
+    }
+
+    /// Records that the run finished at `completed_at`:
+    /// [`RunStatus::Completed`], [`RunStage::Completed`], and a real
+    /// completion timestamp.
+    ///
+    /// "Finished" is not "passed" — see [`RunStatus`]. A run whose policy
+    /// failed still completed, and its manifest says so; the verdict
+    /// lives in `result.json`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArtifactError`] if the rewrite failed.
+    pub async fn complete(&mut self, completed_at: SystemTime) -> Result<(), ArtifactError> {
+        self.manifest.status = RunStatus::Completed;
+        self.manifest.stage = RunStage::Completed;
+        self.manifest.completed_at = Some(completed_at);
+        self.write().await
+    }
+
+    /// Atomically writes the current manifest to [`Self::path`].
+    async fn write(&self) -> Result<(), ArtifactError> {
+        self.store
+            .write_json_atomic(&self.path, &self.manifest)
+            .await
+    }
 }
 
 /// Generates the JSON Schema for [`RunManifest`], derived from the same

@@ -30,9 +30,9 @@ use std::time::{Duration, SystemTime};
 
 use admissionlab_core::run_manifest::{
     ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, HostProvenance,
-    NormalizationRuleRecord, RunManifest, SCHEMA_VERSION, ToolProvenance, canonical_sha256,
-    normalization_sha256, policy_sha256, run_manifest_v1alpha1_json_schema, sha256_hex,
-    split_node_image_reference,
+    NormalizationRuleRecord, RunManifest, RunStage, RunStatus, SCHEMA_VERSION, ToolProvenance,
+    canonical_sha256, normalization_sha256, policy_sha256, run_manifest_v1alpha1_json_schema,
+    sha256_hex, split_node_image_reference,
 };
 use admissionlab_core::{DoctorReport, FixtureId, RunId, ToolName, ToolStatus};
 
@@ -77,6 +77,8 @@ fn realistic_manifest() -> RunManifest {
         schema_version: SCHEMA_VERSION.to_owned(),
         run_id: RunId::parse("6f1a7c2e-9b34-4d5a-8f0e-11c2b3a4d5e6").expect("valid run id"),
         admissionlab_version: "0.1.0".to_owned(),
+        status: RunStatus::Completed,
+        stage: RunStage::Completed,
         host: HostProvenance {
             os: "linux".to_owned(),
             arch: "x86_64".to_owned(),
@@ -228,7 +230,9 @@ fn top_level_keys_are_exactly_the_frozen_set() {
             "policySha256",
             "runId",
             "schemaVersion",
+            "stage",
             "startedAt",
+            "status",
             "tools",
         ],
         "the run manifest's top-level keys changed; re-read `run_manifest.rs`'s \
@@ -492,8 +496,14 @@ fn timestamps_are_rfc3339_with_fixed_nanosecond_precision() {
     // subtracting the fractional part from `started()` rather than as a
     // fresh `Duration::from_secs`, so the two assertions above and below
     // are visibly the same instant to the nanosecond.
+    //
+    // The status/stage move with `completed_at` so this stays a manifest
+    // a run could actually have written: a run without a completion time
+    // is one that failed or is still going, never a completed one.
     manifest.started_at = started() - Duration::from_nanos(123_456_789);
     manifest.completed_at = None;
+    manifest.status = RunStatus::Failed;
+    manifest.stage = RunStage::Installation;
     let value: serde_json::Value =
         serde_json::to_value(&manifest).expect("a manifest always serializes");
     assert_eq!(value["startedAt"], "2026-09-01T12:00:00.000000000Z");
