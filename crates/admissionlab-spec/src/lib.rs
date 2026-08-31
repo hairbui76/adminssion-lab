@@ -50,9 +50,10 @@ pub use component::{
 pub use error::SpecError;
 pub use load::load_lab;
 pub use model::{
-    ComponentSpec, EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec, HelmInstallSpec,
-    InstallMethodSpec, LabSpec, LatencyPolicy, ManifestsInstallSpec, MigrationSuiteSpec,
-    PolicyOverrideSpec, PolicySpec,
+    ComponentSpec, CustomResourceConditionSpec, EnvironmentSpec, FixtureSelectionSpec,
+    GatewaySuiteSpec, HelmInstallSpec, InstallMethodSpec, LabSpec, LatencyPolicy,
+    ManifestsInstallSpec, MigrationSuiteSpec, NamedObjectSpec, NamespacedObjectSpec,
+    PolicyOverrideSpec, PolicySpec, ReadinessCheckSpec,
 };
 pub use resolve::{
     LoadedLab, ResolvedEnvironment, ResolvedFixtureSelection, ResolvedLab, resolve_lab,

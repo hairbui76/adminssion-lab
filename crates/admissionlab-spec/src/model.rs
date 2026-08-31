@@ -152,6 +152,102 @@ pub struct ComponentSpec {
     /// document — see [`crate::resolve::config_directory`].
     #[serde(default)]
     pub install: Option<InstallMethodSpec>,
+    /// Conditions this component must satisfy before the next component
+    /// on the same side is installed, and before any fixture is
+    /// replayed.
+    ///
+    /// Empty by default, which is a real and sometimes correct answer (a
+    /// component that only applies cluster-scoped configuration has
+    /// nothing to wait on) — but for anything that serves admission it is
+    /// almost never the right one. `helm upgrade --install` returns as
+    /// soon as a release's manifests are applied, and `kubectl apply` as
+    /// soon as its objects exist; neither waits for a controller to be
+    /// running, for a `caBundle` to be filled in, or for a webhook
+    /// configuration that a controller creates at *runtime* to appear at
+    /// all. A lab that replays fixtures inside that window observes a
+    /// stack that is not yet the stack under test, and does so at a
+    /// different moment on each side — which is exactly the
+    /// nondeterminism Global Constraint 7 rules out.
+    ///
+    /// The variant set mirrors `recipes/*/recipe.yaml`'s own `readiness`
+    /// section one for one — deliberately, so a certified recipe's
+    /// checks can be transcribed into a lab file unchanged (see
+    /// [`ReadinessCheckSpec`]).
+    #[serde(default)]
+    pub readiness: Vec<ReadinessCheckSpec>,
+}
+
+/// One condition a [`ComponentSpec`] must satisfy before it counts as
+/// installed.
+///
+/// The user-facing YAML form of [`crate::ReadinessCheck`], which is what
+/// [`crate::resolve_lab`] converts this into and what
+/// `admissionlab_installer::readiness` actually probes. The variant set
+/// and the wire spelling of every field match `admissionlab_recipes`'s
+/// own recipe-file readiness section exactly, so the two surfaces cannot
+/// drift into two different vocabularies for one closed set of checks.
+///
+/// Internally tagged on `type`, with each variant's payload a named
+/// struct rather than inline fields — the same representation
+/// [`InstallMethodSpec`] uses, and for the same two reasons: it is the
+/// only enum shape `serde_norway` can express as a plain YAML mapping,
+/// and putting each payload in its own `rename_all = "camelCase"` struct
+/// is what gives multi-word fields (`apiVersion`, `conditionType`) their
+/// camelCase spelling in the parser *and* in the generated JSON Schema,
+/// without depending on `rename_all_fields` cascading through `schemars`
+/// as well as `serde`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(tag = "type", rename_all = "camelCase", deny_unknown_fields)]
+pub enum ReadinessCheckSpec {
+    /// A `Deployment`'s `Available` condition must be `True`.
+    DeploymentAvailable(NamespacedObjectSpec),
+    /// A `DaemonSet` must have every desired pod scheduled and ready.
+    DaemonSetReady(NamespacedObjectSpec),
+    /// A `Job` must have completed successfully.
+    JobComplete(NamespacedObjectSpec),
+    /// A `ValidatingWebhookConfiguration`/`MutatingWebhookConfiguration`
+    /// with this name must exist.
+    WebhookConfigurationPresent(NamedObjectSpec),
+    /// A custom resource's named condition must equal a given status.
+    CustomResourceCondition(CustomResourceConditionSpec),
+}
+
+/// A namespaced object named by a [`ReadinessCheckSpec`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NamespacedObjectSpec {
+    /// The object's namespace.
+    pub namespace: String,
+    /// The object's name.
+    pub name: String,
+}
+
+/// A cluster-scoped object named by a [`ReadinessCheckSpec`].
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NamedObjectSpec {
+    /// The object's name.
+    pub name: String,
+}
+
+/// A custom resource whose named condition must reach a given status.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CustomResourceConditionSpec {
+    /// The custom resource's `apiVersion`, for example `kyverno.io/v1`.
+    pub api_version: String,
+    /// The custom resource's `kind`, for example `ClusterPolicy`.
+    pub kind: String,
+    /// The custom resource's namespace. Omitted for a cluster-scoped
+    /// resource.
+    #[serde(default)]
+    pub namespace: Option<String>,
+    /// The custom resource's name.
+    pub name: String,
+    /// The condition's `type`, for example `Ready`.
+    pub condition_type: String,
+    /// The condition's required `status`, typically `"True"`.
+    pub status: String,
 }
 
 /// The user-facing YAML form of a component's install method.

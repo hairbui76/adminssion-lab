@@ -28,7 +28,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use admissionlab_spec::{InstallMethod, ManifestInstallSpec, load_lab, resolve_lab};
+use admissionlab_spec::{
+    InstallMethod, ManifestInstallSpec, ReadinessCheck, load_lab, resolve_lab,
+};
 
 // ---------------------------------------------------------------------
 // Test support
@@ -424,6 +426,9 @@ fn helm_component_resolves_to_expected_shape_with_defaults() {
     // No top-level `version` was set, so it must fall back to the
     // install method's own pinned version.
     assert_eq!(component.version, "v1.14.4");
+    // This component declares no `readiness`, and an absent section
+    // resolves to no checks rather than to a defaulted one — see
+    // `readiness_checks_resolve_from_yaml` for the populated case.
     assert!(component.readiness.is_empty());
     assert!(component.recipe_normalize_rules.is_empty());
     assert!(component.capabilities.is_empty());
@@ -826,5 +831,132 @@ fn manifests_paths_resolve_against_config_directory_not_cwd() {
     assert_ne!(
         resolved_canonical, decoy_canonical,
         "install.manifests.paths must not resolve against the current working directory"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `readiness`
+// ---------------------------------------------------------------------
+
+#[test]
+fn readiness_checks_resolve_from_yaml() {
+    // All five variants at once, written exactly as
+    // `recipes/*/recipe.yaml` writes them -- the whole point of the
+    // shared spelling is that a certified recipe's readiness section can
+    // be transcribed into a lab file without translation.
+    let path = write_config(
+        "readiness-all-variants",
+        r#"
+        apiVersion: admissionlab.io/v1alpha1
+        kind: Lab
+        baseline:
+          kubernetes: "1.35.8"
+          components:
+            - name: kyverno
+              install:
+                type: helm
+                chart: kyverno/kyverno
+                repo: https://kyverno.github.io/kyverno/
+                version: "3.9.0"
+                namespace: kyverno
+              readiness:
+                - type: deploymentAvailable
+                  namespace: kyverno
+                  name: kyverno-admission-controller
+                - type: daemonSetReady
+                  namespace: kube-system
+                  name: some-agent
+                - type: jobComplete
+                  namespace: kyverno
+                  name: some-migration
+                - type: webhookConfigurationPresent
+                  name: kyverno-resource-mutating-webhook-cfg
+                - type: customResourceCondition
+                  apiVersion: kyverno.io/v1
+                  kind: ClusterPolicy
+                  name: alpha-corpus
+                  conditionType: Ready
+                  status: "True"
+        candidate:
+          kubernetes: "1.35.8"
+        fixtures:
+          include: ["fixtures/**/*.yaml"]
+        "#,
+    );
+
+    let loaded = load_lab(&path).unwrap();
+    let resolved = resolve_lab(loaded).expect("a component with readiness checks must resolve");
+    let component = &resolved.baseline.components[0];
+
+    assert_eq!(
+        component.readiness,
+        vec![
+            ReadinessCheck::DeploymentAvailable {
+                namespace: "kyverno".to_owned(),
+                name: "kyverno-admission-controller".to_owned(),
+            },
+            ReadinessCheck::DaemonSetReady {
+                namespace: "kube-system".to_owned(),
+                name: "some-agent".to_owned(),
+            },
+            ReadinessCheck::JobComplete {
+                namespace: "kyverno".to_owned(),
+                name: "some-migration".to_owned(),
+            },
+            ReadinessCheck::WebhookConfigurationPresent {
+                name: "kyverno-resource-mutating-webhook-cfg".to_owned(),
+            },
+            ReadinessCheck::CustomResourceCondition {
+                api_version: "kyverno.io/v1".to_owned(),
+                kind: "ClusterPolicy".to_owned(),
+                // Cluster-scoped: `namespace` was omitted, and an
+                // omitted namespace must stay `None` rather than
+                // becoming an empty string that would then be sent to
+                // the API server as a real (nonexistent) namespace.
+                namespace: None,
+                name: "alpha-corpus".to_owned(),
+                condition_type: "Ready".to_owned(),
+                status: "True".to_owned(),
+            },
+        ],
+        "every readiness variant must survive resolution in written order"
+    );
+}
+
+#[test]
+fn an_unknown_readiness_check_type_is_rejected() {
+    // The closed variant set is the point: a misspelled or invented
+    // check must fail at load time, not silently resolve to no wait at
+    // all -- which would be indistinguishable from a component that
+    // legitimately has nothing to wait on.
+    let path = write_config(
+        "readiness-unknown-type",
+        r#"
+        apiVersion: admissionlab.io/v1alpha1
+        kind: Lab
+        baseline:
+          kubernetes: "1.35.8"
+          components:
+            - name: kyverno
+              version: "3.9.0"
+              install:
+                type: manifests
+                paths: ["policies.yaml"]
+              readiness:
+                - type: podRunning
+                  namespace: kyverno
+                  name: whatever
+        candidate:
+          kubernetes: "1.35.8"
+        fixtures:
+          include: ["fixtures/**/*.yaml"]
+        "#,
+    );
+
+    let error = load_lab(&path).expect_err("an unknown readiness check type must be rejected");
+    let rendered = error.to_string();
+    assert!(
+        rendered.contains("podRunning"),
+        "the error must name the offending value: {rendered}"
     );
 }

@@ -71,6 +71,13 @@
           ],
           "default": null
         },
+        "readiness": {
+          "description": "Conditions this component must satisfy before the next component\non the same side is installed, and before any fixture is\nreplayed.\n\nEmpty by default, which is a real and sometimes correct answer (a\ncomponent that only applies cluster-scoped configuration has\nnothing to wait on) — but for anything that serves admission it is\nalmost never the right one. `helm upgrade --install` returns as\nsoon as a release's manifests are applied, and `kubectl apply` as\nsoon as its objects exist; neither waits for a controller to be\nrunning, for a `caBundle` to be filled in, or for a webhook\nconfiguration that a controller creates at *runtime* to appear at\nall. A lab that replays fixtures inside that window observes a\nstack that is not yet the stack under test, and does so at a\ndifferent moment on each side — which is exactly the\nnondeterminism Global Constraint 7 rules out.\n\nThe variant set mirrors `recipes/*/recipe.yaml`'s own `readiness`\nsection one for one — deliberately, so a certified recipe's\nchecks can be transcribed into a lab file unchanged (see\n[`ReadinessCheckSpec`]).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadinessCheckSpec"
+          }
+        },
         "recipe": {
           "description": "A named recipe to install this component from. Recipe resolution\nis Task 2.5's responsibility; this field is carried through\nunresolved and does not currently affect resolution at all — an\nexplicit `install` block (below) is required regardless of\nwhether `recipe` is also set.",
           "type": [
@@ -317,6 +324,149 @@
         }
       },
       "additionalProperties": false
+    },
+    "ReadinessCheckSpec": {
+      "description": "One condition a [`ComponentSpec`] must satisfy before it counts as\ninstalled.\n\nThe user-facing YAML form of [`crate::ReadinessCheck`], which is what\n[`crate::resolve_lab`] converts this into and what\n`admissionlab_installer::readiness` actually probes. The variant set\nand the wire spelling of every field match `admissionlab_recipes`'s\nown recipe-file readiness section exactly, so the two surfaces cannot\ndrift into two different vocabularies for one closed set of checks.\n\nInternally tagged on `type`, with each variant's payload a named\nstruct rather than inline fields — the same representation\n[`InstallMethodSpec`] uses, and for the same two reasons: it is the\nonly enum shape `serde_norway` can express as a plain YAML mapping,\nand putting each payload in its own `rename_all = \"camelCase\"` struct\nis what gives multi-word fields (`apiVersion`, `conditionType`) their\ncamelCase spelling in the parser *and* in the generated JSON Schema,\nwithout depending on `rename_all_fields` cascading through `schemars`\nas well as `serde`.",
+      "oneOf": [
+        {
+          "description": "A `Deployment`'s `Available` condition must be `True`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The object's namespace.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "deploymentAvailable"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        },
+        {
+          "description": "A `DaemonSet` must have every desired pod scheduled and ready.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The object's namespace.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "daemonSetReady"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        },
+        {
+          "description": "A `Job` must have completed successfully.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The object's namespace.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "jobComplete"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        },
+        {
+          "description": "A `ValidatingWebhookConfiguration`/`MutatingWebhookConfiguration`\nwith this name must exist.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "webhookConfigurationPresent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "A custom resource's named condition must equal a given status.",
+          "type": "object",
+          "properties": {
+            "apiVersion": {
+              "description": "The custom resource's `apiVersion`, for example `kyverno.io/v1`.",
+              "type": "string"
+            },
+            "conditionType": {
+              "description": "The condition's `type`, for example `Ready`.",
+              "type": "string"
+            },
+            "kind": {
+              "description": "The custom resource's `kind`, for example `ClusterPolicy`.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The custom resource's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The custom resource's namespace. Omitted for a cluster-scoped\nresource.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "status": {
+              "description": "The condition's required `status`, typically `\"True\"`.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "customResourceCondition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "apiVersion",
+            "kind",
+            "name",
+            "conditionType",
+            "status"
+          ]
+        }
+      ]
     }
   }
 }

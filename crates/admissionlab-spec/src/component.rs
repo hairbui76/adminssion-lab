@@ -33,18 +33,25 @@ use std::path::{Path, PathBuf};
 use crate::error::SpecError;
 use crate::model::{
     ComponentSpec, HelmInstallSpec as RawHelmInstallSpec, InstallMethodSpec,
-    ManifestsInstallSpec as RawManifestsInstallSpec,
+    ManifestsInstallSpec as RawManifestsInstallSpec, ReadinessCheckSpec,
 };
 use crate::resolve::resolve_relative;
 use crate::validate;
 
 /// One resolved component within a [`crate::ResolvedEnvironment`]: a
-/// name, a version, a concrete install method, and the (currently always
-/// empty) readiness/normalize/capability metadata a recipe will
-/// eventually supply.
+/// name, a version, a concrete install method, its readiness contract,
+/// and the (currently always empty) normalize/capability metadata a
+/// recipe will eventually supply.
 ///
-/// `readiness`, `recipe_normalize_rules`, and `capabilities` have no YAML
-/// surface yet — [`crate::ComponentSpec`] carries no fields for them, so
+/// `readiness` is populated from [`crate::ComponentSpec::readiness`],
+/// whose own documentation explains why a component that serves
+/// admission needs one: neither `helm upgrade --install` nor
+/// `kubectl apply` waits for a controller to actually be serving, so a
+/// lab with no readiness contract replays its fixtures against a stack
+/// that is not yet the stack under test.
+///
+/// `recipe_normalize_rules` and `capabilities` still have no YAML
+/// surface — [`crate::ComponentSpec`] carries no fields for them, so
 /// [`resolve_component`] always produces an empty collection for each,
 /// exactly as [`crate::ResolvedLab::gateway`]/[`crate::ResolvedLab::migration`]
 /// are always `None` until the phase that defines their source YAML
@@ -66,8 +73,8 @@ pub struct ResolvedComponent {
     pub version: String,
     /// How to install this component.
     pub install: InstallMethod,
-    /// Readiness checks to wait on after installing. Always empty today
-    /// — see this type's documentation.
+    /// Readiness checks to wait on after installing, in the order they
+    /// were written — see this type's documentation.
     pub readiness: Vec<ReadinessCheck>,
     /// Recipe-supplied response normalization rules. Always empty today
     /// — see this type's documentation.
@@ -293,10 +300,55 @@ pub(crate) fn resolve_component(
         name,
         version,
         install,
-        readiness: Vec::new(),
+        readiness: raw.readiness.iter().map(resolve_readiness).collect(),
         recipe_normalize_rules: Vec::new(),
         capabilities: BTreeSet::new(),
     })
+}
+
+/// Converts one user-written [`ReadinessCheckSpec`] into the
+/// [`ReadinessCheck`] `admissionlab_installer::readiness` probes.
+///
+/// Infallible and total: every field the closed variant set needs is
+/// already required by the parser (`serde` rejects a missing `name` or
+/// `namespace` at load time), so there is nothing left here to validate
+/// — an empty `name` would name no object, but that is a claim about a
+/// cluster this crate never sees, and the readiness probe reports it as
+/// "not ready" with the name it was given rather than this function
+/// inventing a rule the recipe surface does not have either.
+///
+/// Matched exhaustively with no wildcard arm, so a sixth variant on
+/// either side is a compile error rather than a silently dropped check.
+fn resolve_readiness(raw: &ReadinessCheckSpec) -> ReadinessCheck {
+    match raw {
+        ReadinessCheckSpec::DeploymentAvailable(object) => ReadinessCheck::DeploymentAvailable {
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+        },
+        ReadinessCheckSpec::DaemonSetReady(object) => ReadinessCheck::DaemonSetReady {
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+        },
+        ReadinessCheckSpec::JobComplete(object) => ReadinessCheck::JobComplete {
+            namespace: object.namespace.clone(),
+            name: object.name.clone(),
+        },
+        ReadinessCheckSpec::WebhookConfigurationPresent(object) => {
+            ReadinessCheck::WebhookConfigurationPresent {
+                name: object.name.clone(),
+            }
+        }
+        ReadinessCheckSpec::CustomResourceCondition(condition) => {
+            ReadinessCheck::CustomResourceCondition {
+                api_version: condition.api_version.clone(),
+                kind: condition.kind.clone(),
+                namespace: condition.namespace.clone(),
+                name: condition.name.clone(),
+                condition_type: condition.condition_type.clone(),
+                status: condition.status.clone(),
+            }
+        }
+    }
 }
 
 /// Resolves a Helm install method.
