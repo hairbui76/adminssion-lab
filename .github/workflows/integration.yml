@@ -34,15 +34,18 @@ jobs:
     # matrix entry each -- `admissionlab-cluster`'s own `kind_smoke` (Task
     # 1.9), the Kyverno recipe certification test (Task 2.8), the Istio
     # recipe certification test (Task 2.9), `admissionlab-test-webhook`'s
-    # `kind_smoke` (Task 2.7), and the Phase 2 Exit Gate sample lab
-    # (`exit_gate`, Task 2.11). These used to exist only as a one-time check
-    # a human could run by hand; none of them were reachable from any CI
-    # workflow, so a real regression in any of them (a vendor chart's next
-    # patch release breaking enforcement, a dependency bump breaking
-    # cluster creation) would go undetected forever. `fail-fast: false` so
-    # one matrix entry failing does not cancel the others -- with five
-    # independent real-cluster tests, losing signal on the rest the moment
-    # the first one fails would defeat the point of running all five.
+    # `kind_smoke` (Task 2.7), the Phase 2 Exit Gate sample lab
+    # (`exit_gate`, Task 2.11), and the Phase 3 fixture capture pipeline
+    # (`kind_capture`, Task 3.10). These used to exist only as a one-time
+    # check a human could run by hand; none of them were reachable from any
+    # CI workflow, so a real regression in any of them (a vendor chart's
+    # next patch release breaking enforcement, a dependency bump breaking
+    # cluster creation, an upstream change to the audit annotations this
+    # project reconstructs webhook traces from) would go undetected
+    # forever. `fail-fast: false` so one matrix entry failing does not
+    # cancel the others -- with six independent real-cluster tests, losing
+    # signal on the rest the moment the first one fails would defeat the
+    # point of running all six.
     #
     # Deliberately parallel *jobs* (via matrix), not sequential `run:`
     # steps in one job: each of these tests creates and tears down at least
@@ -58,6 +61,14 @@ jobs:
     # separate jobs -- repeating checkout/kind-install per matrix entry --
     # is a few seconds each, negligible next to what each test itself
     # takes.
+    #
+    # `kind_capture` (Task 3.10) is a `docker build` + cluster + stack
+    # install + 10 real dry-run requests, measured end to end at 83.80
+    # seconds on the reference machine with a warm node-image and Docker
+    # layer cache. It sits comfortably inside the shared ceiling below;
+    # its own internal bounds (a 600-second image build, a 120-second
+    # component install, a 10-second audit correlation deadline per
+    # fixture) are what actually stop it hanging.
     #
     # timeout-minutes: 30, sized against the Istio recipe certification
     # test (`istio_recipe`) -- the heaviest matrix entry, since
@@ -95,6 +106,8 @@ jobs:
             test: exit_gate
           - package: admissionlab-test-webhook
             test: kind_smoke
+          - package: admissionlab-admission
+            test: kind_capture
     steps:
       - name: Check out repository
         # v7.0.1: verified against the GitHub API
