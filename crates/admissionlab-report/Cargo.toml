@@ -7,3 +7,51 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `report -> admission` is not drawn in §1.1's diagram, which lists only
+# `report -> policy/diff/core domain types`. The edge is nonetheless real
+# and intended: §1.2's cross-task type registry assigns
+# `AdmissionComparison` to *this* crate and freezes its `baseline` and
+# `candidate` fields as `admissionlab_admission::AdmissionOutcome`. A
+# report that carries both sides' captured outcome verbatim has to name
+# that type. This is the same deliberate resolution the root
+# `Cargo.toml` documents for `diff -> admission` (Task 4.4's frozen
+# signature naming an `admissionlab-admission` type), and it is acyclic:
+# `admissionlab-admission` depends on `admissionlab-fixtures`,
+# `admissionlab-cluster`, and `admissionlab-core`, none of which reach
+# back here, and nothing may ever add an `admission -> report` edge.
+admissionlab-admission = { workspace = true }
+# `LabResult::run_id`/`FixtureComparison::fixture_id` are
+# `admissionlab_core::RunId`/`FixtureId`, and `LabResult::diagnostics` is
+# `Vec<admissionlab_core::Diagnostic>`. The `report -> core` edge §1.1
+# draws explicitly.
+admissionlab-core = { workspace = true }
+# `AdmissionComparison::first_divergence` is an
+# `admissionlab_diff::DivergenceEvidence`, and `redact.rs` walks the
+# `serde_json::Value` payloads inside every `admissionlab_diff::
+# SemanticChange` a `ClassifiedChange` carries. `model.rs` also calls
+# `admissionlab_diff::decision_comparability` to decide which fixtures
+# are *inconclusive* rather than re-deriving that judgement here (see
+# `model::FixtureBucket`). The `report -> diff` edge §1.1 draws
+# explicitly.
+admissionlab-diff = { workspace = true }
+# `LabResult::policy` is an `admissionlab_policy::PolicyResult`, and
+# bucket counting reads each `ClassifiedChange`'s `severity`/`expected`.
+# This crate never *decides* a severity -- §1.1's "do not let report
+# rendering decide severity" -- it only counts what policy already
+# graded. The `report -> policy` edge §1.1 draws explicitly.
+admissionlab-policy = { workspace = true }
+# `redact.rs` rewrites the JSON Patch operations inside every
+# `admissionlab_admission::WebhookInvocation::patch`, whose element type
+# is `json_patch::PatchOperation` directly. The variants are matched and
+# rebuilt by hand rather than round-tripped through `serde_json::Value`,
+# so a future variant is a compile error here instead of a silently
+# unredacted payload. Same crate/library name mismatch (`json-patch` on
+# the registry, `json_patch` in Rust) the root `Cargo.toml` documents.
+json-patch = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+# The report model's own payload fields are `serde_json::Value` trees
+# (through the foreign types it carries), and `redact.rs` walks them
+# directly rather than serde-generically.
+serde_json = { workspace = true }

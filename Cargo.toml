@@ -59,6 +59,18 @@ admissionlab-installer = { path = "crates/admissionlab-installer" }
 # which reach back to `admissionlab-diff`, and a `normalize -> diff` edge
 # must never be added.
 admissionlab-normalize = { path = "crates/admissionlab-normalize" }
+# `admissionlab-report`'s `model.rs` (Task 4.10) is the first cross-crate
+# consumer of this crate: §1.2's cross-task type registry freezes
+# `LabResult::policy` as an `admissionlab_policy::PolicyResult`, and the
+# report's five-bucket fixture count reads each `ClassifiedChange`'s
+# already-decided `severity`/`expected`. This is the `report -> policy`
+# edge §1.1 draws explicitly, so it needs no separate justification --
+# only a workspace-level entry, which it did not have before because
+# nothing depended on `admissionlab-policy` yet. Acyclic, and the one
+# direction that matters: `report` reads grades, it never produces them
+# (§1.1's "do not let report rendering decide severity"), and nothing may
+# ever add a `policy -> report` edge back.
+admissionlab-policy = { path = "crates/admissionlab-policy" }
 # `admissionlab-test-webhook`'s `tests/recipe_loads.rs` and
 # `tests/kind_smoke.rs` (Task 2.7) are the first cross-crate consumers of
 # this crate — loading `recipes/test-webhook/recipe.yaml` through Task
