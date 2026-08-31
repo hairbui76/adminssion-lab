@@ -9,6 +9,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# `admission.rs`'s `diff_admission_decision` (Task 4.4) takes
+# `&admissionlab_admission::AdmissionOutcome` on both sides -- the
+# roadmap's own frozen signature -- and classifies the pair's
+# `AdmissionDecision` values. See the root `Cargo.toml`'s own comment on
+# this entry for why this `diff -> admission` edge exists despite §1.1's
+# shorter layering line, and why it is acyclic.
+admissionlab-admission = { workspace = true }
 # `SemanticChange::fixture_id` (Task 4.3) is an
 # `admissionlab_core::FixtureId` -- the same identifier
 # `admissionlab_admission::AdmissionOutcome` already carries, so a change

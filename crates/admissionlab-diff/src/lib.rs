@@ -9,6 +9,15 @@
 //! deterministic and pure -- no clock, no network, no model (Global
 //! Constraint 7).
 //!
+//! # What is compared
+//!
+//! - [`admission`] compares two sides' *decisions*
+//!   ([`admission::diff_admission_decision`]): did the admit/deny verdict
+//!   flip? Its module documentation covers the two ways a result can be
+//!   empty -- the verdict held, or the two sides were never comparable --
+//!   and why [`admission::DecisionComparability`] exists so a caller can
+//!   tell those apart.
+//!
 //! # Two vocabularies, deliberately separate
 //!
 //! - [`types`] holds the **semantic** vocabulary: [`SemanticChange`] and
@@ -27,14 +36,21 @@
 //! # Dependency direction
 //!
 //! This crate depends on `admissionlab-core` for
-//! [`admissionlab_core::FixtureId`]. Later tasks add
-//! `admissionlab-admission` (Task 4.4 compares its `AdmissionOutcome`s)
-//! and `admissionlab-normalize` (Tasks 4.5/4.6 compare its normalized
-//! objects and traces). Nothing in this crate may ever be depended on by
-//! `admissionlab-core`.
+//! [`admissionlab_core::FixtureId`] and (as of Task 4.4) on
+//! `admissionlab-admission` for the
+//! [`admissionlab_admission::AdmissionOutcome`] pair
+//! [`admission::diff_admission_decision`]'s frozen signature takes.
+//! Tasks 4.5/4.6 add `admissionlab-normalize`. All of these edges point
+//! away from this crate; nothing in it may ever be depended on by
+//! `admissionlab-core` or `admissionlab-admission`, which would close a
+//! cycle Cargo rejects outright.
 
+pub mod admission;
 pub mod raw;
 pub mod types;
 
+pub use admission::{
+    DecisionComparability, decision_comparability, diff_admission_decision, raw_decision_diff,
+};
 pub use raw::{RawChange, RawChangeOp, raw_object_diff};
 pub use types::{DivergenceConfidence, DivergenceEvidence, SemanticChange, SemanticChangeKind};

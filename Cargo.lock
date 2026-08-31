@@ -75,6 +75,7 @@ dependencies = [
 name = "admissionlab-diff"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-admission",
  "admissionlab-core",
  "json-patch",
  "serde",

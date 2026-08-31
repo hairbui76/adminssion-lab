@@ -8,6 +8,20 @@ license = "Apache-2.0"
 repository = "https://github.com/hairbui76/adminssion-lab"
 
 [workspace.dependencies]
+# `admissionlab-diff`'s `admission.rs` (Task 4.4) is the first
+# cross-crate consumer of this crate: `diff_admission_decision` takes
+# `&admissionlab_admission::AdmissionOutcome` (the roadmap's own frozen
+# signature) and reads its `AdmissionDecision`. This is a `diff ->
+# admission` edge. §1.1's layering line reads "diff ->
+# normalize/core domain types", but the frozen 4.4 signature is stated
+# in terms of an `admissionlab-admission` type, so that edge is real and
+# intended rather than an oversight -- resolved deliberately, the same
+# way `admissionlab-admission`'s own `Cargo.toml` documents its
+# `admission -> fixtures` edge. It is acyclic: `admissionlab-admission`
+# depends on `admissionlab-fixtures` and `admissionlab-core`, neither of
+# which depends on `admissionlab-diff`, and nothing may ever add an
+# `admission -> diff` edge back.
+admissionlab-admission = { path = "crates/admissionlab-admission" }
 admissionlab-cluster = { path = "crates/admissionlab-cluster" }
 admissionlab-core = { path = "crates/admissionlab-core" }
 # `admissionlab-admission`'s `execute.rs` (Task 3.4) is the first
