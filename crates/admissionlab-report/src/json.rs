@@ -127,7 +127,12 @@ pub fn render_json(result: &LabResult) -> Result<String, ReportError> {
 ///
 /// See this module's "Why not `ArtifactStore`" section for what this
 /// mirrors and why it is not that type.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ReportError> {
+///
+/// Shared with [`crate::html`] rather than duplicated there: both
+/// artifacts are written to a caller-chosen path with the same
+/// guarantee, and two copies of a temp-write-fsync-rename dance are two
+/// chances to get the cleanup path wrong.
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), ReportError> {
     let parent = path.parent().ok_or_else(|| {
         ReportError::io(
             "determine the parent directory of",

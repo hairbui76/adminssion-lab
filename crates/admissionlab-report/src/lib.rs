@@ -32,6 +32,11 @@
 //!   byte-deterministic, and why it mirrors
 //!   `admissionlab_core::ArtifactStore`'s atomic write rather than
 //!   calling it.
+//! - [`html`] holds [`write_html_report`], the standalone page a human
+//!   drills into. Its module documentation covers what "self-contained"
+//!   guarantees, why there is no templating dependency and no
+//!   JavaScript, and how the escaping discipline is enforced
+//!   structurally rather than by review.
 //! - [`error`] holds [`ReportError`], the one failure vocabulary shared
 //!   by every renderer that touches the filesystem.
 //!
@@ -67,12 +72,14 @@
 //! [`FixtureComparison::bucket`]: model::FixtureComparison::bucket
 
 pub mod error;
+pub mod html;
 pub mod json;
 pub mod model;
 pub mod redact;
 pub mod terminal;
 
 pub use error::ReportError;
+pub use html::{escape_html, render_html, write_html_report};
 pub use json::{render_json, write_json_report};
 pub use model::{
     AdmissionComparison, ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureBucket,
