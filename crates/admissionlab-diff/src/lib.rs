@@ -34,6 +34,16 @@
 //!   [`trace::trace_comparability`] exists -- the trace-side twin of
 //!   [`admission::decision_comparability`], with a third state for
 //!   partial evidence, under which an absence stops being proof.
+//! - [`divergence`] answers *where a difference first appeared*
+//!   ([`divergence::first_divergence`]): the earliest position in the
+//!   webhook chain at which the two sides stopped agreeing, with a
+//!   [`DivergenceConfidence`] grading how well the evidence supports it.
+//!   Its module documentation covers why it walks positions where
+//!   [`trace`] matches identities, why partial evidence caps confidence
+//!   at [`DivergenceConfidence::Inferred`] except for a directly
+//!   observed patch difference, and why the "identical chains, different
+//!   objects" case is a separate composed function rather than a wider
+//!   signature.
 //!
 //! # Who fills in `fixture_id`
 //!
@@ -67,12 +77,16 @@
 //! `admissionlab-admission` for the
 //! [`admissionlab_admission::AdmissionOutcome`] pair
 //! [`admission::diff_admission_decision`]'s frozen signature takes.
-//! Tasks 4.5/4.6 add `admissionlab-normalize`. All of these edges point
-//! away from this crate; nothing in it may ever be depended on by
-//! `admissionlab-core` or `admissionlab-admission`, which would close a
+//! Tasks 4.5/4.6/4.7 add `admissionlab-normalize` for the two normalized
+//! types they compare, and Task 4.6 adds `admissionlab-spec` for the
+//! [`admissionlab_spec::LatencyPolicy`] its frozen signature takes. All
+//! of these edges point away from this crate; nothing in it may ever be
+//! depended on by `admissionlab-core`, `admissionlab-admission`,
+//! `admissionlab-normalize`, or `admissionlab-spec`, which would close a
 //! cycle Cargo rejects outright.
 
 pub mod admission;
+pub mod divergence;
 pub mod raw;
 pub mod trace;
 pub mod types;
@@ -81,6 +95,7 @@ pub mod workload;
 pub use admission::{
     DecisionComparability, decision_comparability, diff_admission_decision, raw_decision_diff,
 };
+pub use divergence::{first_divergence, first_divergence_with_objects};
 pub use raw::{RawChange, RawChangeOp, raw_object_diff};
 pub use trace::{TraceComparability, diff_admission_trace, trace_comparability};
 pub use types::{
