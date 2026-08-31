@@ -22,6 +22,10 @@
 //! - [`redact`] holds [`redact_result`], the single chokepoint where
 //!   Global Constraint 14's redaction happens for every renderer at
 //!   once.
+//! - [`terminal`] holds [`render_terminal`], the concise summary a human
+//!   reads immediately after a run. Its module documentation covers what
+//!   is never hidden and why color is a caller's decision rather than
+//!   something the renderer probes for.
 //!
 //! # Redact once, render many
 //!
@@ -56,6 +60,7 @@
 
 pub mod model;
 pub mod redact;
+pub mod terminal;
 
 pub use model::{
     AdmissionComparison, ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureBucket,
@@ -65,3 +70,4 @@ pub use redact::{
     DEFAULT_ENV_NAME_PATTERNS, REDACTED, REDACTED_PRIVATE_KEY, RedactionRules,
     SENSITIVE_HEADER_NAMES, redact_result,
 };
+pub use terminal::{TerminalOptions, render_terminal};
