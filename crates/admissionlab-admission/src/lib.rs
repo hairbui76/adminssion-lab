@@ -41,6 +41,18 @@
 //!   from `0`, and an expired deadline is a partial `Ok` rather than an
 //!   error (Global Constraint 15 in all four cases). The raw
 //!   `annotations` map it preserves untouched is Task 3.6's input.
+//! - [`correlate`] implements Task 3.6:
+//!   [`correlate::reconstruct_mutating_trace`] turns the mutating-webhook
+//!   annotations on one fixture's `ResponseComplete` audit event back
+//!   into a [`trace::AdmissionTrace`]. Its module documentation records
+//!   the upstream kube-apiserver source every claim about those
+//!   annotations was read from, and -- the reason it is worth reading
+//!   before using the result -- exactly how little each annotation
+//!   proves: `mutated: false` is emitted from a `defer` on every exit
+//!   path including timeouts and denials, so it yields
+//!   [`trace::WebhookOutcome::Unknown`], while `mutated: true`, a patch
+//!   annotation, and a `failed-open.` annotation each prove something
+//!   specific.
 //! - [`execute`] implements Task 3.4:
 //!   [`execute::AdmissionExecutor::execute_create`] replays a fixture
 //!   through a real API server as a server-side dry-run CREATE (via
@@ -73,6 +85,7 @@
 //! naming [`execute::AdmissionExecutor`] itself from `core`.
 
 pub mod audit_reader;
+pub mod correlate;
 pub mod execute;
 pub mod outcome;
 pub mod trace;
@@ -80,6 +93,10 @@ pub mod trace;
 pub use audit_reader::{
     AuditCheckpoint, AuditError, AuditEvent, AuditLogReader, AuditObjectRef, AuditResponseStatus,
     DEFAULT_POLL_INTERVAL, FileAuditLogReader, STAGE_RESPONSE_COMPLETE,
+};
+pub use correlate::{
+    FAILED_OPEN_MUTATION_ANNOTATION_PREFIX, MUTATION_ANNOTATION_PREFIX, PATCH_ANNOTATION_PREFIX,
+    TraceError, VALIDATION_ANNOTATION_PREFIX, reconstruct_mutating_trace,
 };
 pub use execute::{
     AdmissionExecutor, FixtureExecutionError, KubeAdmissionExecutor, RawAdmissionResponse,

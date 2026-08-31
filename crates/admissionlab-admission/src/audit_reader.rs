@@ -817,7 +817,14 @@ fn unparsable_line_diagnostic(
 /// `Category`; mapping it to fixed strings here keeps the diagnostic's
 /// `json_error` context value a stable machine-readable token rather than
 /// a `Debug` rendering that could change between `serde_json` releases.
-fn json_error_category(error: &serde_json::Error) -> &'static str {
+///
+/// `pub(crate)` because [`crate::correlate`] (Task 3.6) needs exactly the
+/// same value-free classification for exactly the same Global Constraint
+/// 14 reason -- a mutating-webhook *patch* annotation embeds fragments of
+/// the request object, so its parse failure must be named without quoting
+/// it either. One shared mapping means the two cannot drift into
+/// reporting different tokens for the same failure.
+pub(crate) fn json_error_category(error: &serde_json::Error) -> &'static str {
     match error.classify() {
         serde_json::error::Category::Io => "io",
         serde_json::error::Category::Syntax => "syntax",
