@@ -34,8 +34,12 @@
 //! [`admissionlab_diff::SemanticChange`] and
 //! [`admissionlab_diff::DivergenceEvidence`],
 //! [`admissionlab_admission::AdmissionOutcome`] (with its
-//! `AdmissionDecision`, `AdmissionTrace`, and `WebhookInvocation`), and
-//! [`admissionlab_core::Diagnostic`]. Those crates pinned their tags
+//! `AdmissionDecision`, `AdmissionTrace`, and `WebhookInvocation`),
+//! [`admissionlab_core::Diagnostic`], and
+//! [`admissionlab_core::StageTimings`] -- which happens to pin
+//! `camelCase` names of its own, so the timings block reads like this
+//! crate's own fields without this crate having re-pinned anything.
+//! Those crates pinned their tags
 //! deliberately -- often `snake_case` enum tags and plain Rust field
 //! names -- and a second `#[serde(rename_all)]` layer here would either
 //! be ignored (it cannot reach into a foreign type) or, worse, invite
@@ -62,7 +66,7 @@
 //! back in.
 
 use admissionlab_admission::AdmissionOutcome;
-use admissionlab_core::{Diagnostic, FixtureId, RunId};
+use admissionlab_core::{Diagnostic, FixtureId, RunId, StageTimings};
 use admissionlab_diff::{DivergenceEvidence, decision_comparability};
 use admissionlab_policy::{PolicyResult, Severity};
 use serde::{Serialize, Serializer};
@@ -112,6 +116,35 @@ pub struct LabResult {
     /// [`AdmissionOutcome::diagnostics`].
     #[serde(rename = "diagnostics")]
     pub diagnostics: Vec<Diagnostic>,
+    /// How long each stage of the run took (ROADMAP Task 5.7), or `None`
+    /// for a result whose producer did not measure.
+    ///
+    /// Optional for two independent reasons, and both are load-bearing.
+    /// A caller that has no timings must be able to say so rather than
+    /// invent zeroes (Global Constraint 15) -- that is what `None` is
+    /// for, and it is why the key is *omitted* rather than written as
+    /// `null` when absent. And the key being addable at all without
+    /// breaking a consumer is a property of this document being
+    /// emit-only: nothing in this project deserializes a `LabResult`, so
+    /// no `deny_unknown_fields` reader exists to break.
+    ///
+    /// # What is structurally missing from a written `result.json`
+    ///
+    /// The snapshot is taken when this value is *assembled*, which is
+    /// before the reporting stage renders and writes it, and long before
+    /// cleanup deletes the clusters. So a `result.json`'s timings never
+    /// carry `reportingMs` and never carry `cleanup`; those two stages
+    /// are measured, and `admissionlab` prints them in its own final
+    /// line, but they cannot be inside the document whose writing is one
+    /// of them. `admissionlab_core::timing`'s module documentation states
+    /// the same thing from the recorder's side.
+    ///
+    /// Placed last in declaration order deliberately: `serde` emits
+    /// fields in source order, so appending here adds one block to the
+    /// end of every existing document rather than shifting the whole file
+    /// in the golden diff.
+    #[serde(rename = "timings", skip_serializing_if = "Option::is_none")]
+    pub timings: Option<StageTimings>,
 }
 
 /// How many fixtures landed in each of the five buckets.

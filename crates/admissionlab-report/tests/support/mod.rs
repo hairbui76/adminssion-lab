@@ -28,7 +28,14 @@
 //! - a **stale expectation**;
 //! - run-level **diagnostics**, including a `Sensitive` context entry;
 //! - a webhook trace with a JSON Patch, a `None` latency, and a
-//!   `partial` evidence level.
+//!   `partial` evidence level;
+//! - a **stage timings** block shaped exactly as a real `result.json`'s
+//!   is: both sides of cluster creation, a per-component install
+//!   breakdown, a fixture count, a comparison duration -- and *no*
+//!   `reportingMs` and *no* `cleanup`, because the document is written
+//!   during the first of those stages and before the second, so neither
+//!   can be in it (see `admissionlab_core::timing`). Their absence in the
+//!   golden is the assertion that they are absent rather than zero.
 
 // Every test binary in this crate compiles this whole module but uses
 // only the builders it needs, so items unused by *one* binary would
@@ -43,7 +50,10 @@ use admissionlab_admission::{
     AdmissionDecision, AdmissionOutcome, AdmissionTrace, TraceEvidence, WebhookInvocation,
     WebhookOutcome,
 };
-use admissionlab_core::{Diagnostic, FixtureId, RedactedValue, RunId, Side};
+use admissionlab_core::{
+    CaptureStage, ComponentTiming, Diagnostic, FixtureId, InstallStage, RedactedValue, RunId, Side,
+    SideInstallTiming, SideStage, StageTimings,
+};
 use admissionlab_diff::{
     DivergenceConfidence, DivergenceEvidence, SemanticChange, SemanticChangeKind,
 };
@@ -151,6 +161,53 @@ pub fn canonical_result() -> LabResult {
                 ]),
             },
         ],
+        timings: Some(timings()),
+    }
+}
+
+/// The stage timings [`canonical_result`] carries.
+///
+/// Plausible numbers for the run the rest of this module describes: two
+/// clusters created concurrently, one component installed per side, four
+/// fixtures replayed through both, and a comparison well inside
+/// PRODUCT.md §33's sub-second budget. `reporting` and `cleanup` are
+/// `None` for the structural reason this module's own documentation
+/// gives.
+fn timings() -> StageTimings {
+    StageTimings {
+        cluster_creation: Some(SideStage {
+            wall: Duration::from_millis(43_512),
+            baseline: Some(Duration::from_millis(41_204)),
+            candidate: Some(Duration::from_millis(43_118)),
+        }),
+        installation: Some(InstallStage {
+            wall: Duration::from_millis(96_401),
+            baseline: Some(side_install(92_310)),
+            candidate: Some(side_install(96_377)),
+        }),
+        fixture_capture: Some(CaptureStage {
+            wall: Duration::from_millis(6_120),
+            baseline: Some(Duration::from_millis(5_942)),
+            candidate: Some(Duration::from_millis(6_114)),
+            fixtures: Some(4),
+        }),
+        comparison: Some(Duration::from_millis(212)),
+        reporting: None,
+        cleanup: None,
+        elapsed: Duration::from_millis(149_006),
+    }
+}
+
+/// One side's install breakdown: the single `sidecar-injector` component
+/// [`environments`] already names, so the timings block and the
+/// environments block describe the same stack.
+fn side_install(millis: u64) -> SideInstallTiming {
+    SideInstallTiming {
+        elapsed: Duration::from_millis(millis),
+        components: Some(vec![ComponentTiming {
+            name: "sidecar-injector".to_owned(),
+            elapsed: Duration::from_millis(millis),
+        }]),
     }
 }
 

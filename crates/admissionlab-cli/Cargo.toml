@@ -104,6 +104,16 @@ tokio = { workspace = true, features = ["rt", "fs"] }
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
+# `tests/diff_benchmark.rs` (Task 5.7) synthesizes 100 pre-captured
+# fixture outcome pairs whose webhook traces carry real RFC 6902 patches,
+# because `admissionlab_normalize::normalize_trace` and
+# `admissionlab_diff::diff_admission_trace` are part of the pass being
+# measured and an empty patch list would exercise neither. The type is
+# `admissionlab_admission::WebhookInvocation::patch`'s own
+# (`json_patch::PatchOperation`); already resolved in `Cargo.lock` at
+# this exact version through that crate, so this is a promotion of an
+# already-fetched transitive dependency to a direct dev one.
+json-patch = { workspace = true }
 # `tests/test_command.rs` drives `pipeline::run_lab` against fakes on a
 # hand-rolled current-thread runtime and parses the `result.json` it
 # writes back as generic JSON (`LabResult` is emit-only by design, so

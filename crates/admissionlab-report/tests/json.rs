@@ -227,6 +227,57 @@ fn the_golden_carries_a_stale_expectation_and_diagnostics() {
 }
 
 #[test]
+fn the_timings_block_pins_its_wire_names() {
+    let golden = golden_value();
+    let timings = &golden["timings"];
+
+    assert_eq!(
+        timings["clusterCreation"]["wallMs"],
+        serde_json::json!(43_512)
+    );
+    assert_eq!(
+        timings["clusterCreation"]["baselineMs"],
+        serde_json::json!(41_204)
+    );
+    assert_eq!(
+        timings["installation"]["baseline"]["components"][0]["name"],
+        Value::String("sidecar-injector".to_owned()),
+        "the install breakdown names the same component `environments` does"
+    );
+    assert_eq!(
+        timings["installation"]["baseline"]["components"][0]["elapsedMs"],
+        serde_json::json!(92_310)
+    );
+    assert_eq!(
+        timings["fixtureCapture"]["fixtures"],
+        serde_json::json!(4),
+        "the fixture count is per side, and this run replayed four fixtures"
+    );
+    assert_eq!(timings["comparisonMs"], serde_json::json!(212));
+    assert_eq!(timings["elapsedMs"], serde_json::json!(149_006));
+}
+
+#[test]
+fn an_unmeasured_stage_is_an_absent_key_and_never_a_zero() {
+    let golden = golden_value();
+    let timings = golden["timings"].as_object().expect("timings is an object");
+
+    // A `result.json` is written *during* the reporting stage and
+    // *before* cleanup, so a document that reported a duration for either
+    // would be reporting a stage that had not happened when it was
+    // serialized. Global Constraint 15: the honest rendering of that is
+    // no key at all.
+    assert!(
+        !timings.contains_key("reportingMs"),
+        "a result written by the reporting stage cannot carry that stage's duration"
+    );
+    assert!(
+        !timings.contains_key("cleanup"),
+        "a result written before cleanup cannot carry cleanup's duration"
+    );
+}
+
+#[test]
 fn the_reserved_gateway_field_is_present_as_null() {
     let golden = golden_value();
 

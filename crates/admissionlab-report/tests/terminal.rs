@@ -21,7 +21,13 @@ use support::canonical_result;
 /// its semantic-change kind, its object path and its first divergence,
 /// an empty warnings section, an inconclusive fixture with the
 /// candidate's own verbatim reason, a stale expectation, diagnostics,
-/// and the verdict.
+/// the one-line stage timings block, and the verdict.
+///
+/// The timings line omits `report` and `cleanup`, and that is the point
+/// of having it in the golden: a `result.json` is written *during* the
+/// reporting stage and *before* cleanup, so neither stage can be inside
+/// the value this renders (see `admissionlab_core::timing`). They are
+/// absent, not zero.
 const GOLDEN: &str = r"Admission Lab result  run alpha-demo-run
 schema admissionlab.io/result/v1alpha1 (experimental; stable at Beta)
 
@@ -55,6 +61,9 @@ Stale expectations  1
 Diagnostics  2
   metrics.unavailable: per-webhook latency metrics were not scraped on the candidate side
   kubeconfig.loaded: loaded isolated kubeconfigs for both sides
+
+Stage timings
+  clusters 43.51s (baseline 41.20s, candidate 43.12s), install 96.40s, capture 6.12s (baseline 5.94s, candidate 6.11s) [4 fixture(s)/side], compare 0.21s, elapsed 149.01s
 
 Result: fail
 ";
@@ -268,6 +277,20 @@ fn rendering_is_deterministic() {
     assert_eq!(
         render_terminal(&result, &TerminalOptions::default()),
         render_terminal(&result, &TerminalOptions::default())
+    );
+}
+
+#[test]
+fn a_result_without_timings_renders_no_stage_timings_block() {
+    let mut result = canonical_result();
+    result.timings = None;
+
+    let rendered = render_terminal(&result, &TerminalOptions::default());
+
+    assert!(
+        !rendered.contains("Stage timings"),
+        "a run that measured nothing must render no timings heading at all, rather than a \
+         heading over zeroes: {rendered}"
     );
 }
 

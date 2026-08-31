@@ -11,6 +11,7 @@ pub mod reproduce;
 pub mod run;
 pub mod run_manifest;
 pub mod side;
+pub mod timing;
 pub mod tool;
 
 pub use artifact::{ArtifactError, ArtifactStore, RunDisposition, RunPaths};
@@ -46,6 +47,11 @@ pub use run_manifest::{
     run_manifest_v1alpha1_json_schema, sha256_hex, split_node_image_reference,
 };
 pub use side::Side;
+pub use timing::{
+    CaptureStage, ComponentTiming, InstallStage, SideInstallTiming, SideStage, StageScope,
+    StageTimings, TimedClusterManager, TimedFixtureCapture, TimedSideStage, TimedStackInstaller,
+    TimedStage, TimingRecorder,
+};
 pub use tool::{
     DISK_WARNING_THRESHOLD_BYTES, DoctorReport, ToolName, ToolStatus, collect_doctor_report,
     disk_space_warning, probe_tool,

@@ -54,7 +54,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use admissionlab_core::{Diagnostic, InstalledLab, PreparedLab, RunId, SideInstall};
+use admissionlab_core::{Diagnostic, InstalledLab, PreparedLab, RunId, SideInstall, StageTimings};
 use admissionlab_policy::PolicyResult;
 use admissionlab_report::{
     ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureComparison, LabResult,
@@ -103,6 +103,14 @@ pub struct WrittenReports {
 /// [`RunSummary::from_fixtures`] does the counting: it is defined
 /// entirely in terms of `FixtureComparison::bucket`, so the summary and
 /// the per-fixture buckets a renderer shows can never disagree either.
+///
+/// `timings` is this run's stage durations as of *now* (Task 5.7), or
+/// `None` for a caller that measured nothing. "As of now" is the whole
+/// contract: this function is called at the end of the comparison stage,
+/// so the value it embeds cannot include the reporting stage that renders
+/// it or the cleanup that follows — see
+/// [`LabResult::timings`] for what that absence means and where those two
+/// stages are reported instead.
 #[must_use]
 pub fn build_result(
     run_id: &RunId,
@@ -110,6 +118,7 @@ pub fn build_result(
     comparison: &Comparison,
     policy: PolicyResult,
     diagnostics: Vec<Diagnostic>,
+    timings: Option<StageTimings>,
 ) -> LabResult {
     let fixtures: Vec<FixtureComparison> = comparison
         .fixtures
@@ -140,6 +149,7 @@ pub fn build_result(
         fixtures,
         policy,
         diagnostics,
+        timings,
     }
 }
 

@@ -140,6 +140,28 @@
 //! rewrite failure is reported and the run continues — a manifest that
 //! stopped being updated is a smaller loss than abandoning a comparison
 //! whose clusters are already up.
+//!
+//! ## Every stage is timed, at the boundaries that already exist
+//!
+//! ROADMAP Task 5.7. One `admissionlab_core::TimingRecorder` is started
+//! before the first file is read and threaded through every stage below
+//! (inside [`Run`]), and each stage's timer is a scope opened at exactly
+//! the boundary the run manifest already records — so "the run failed at
+//! `fixture_capture`" and "`fixtureCapture` took 130s" name the same
+//! stretch of the run rather than two overlapping ones. There are no
+//! parallel stage boundaries invented for measurement.
+//!
+//! Per-side numbers cannot be taken here, because `LabRunner` runs both
+//! sides at once: a timer around `create_clusters` measures the pair.
+//! They come from `admissionlab_core`'s three transparent decorators,
+//! wrapped around the backend's own cluster manager, installer and
+//! capture at their construction sites below, where the trait call names
+//! a side.
+//!
+//! The result is that a `result.json` carries the run's own cost
+//! (`admissionlab_report::LabResult::timings`) and the run's last console
+//! line carries the two stages the document cannot contain — reporting,
+//! which writes it, and cleanup, which follows it.
 
 pub mod capture;
 pub mod compare;
@@ -156,7 +178,8 @@ use admissionlab_admission::AdmissionOutcome;
 use admissionlab_core::{
     ArtifactStore, ClusterManager, Diagnostic, DoctorReport, InstalledLab, LabRunner, PreparedLab,
     RedactedValue, ReproductionPin, ResolvedNodeImages, RunDisposition, RunError,
-    RunManifestWriter, RunOptions, RunPaths, RunStage, StackInstaller, preserved_cluster_report,
+    RunManifestWriter, RunOptions, RunPaths, RunStage, StackInstaller, TimedClusterManager,
+    TimedFixtureCapture, TimedStackInstaller, TimedStage, TimingRecorder, preserved_cluster_report,
 };
 use admissionlab_fixtures::{FixtureSource, discover_fixtures};
 use admissionlab_policy::{
@@ -354,12 +377,30 @@ struct Inputs {
     digests: provenance::InputDigests,
 }
 
+/// One invocation, and the stopwatch measuring it.
+///
+/// The two values every stage below needs and none of them owns: the
+/// request the user made, and the recorder each stage reports its own
+/// duration to (Task 5.7). They travel together because they have the
+/// same lifetime and the same reach — from the first file read to the
+/// last cluster deleted — and because threading the recorder as a ninth
+/// independent parameter through functions that already take seven would
+/// make every signature in this module harder to read for one borrowed
+/// handle.
+struct Run<'a> {
+    /// What the user asked for.
+    request: &'a RunRequest<'a>,
+    /// Where every stage's measured duration lands.
+    timings: &'a TimingRecorder,
+}
+
 /// Where a post-cluster stage puts what it produced.
 ///
-/// Bundled rather than threaded as two more parameters: every stage from
-/// install onward writes to both, and each stage function already carries
-/// enough arguments that adding two independent ones to each would make
-/// their signatures the least readable thing in the module.
+/// Bundled rather than threaded as three more parameters: every stage
+/// from install onward writes to all of them, and each stage function
+/// already carries enough arguments that adding three independent ones to
+/// each would make their signatures the least readable thing in the
+/// module.
 struct Outputs<'a> {
     /// The directory `result.json`/`report.html`/`diagnostics.json` land
     /// in.
@@ -369,6 +410,9 @@ struct Outputs<'a> {
     github_summary: Option<&'a Path>,
     /// This run's manifest, advanced (or failed) at every stage boundary.
     manifest: &'a mut RunManifestWriter,
+    /// Where the comparison and reporting stages record how long they
+    /// took. A duration is as much a thing a stage produced as a file is.
+    timings: &'a TimingRecorder,
 }
 
 /// Runs one lab end to end and reports how it ended.
@@ -386,6 +430,15 @@ pub async fn run_lab<B: LabBackend>(
     console: &mut Console<'_>,
 ) -> RunDisposition {
     let started_at = SystemTime::now();
+    // Started before the first file is read, so `elapsedMs` covers the
+    // whole invocation rather than only the provisioned part of it — the
+    // difference between it and the stages' sum is what configuration
+    // loading, hashing, and the doctor probe cost.
+    let timings = TimingRecorder::start();
+    let run = Run {
+        request,
+        timings: &timings,
+    };
     let mut inputs = match prepare_inputs(request, console) {
         Ok(inputs) => inputs,
         Err(disposition) => {
@@ -401,32 +454,8 @@ pub async fn run_lab<B: LabBackend>(
             .await;
         }
     };
-    // Applied *after* `prepare_inputs`, deliberately: the digests it
-    // computed describe the source tree as written, which is the thing a
-    // reproduction verified against the manifest and the thing this
-    // run's own manifest should record. Pinning first would make those
-    // digests describe a lab no file on disk contains.
-    if let Some(pin) = backend.reproduction_pin() {
-        match pin.apply(&mut inputs.lab) {
-            Ok(notes) => {
-                for note in &notes {
-                    console.problem(&note.message);
-                }
-            }
-            Err(error) => {
-                console.problem(&format!("cannot reproduce the recorded run: {error}"));
-                let failure = error.to_string();
-                return no_verdict(
-                    request,
-                    console,
-                    None,
-                    "reproduction",
-                    &failure,
-                    RunDisposition::InvalidInput,
-                )
-                .await;
-            }
-        }
+    if let Err(disposition) = apply_reproduction_pin(backend, &mut inputs, request, console).await {
+        return disposition;
     }
 
     let doctor = match check_prerequisites(backend, console).await {
@@ -445,13 +474,21 @@ pub async fn run_lab<B: LabBackend>(
         }
     };
 
+    // The backend's own cluster manager, wrapped so that each side's
+    // `create` and `delete` is measured separately. Both are driven
+    // concurrently by `LabRunner`, so this decorator is the only seam at
+    // which "how long did the *baseline* cluster take" can be observed at
+    // all — see `admissionlab_core::timing`'s own documentation.
     let runner = LabRunner {
-        cluster_manager: backend.cluster_manager(),
+        cluster_manager: Arc::new(TimedClusterManager::new(
+            backend.cluster_manager(),
+            timings.clone(),
+        )),
         artifact_store: ArtifactStore::new(&request.run_root),
     };
     let pinned_images = backend.reproduction_pin().map(ReproductionPin::node_images);
     let (prepared, mut manifest) = match provision(
-        request,
+        &run,
         console,
         &runner,
         &inputs,
@@ -469,7 +506,7 @@ pub async fn run_lab<B: LabBackend>(
     // `finish` is on it — see this module's documentation.
     let outcome = run_with_clusters(
         backend,
-        request,
+        &run,
         console,
         &inputs,
         &runner,
@@ -486,11 +523,66 @@ pub async fn run_lab<B: LabBackend>(
         RunDisposition::Passed | RunDisposition::PolicyFailed
     );
 
-    let disposition = finish(&runner, &prepared, request, console, outcome).await;
+    let disposition = finish(&runner, &prepared, &run, console, outcome).await;
     if reached_verdict && let Err(error) = manifest.complete(SystemTime::now()).await {
         console.problem(&format!("could not record this run's completion: {error}"));
     }
+    // The run's last word about itself, and the only place the reporting
+    // and cleanup stages are ever visible: `result.json` was written
+    // during the first and before the second, so its own `timings` block
+    // cannot contain either (see `admissionlab_report::LabResult::timings`).
+    // Same renderer as the terminal report's "Stage timings" block, a
+    // later snapshot of the same recorder.
+    console.say(&format!(
+        "stage timings: {}",
+        timings.snapshot().summary_line()
+    ));
     disposition
+}
+
+/// Applies the recorded environment a reproduction is pinned to, if this
+/// run is one.
+///
+/// Called *after* `prepare_inputs`, deliberately: the digests it computed
+/// describe the source tree as written, which is the thing a reproduction
+/// verified against the manifest and the thing this run's own manifest
+/// should record. Pinning first would make those digests describe a lab
+/// no file on disk contains.
+///
+/// Returns `Err(disposition)` when the pin cannot be applied — an
+/// ordinary `admissionlab test` (no pin) and a pin that applied cleanly
+/// both return `Ok(())`. Notes the pin raises are reported and the run
+/// continues; they describe what the pin changed, not a problem with it.
+async fn apply_reproduction_pin<B: LabBackend>(
+    backend: &B,
+    inputs: &mut Inputs,
+    request: &RunRequest<'_>,
+    console: &mut Console<'_>,
+) -> Result<(), RunDisposition> {
+    let Some(pin) = backend.reproduction_pin() else {
+        return Ok(());
+    };
+    match pin.apply(&mut inputs.lab) {
+        Ok(notes) => {
+            for note in &notes {
+                console.problem(&note.message);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            console.problem(&format!("cannot reproduce the recorded run: {error}"));
+            let failure = error.to_string();
+            Err(no_verdict(
+                request,
+                console,
+                None,
+                "reproduction",
+                &failure,
+                RunDisposition::InvalidInput,
+            )
+            .await)
+        }
+    }
 }
 
 /// Everything between "the inputs are good" and "both clusters exist":
@@ -515,7 +607,7 @@ pub async fn run_lab<B: LabBackend>(
 /// all — see [`LabBackend::reproduction_pin`] for why that bypass is the
 /// mechanism rather than a shortcut.
 async fn provision<C: ClusterManager>(
-    request: &RunRequest<'_>,
+    run: &Run<'_>,
     console: &mut Console<'_>,
     runner: &LabRunner<C>,
     inputs: &Inputs,
@@ -523,6 +615,7 @@ async fn provision<C: ClusterManager>(
     started_at: SystemTime,
     pinned_images: Option<ResolvedNodeImages>,
 ) -> Result<(PreparedLab, RunManifestWriter), RunDisposition> {
+    let request = run.request;
     let options = RunOptions {
         keep_clusters: request.keep_clusters,
         run_root: request.run_root.clone(),
@@ -537,7 +630,9 @@ async fn provision<C: ClusterManager>(
             );
         }
     };
-    let run = Some(run_id.as_str());
+    // The identifier every no-verdict summary below names. Not `run`,
+    // which is this stage's context parameter.
+    let started = Some(run_id.as_str());
     let images = match pinned_images {
         // A reproduction runs the images the recorded manifest named,
         // and never asks the compatibility matrix what it thinks today.
@@ -547,9 +642,15 @@ async fn provision<C: ClusterManager>(
             Err(error) => {
                 let disposition = report_cluster_failure(&error, console);
                 let failure = error.to_string();
-                return Err(
-                    no_verdict(request, console, run, "node-image", &failure, disposition).await,
-                );
+                return Err(no_verdict(
+                    request,
+                    console,
+                    started,
+                    "node-image",
+                    &failure,
+                    disposition,
+                )
+                .await);
             }
         },
     };
@@ -574,24 +675,35 @@ async fn provision<C: ClusterManager>(
                 console.problem(&format!("failed to write this run's manifest: {error}"));
                 let failure = error.to_string();
                 let disposition = RunDisposition::InfrastructureFailed;
-                return Err(
-                    no_verdict(request, console, run, "manifest", &failure, disposition).await,
-                );
+                return Err(no_verdict(
+                    request,
+                    console,
+                    started,
+                    "manifest",
+                    &failure,
+                    disposition,
+                )
+                .await);
             }
         };
     console.say(&format!("wrote {}.", manifest.path().display()));
 
-    let prepared = match runner
-        .create_clusters(&inputs.lab, &run_id, &paths, &images)
-        .await
-    {
+    // The pair's wall-clock; each side's own is measured one level down,
+    // by `TimedClusterManager`.
+    let created = {
+        let _stage = run.timings.stage(TimedStage::ClusterCreation);
+        runner
+            .create_clusters(&inputs.lab, &run_id, &paths, &images)
+            .await
+    };
+    let prepared = match created {
         Ok(prepared) => prepared,
         Err(error) => {
             record_stage_failure(&mut manifest, RunStage::ClusterCreation, console).await;
             let disposition = report_cluster_failure(&error, console);
             let failure = error.to_string();
             let stage = "cluster-creation";
-            return Err(no_verdict(request, console, run, stage, &failure, disposition).await);
+            return Err(no_verdict(request, console, started, stage, &failure, disposition).await);
         }
     };
     console.say(&format!(
@@ -855,15 +967,16 @@ fn report_cluster_failure(error: &RunError, console: &mut Console<'_>) -> RunDis
 /// Split out from [`run_lab`] purely so cleanup cannot be skipped by an
 /// early return: this function may return from anywhere, and its caller
 /// always runs [`finish`] afterwards.
-async fn run_with_clusters<B: LabBackend>(
+async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
     backend: &B,
-    request: &RunRequest<'_>,
+    run: &Run<'_>,
     console: &mut Console<'_>,
     inputs: &Inputs,
-    runner: &LabRunner<B::Clusters>,
+    runner: &LabRunner<C>,
     prepared: &PreparedLab,
     manifest: &mut RunManifestWriter,
 ) -> RunDisposition {
+    let request = run.request;
     // Resolved before anything can fail, so every later stage has
     // somewhere to write its evidence. Recorded as a `reporting` failure
     // when it fails: preparing where the reports go is the reporting
@@ -874,71 +987,57 @@ async fn run_with_clusters<B: LabBackend>(
         Err(error) => {
             console.problem(&format!("failed to prepare the report directory: {error}"));
             record_stage_failure(manifest, RunStage::Reporting, console).await;
-            let run = Some(prepared.run_id.as_str());
+            let started = Some(prepared.run_id.as_str());
             let failure = error.to_string();
             let disposition = RunDisposition::InfrastructureFailed;
-            return no_verdict(request, console, run, "reporting", &failure, disposition).await;
+            return no_verdict(
+                request,
+                console,
+                started,
+                "reporting",
+                &failure,
+                disposition,
+            )
+            .await;
         }
     };
     let mut outputs = Outputs {
         report_dir,
         github_summary: request.github_summary,
         manifest,
+        timings: run.timings,
     };
 
-    let installer = backend.stack_installer(&prepared.paths);
-    let stacks = match runner
-        .install_stacks(
-            &inputs.lab,
-            prepared,
-            &installer,
-            backend.component_timeout(),
-        )
-        .await
+    let stacks = match install_both_stacks(
+        backend,
+        run,
+        console,
+        inputs,
+        runner,
+        prepared,
+        &mut outputs,
+    )
+    .await
     {
         Ok(stacks) => stacks,
-        Err(failure) => {
-            console.problem(&format!("{failure}"));
-            record_stage_failure(outputs.manifest, RunStage::Installation, console).await;
-            write_failure(
-                &outputs,
-                prepared,
-                "install",
-                &failure.to_string(),
-                Vec::new(),
-                console,
-            )
-            .await;
-            return crate::exit::disposition_for_install_failure(&failure);
-        }
+        Err(disposition) => return disposition,
     };
-    console.say(&format!(
-        "installed {} baseline and {} candidate component(s).",
-        stacks.baseline.components.len(),
-        stacks.candidate.components.len()
-    ));
-    // Each side's components are re-recorded from what was actually
-    // installed, replacing the configured versions the first write used
-    // — see `provenance`'s "Components are recorded twice" section.
-    let baseline_components = provenance::installed_components(&stacks.baseline);
-    let candidate_components = provenance::installed_components(&stacks.candidate);
-    record_stage(
-        outputs.manifest,
-        RunStage::Installation,
-        |manifest| {
-            manifest.baseline.components = baseline_components;
-            manifest.candidate.components = candidate_components;
-        },
-        console,
-    )
-    .await;
 
-    let capture = backend.fixture_capture(
-        inputs.fixtures.clone(),
-        ArtifactStore::new(&request.run_root),
+    // Wrapped so each side's replay is measured separately, and so the
+    // corpus size reaches the recorder from the side that counted it.
+    let capture = TimedFixtureCapture::new(
+        backend.fixture_capture(
+            inputs.fixtures.clone(),
+            ArtifactStore::new(&request.run_root),
+        ),
+        run.timings.clone(),
     );
     let mut diagnostics = install_diagnostics(&stacks);
-    if let Err(failure) = runner.capture_fixtures(prepared, &capture).await {
+    let captured = {
+        let _stage = run.timings.stage(TimedStage::FixtureCapture);
+        runner.capture_fixtures(prepared, &capture).await
+    };
+    if let Err(failure) = captured {
         console.problem(&format!("{failure}"));
         record_stage_failure(outputs.manifest, RunStage::FixtureCapture, console).await;
         // Whatever was captured before the failure is still a real
@@ -975,6 +1074,79 @@ async fn run_with_clusters<B: LabBackend>(
     .await
 }
 
+/// Installs both sides' component stacks, or reports the failure,
+/// records it, and ends the run.
+///
+/// Split from [`run_with_clusters`] because it is one self-contained
+/// stage with its own failure handling, and because leaving it inline
+/// made that function long enough to stop reading as the ordered list of
+/// stages it exists to be.
+async fn install_both_stacks<B: LabBackend, C: ClusterManager>(
+    backend: &B,
+    run: &Run<'_>,
+    console: &mut Console<'_>,
+    inputs: &Inputs,
+    runner: &LabRunner<C>,
+    prepared: &PreparedLab,
+    outputs: &mut Outputs<'_>,
+) -> Result<InstalledLab, RunDisposition> {
+    // Wrapped so each side's install — and each component's own
+    // already-measured `elapsed` inside it — reaches the recorder.
+    let installer = TimedStackInstaller::new(
+        backend.stack_installer(&prepared.paths),
+        run.timings.clone(),
+    );
+    let outcome = {
+        let _stage = run.timings.stage(TimedStage::Installation);
+        runner
+            .install_stacks(
+                &inputs.lab,
+                prepared,
+                &installer,
+                backend.component_timeout(),
+            )
+            .await
+    };
+    let stacks = match outcome {
+        Ok(stacks) => stacks,
+        Err(failure) => {
+            console.problem(&format!("{failure}"));
+            record_stage_failure(outputs.manifest, RunStage::Installation, console).await;
+            write_failure(
+                &*outputs,
+                prepared,
+                "install",
+                &failure.to_string(),
+                Vec::new(),
+                console,
+            )
+            .await;
+            return Err(crate::exit::disposition_for_install_failure(&failure));
+        }
+    };
+    console.say(&format!(
+        "installed {} baseline and {} candidate component(s).",
+        stacks.baseline.components.len(),
+        stacks.candidate.components.len()
+    ));
+    // Each side's components are re-recorded from what was actually
+    // installed, replacing the configured versions the first write used
+    // — see `provenance`'s "Components are recorded twice" section.
+    let baseline_components = provenance::installed_components(&stacks.baseline);
+    let candidate_components = provenance::installed_components(&stacks.candidate);
+    record_stage(
+        outputs.manifest,
+        RunStage::Installation,
+        |manifest| {
+            manifest.baseline.components = baseline_components;
+            manifest.candidate.components = candidate_components;
+        },
+        console,
+    )
+    .await;
+    Ok(stacks)
+}
+
 /// Compares what both sides did, grades it, and writes the run's
 /// reports.
 ///
@@ -992,6 +1164,14 @@ async fn compare_and_report(
     outputs: &mut Outputs<'_>,
     mut diagnostics: Vec<Diagnostic>,
 ) -> RunDisposition {
+    let timings = outputs.timings;
+    // Held across normalization, the semantic diff, first-divergence
+    // attribution and policy grading — the whole of what
+    // `RunStage::Comparison` means, and the one stage PRODUCT.md §33
+    // gives a sub-second target for. Dropped before the result is
+    // assembled, so the snapshot that goes *into* the result already
+    // contains this stage's own number.
+    let comparison_stage = timings.stage(TimedStage::Comparison);
     let comparison = match compare::compare(&inputs.lab, &inputs.fixtures, outcomes) {
         Ok(comparison) => comparison,
         Err(error) => {
@@ -1017,22 +1197,27 @@ async fn compare_and_report(
     // change stays visible and simply stops driving the verdict.
     let policy =
         evaluate_with_expectations(&inputs.policy, &inputs.expectations, &comparison.changes());
+    drop(comparison_stage);
     let result = report::build_result(
         &prepared.run_id,
         report::environment_summary(prepared, stacks),
         &comparison,
         policy,
         diagnostics,
+        Some(timings.snapshot()),
     );
 
     record_stage(outputs.manifest, RunStage::Comparison, |_| {}, console).await;
 
-    let written = match report::write_reports(
+    let reporting_stage = timings.stage(TimedStage::Reporting);
+    let rendered = report::write_reports(
         &outputs.report_dir,
         outputs.github_summary,
         &result,
         console.terminal,
-    ) {
+    );
+    drop(reporting_stage);
+    let written = match rendered {
         Ok(written) => written,
         Err(error) => {
             console.problem(&format!("failed to write the run's reports: {error}"));
@@ -1078,11 +1263,11 @@ async fn compare_and_report(
 async fn finish<C: ClusterManager>(
     runner: &LabRunner<C>,
     prepared: &PreparedLab,
-    request: &RunRequest<'_>,
+    run: &Run<'_>,
     console: &mut Console<'_>,
     disposition: RunDisposition,
 ) -> RunDisposition {
-    if request.keep_clusters {
+    if run.request.keep_clusters {
         // Printed rather than deleted (PRODUCT.md §10.4): both cluster
         // names, both kubeconfig paths, and the exact
         // `kind delete cluster --name <name>` for each.
@@ -1090,7 +1275,13 @@ async fn finish<C: ClusterManager>(
         return disposition;
     }
 
-    let diagnostics = runner.cleanup(prepared).await;
+    // Only the deleting path is timed. A `--keep-clusters` run returns
+    // above without deleting anything, and reports no `cleanup` timing at
+    // all rather than a zero — there was no cleanup to measure.
+    let diagnostics = {
+        let _stage = run.timings.stage(TimedStage::Cleanup);
+        runner.cleanup(prepared).await
+    };
     if diagnostics.is_empty() {
         console.say("baseline and candidate clusters deleted.");
         return disposition;

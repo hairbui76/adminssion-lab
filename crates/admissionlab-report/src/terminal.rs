@@ -138,6 +138,7 @@ pub fn render_terminal(result: &LabResult, options: &TerminalOptions) -> String 
     render_inconclusive(&mut out, result, &palette);
     render_stale_expectations(&mut out, result, &palette);
     render_diagnostics(&mut out, result, &palette);
+    render_timings(&mut out, result, &palette);
     render_verdict(&mut out, result, &palette);
 
     out
@@ -521,6 +522,38 @@ fn render_diagnostics(out: &mut String, result: &LabResult, palette: &Palette) {
         );
     }
     out.push('\n');
+}
+
+/// How long each stage took, on one line, and only when the run
+/// measured them.
+///
+/// One line rather than a table, and omitted entirely rather than
+/// rendered empty, for the same reason the rest of this module is shaped
+/// the way it is: a terminal report exists to tell a reader what changed,
+/// and a performance breakdown is context for that answer rather than
+/// part of it. A reader who wants the full structure -- per side, per
+/// component, per fixture count -- reads `result.json`'s `timings` block,
+/// which is where the machine-readable form lives.
+///
+/// The line itself is [`admissionlab_core::StageTimings::summary_line`],
+/// not a second format written here: `admissionlab` prints the same
+/// rendering after cleanup, with the two stages a `result.json` cannot
+/// contain (see that type's own documentation), and two renderings of one
+/// value would be two things to keep in step.
+///
+/// Absent stages are absent from the line. Global Constraint 15 again: a
+/// stage nobody timed must not read as a stage that took no time.
+fn render_timings(out: &mut String, result: &LabResult, palette: &Palette) {
+    let Some(timings) = &result.timings else {
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "{bold}Stage timings{reset}",
+        bold = palette.bold,
+        reset = palette.reset,
+    );
+    let _ = writeln!(out, "  {}\n", timings.summary_line());
 }
 
 /// The run's overall verdict, last, where a reader looks for it.

@@ -393,5 +393,41 @@
         "candidate": "[REDACTED]"
       }
     }
-  ]
+  ],
+  "timings": {
+    "clusterCreation": {
+      "wallMs": 43512,
+      "baselineMs": 41204,
+      "candidateMs": 43118
+    },
+    "installation": {
+      "wallMs": 96401,
+      "baseline": {
+        "elapsedMs": 92310,
+        "components": [
+          {
+            "name": "sidecar-injector",
+            "elapsedMs": 92310
+          }
+        ]
+      },
+      "candidate": {
+        "elapsedMs": 96377,
+        "components": [
+          {
+            "name": "sidecar-injector",
+            "elapsedMs": 96377
+          }
+        ]
+      }
+    },
+    "fixtureCapture": {
+      "wallMs": 6120,
+      "baselineMs": 5942,
+      "candidateMs": 6114,
+      "fixtures": 4
+    },
+    "comparisonMs": 212,
+    "elapsedMs": 149006
+  }
 }

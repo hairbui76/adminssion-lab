@@ -114,7 +114,9 @@
 use admissionlab_admission::{
     AdmissionDecision, AdmissionOutcome, AdmissionTrace, WebhookInvocation,
 };
-use admissionlab_core::{Diagnostic, RedactedValue};
+use admissionlab_core::{
+    ComponentTiming, Diagnostic, InstallStage, RedactedValue, SideInstallTiming, StageTimings,
+};
 use admissionlab_diff::{DivergenceEvidence, SemanticChange};
 use admissionlab_policy::{ClassifiedChange, PolicyResult, StaleExpectation};
 use json_patch::{AddOperation, PatchOperation, ReplaceOperation, TestOperation};
@@ -292,6 +294,7 @@ pub fn redact_result(result: &LabResult, rules: &RedactionRules) -> LabResult {
             .collect(),
         policy: redact_policy(&result.policy, &context),
         diagnostics: result.diagnostics.iter().map(redact_diagnostic).collect(),
+        timings: result.timings.as_ref().map(redact_timings),
     }
 }
 
@@ -334,6 +337,51 @@ fn redact_environment(environment: &EnvironmentReport) -> EnvironmentReport {
                 version: redact_string(&component.version),
             })
             .collect(),
+    }
+}
+
+/// Redacts one run's stage timings.
+///
+/// Every duration is carried verbatim: a number of milliseconds has no
+/// representation in which any of these four rules could match. The one
+/// string in the whole structure is a component's name, and it goes
+/// through [`redact_string`] for exactly the reason
+/// [`redact_environment`] already runs the identical name through it --
+/// the two are the same value, and a rule that fired on one but not the
+/// other would leave the redacted document contradicting itself.
+///
+/// Rebuilt field by field rather than cloned, so a future field on
+/// `StageTimings` that *can* carry user data is a compile error here
+/// rather than a silent pass-through.
+fn redact_timings(timings: &StageTimings) -> StageTimings {
+    StageTimings {
+        cluster_creation: timings.cluster_creation.clone(),
+        installation: timings.installation.as_ref().map(|install| InstallStage {
+            wall: install.wall,
+            baseline: install.baseline.as_ref().map(redact_side_install),
+            candidate: install.candidate.as_ref().map(redact_side_install),
+        }),
+        fixture_capture: timings.fixture_capture.clone(),
+        comparison: timings.comparison,
+        reporting: timings.reporting,
+        cleanup: timings.cleanup.clone(),
+        elapsed: timings.elapsed,
+    }
+}
+
+/// [`redact_timings`] for one side's per-component breakdown.
+fn redact_side_install(install: &SideInstallTiming) -> SideInstallTiming {
+    SideInstallTiming {
+        elapsed: install.elapsed,
+        components: install.components.as_ref().map(|components| {
+            components
+                .iter()
+                .map(|component| ComponentTiming {
+                    name: redact_string(&component.name),
+                    elapsed: component.elapsed,
+                })
+                .collect()
+        }),
     }
 }
 

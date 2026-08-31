@@ -26,7 +26,7 @@
 //! would ever implement.
 
 use admissionlab_admission::{AdmissionOutcome, KubeFixtureCapture};
-use admissionlab_core::FixtureCapture;
+use admissionlab_core::{FixtureCapture, TimedFixtureCapture};
 
 /// A [`FixtureCapture`] that also reports the outcomes it observed.
 ///
@@ -51,5 +51,24 @@ pub trait OutcomeCapture: FixtureCapture {
 impl OutcomeCapture for KubeFixtureCapture {
     fn captured_outcomes(&self) -> Vec<AdmissionOutcome> {
         KubeFixtureCapture::captured_outcomes(self)
+    }
+}
+
+/// Timing a capture must not cost the pipeline its outcomes.
+///
+/// `admissionlab_core::TimedFixtureCapture` wraps a capture to measure
+/// each side's replay (Task 5.7), and `core` cannot name this trait --
+/// it is declared here, above every crate that would have to be involved.
+/// Without this forwarding impl, wrapping the production capture for
+/// timing would make [`OutcomeCapture::captured_outcomes`] unreachable
+/// and the whole comparison stage with it, which is precisely the kind of
+/// behavior change a *measurement* must never introduce.
+///
+/// The orphan rule permits it because the trait is this crate's own; the
+/// forwarding is through `TimedFixtureCapture::inner`, which exists for
+/// exactly this case.
+impl<C: OutcomeCapture> OutcomeCapture for TimedFixtureCapture<C> {
+    fn captured_outcomes(&self) -> Vec<AdmissionOutcome> {
+        self.inner().captured_outcomes()
     }
 }
