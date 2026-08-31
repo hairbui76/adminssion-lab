@@ -52,7 +52,13 @@
 //!   path including timeouts and denials, so it yields
 //!   [`trace::WebhookOutcome::Unknown`], while `mutated: true`, a patch
 //!   annotation, and a `failed-open.` annotation each prove something
-//!   specific.
+//!   specific. The same module implements Task 3.7:
+//!   [`correlate::select_fixture_event`] picks that one event out of a
+//!   window full of controller traffic, matching stage, verb,
+//!   `objectRef`, a parsed `dryRun=All` query parameter and the caller's
+//!   own request window -- and returning a
+//!   [`correlate::CorrelationError`] carrying candidate `auditID`s
+//!   rather than breaking a tie by nearest timestamp.
 //! - [`execute`] implements Task 3.4:
 //!   [`execute::AdmissionExecutor::execute_create`] replays a fixture
 //!   through a real API server as a server-side dry-run CREATE (via
@@ -95,8 +101,10 @@ pub use audit_reader::{
     DEFAULT_POLL_INTERVAL, FileAuditLogReader, STAGE_RESPONSE_COMPLETE,
 };
 pub use correlate::{
-    FAILED_OPEN_MUTATION_ANNOTATION_PREFIX, MUTATION_ANNOTATION_PREFIX, PATCH_ANNOTATION_PREFIX,
-    TraceError, VALIDATION_ANNOTATION_PREFIX, reconstruct_mutating_trace,
+    AUDIT_TIMESTAMP_RESOLUTION, CorrelationError, DRY_RUN_ALL, DRY_RUN_QUERY_PARAM,
+    FAILED_OPEN_MUTATION_ANNOTATION_PREFIX, MUTATION_ANNOTATION_PREFIX, NearMiss, NearMissReason,
+    ObjectKey, PATCH_ANNOTATION_PREFIX, TraceError, VALIDATION_ANNOTATION_PREFIX, VERB_CREATE,
+    reconstruct_mutating_trace, select_fixture_event,
 };
 pub use execute::{
     AdmissionExecutor, FixtureExecutionError, KubeAdmissionExecutor, RawAdmissionResponse,

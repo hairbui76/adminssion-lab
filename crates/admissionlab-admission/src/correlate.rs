@@ -210,14 +210,112 @@
 //! but this module parses any `u32` rather than hard-coding that, since
 //! nothing here needs the assumption and a future reinvocation policy
 //! could widen it.
+//!
+//! # Finding the fixture's own event in the first place (Task 3.7)
+//!
+//! Everything above assumes someone has already picked the right event
+//! out of the audit log. [`select_fixture_event`] is what does that, and
+//! it is the more dangerous half of this module: reconstructing the wrong
+//! event's trace produces a confident, well-formed, entirely fictional
+//! answer.
+//!
+//! [`crate::audit_reader`] narrows the field first -- Global Constraint
+//! 17 keeps fixture requests serial, and a byte checkpoint bounds the
+//! window to the events written around one request. But a `kind` cluster
+//! is not idle: within those few tens of milliseconds it also renews
+//! leader-election leases, reconciles what the fixture just created,
+//! patches node status, and (on a rerun) may hold a byte-identical event
+//! from the previous pass. So a candidate must satisfy **all** of:
+//!
+//! - stage [`crate::audit_reader::STAGE_RESPONSE_COMPLETE`], the only
+//!   stage carrying admission annotations;
+//! - verb [`VERB_CREATE`], because Global Constraint 16 makes a
+//!   server-side dry-run CREATE the one Alpha replay mode;
+//! - an `objectRef` equal to the caller's [`ObjectKey`], subresource
+//!   included;
+//! - a request URI whose `dryRun` query parameter is `All`;
+//! - a `requestReceivedTimestamp` inside the caller's own request window.
+//!
+//! ## Why the `dryRun` parameter is parsed rather than searched for
+//!
+//! `request_uri` is the raw request target, so the obvious
+//! `contains("dryRun=All")` is wrong in both directions. It accepts
+//! `?dryRun=AllOfThem` -- a malformed request the API server answers with
+//! a 400 and still audits -- and it would accept the marker appearing in
+//! any other parameter's name or value. [`is_dry_run_all`] splits the
+//! query on `&`, splits each pair at its first `=`, and requires the
+//! parameter *name* to be exactly [`DRY_RUN_QUERY_PARAM`] and its value
+//! exactly [`DRY_RUN_ALL`]. `All` is the only value the API server
+//! accepts, so nothing is lost by demanding it, and mistaking a persisted
+//! CREATE for a dry-run one would silently violate Global Constraint 16.
+//! No percent-decoding is done: a client that percent-encoded the literal
+//! name `dryRun` is not the client Admission Lab uses, and guessing that
+//! it meant a dry-run is exactly the guess this function refuses.
+//!
+//! ## Which timestamp, and why the window has one microsecond of slack
+//!
+//! The comparison uses `requestReceivedTimestamp`, against the
+//! [`std::time::SystemTime`] pair `crate::execute::RawAdmissionResponse`
+//! records immediately before sending and immediately after receiving.
+//! The API server necessarily received the request after the client sent
+//! it and before the client saw the response, so that field is inside the
+//! window by construction. `stageTimestamp` is not: on a
+//! `ResponseComplete` event it is written *after* the response was
+//! flushed, so it can land fractionally after the client's own
+//! `finished`, and using it would intermittently reject the correct
+//! event.
+//!
+//! The window is otherwise exact. There is no clock-skew allowance,
+//! because there is no skew to allow for: `kind` runs kube-apiserver in a
+//! container on the same kernel as the client, so both read the same
+//! clock, and an invented tolerance would only widen the chance of
+//! matching a neighbouring request.
+//!
+//! The one microsecond of slack on the lower bound
+//! ([`AUDIT_TIMESTAMP_RESOLUTION`]) is not a skew allowance either. Audit
+//! timestamps are `metav1.MicroTime`, serialized by Go with a
+//! `.000000`-style layout, which *truncates* rather than rounds. The
+//! recorded value is therefore at most one microsecond earlier than the
+//! instant it names -- so a request received 400 nanoseconds after
+//! `started` can be logged as having arrived just before it. Truncation
+//! only ever moves the value earlier, which is why the upper bound gets
+//! no matching slack.
+//!
+//! ## Why no tie is ever broken
+//!
+//! Zero matches and several matches are both [`CorrelationError`], never
+//! a best guess. In particular the nearest timestamp is never used to
+//! choose between two otherwise identical candidates (Task 3.7 Step 4):
+//! two events that satisfy every criterion above are, on the evidence
+//! available, equally likely to be the fixture's, and picking one would
+//! attach a real webhook chain to the wrong fixture in a report whose
+//! entire value is being trustworthy about that. The error carries the
+//! candidates' `auditID`s so Task 3.10 can say which events collided.
+//!
+//! A zero-match failure carries [`NearMiss`] entries instead, restricted
+//! to events that referred to the same object -- everything else in the
+//! window is unrelated cluster traffic and listing it would bury the
+//! signal. Each entry names the first criterion the event failed, in the
+//! order above, so the output is deterministic.
+//!
+//! ## Name-generated fixtures
+//!
+//! A fixture may use `metadata.generateName`, in which case the name in
+//! `objectRef` is the one the API server invented. [`ObjectKey::name`] is
+//! the *resolved* name, which Task 3.4's executor reads back from the
+//! dry-run response; matching is exact against that. A prefix match
+//! against the `generateName` is deliberately not offered: it would match
+//! every sibling the same fixture ever generated.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::audit_reader::{AuditEvent, json_error_category};
+use crate::audit_reader::{AuditEvent, AuditObjectRef, json_error_category};
 use crate::trace::{AdmissionTrace, TraceEvidence, WebhookInvocation, WebhookOutcome};
 
 /// kube-apiserver's `MutationAuditAnnotationPrefix`: the key prefix of
@@ -640,9 +738,325 @@ fn parse_payload<T: DeserializeOwned>(
     })
 }
 
+/// The audit `verb` of the server-side dry-run CREATE that Global
+/// Constraint 16 makes the one Alpha fixture replay mode. Audit verbs are
+/// lowercase.
+pub const VERB_CREATE: &str = "create";
+
+/// The query parameter that marks a request as a server-side dry run.
+pub const DRY_RUN_QUERY_PARAM: &str = "dryRun";
+
+/// The only value [`DRY_RUN_QUERY_PARAM`] may take: the API server
+/// rejects every other spelling with a 400.
+pub const DRY_RUN_ALL: &str = "All";
+
+/// How much earlier than the instant it names an audit timestamp can be
+/// recorded.
+///
+/// Audit timestamps are `metav1.MicroTime`, and Go's `.000000` layout
+/// truncates rather than rounds, so the value is exact to within one
+/// microsecond *on the low side only*. [`select_fixture_event`] extends
+/// the window's lower bound by exactly this much and leaves the upper
+/// bound alone. It is not a clock-skew allowance -- see this module's
+/// documentation.
+pub const AUDIT_TIMESTAMP_RESOLUTION: Duration = Duration::from_micros(1);
+
+/// Which object a fixture request targeted, as the caller that issued it
+/// knows it.
+///
+/// `group` is the empty string for the core (`v1`) group, matching how
+/// Kubernetes itself encodes it -- an audit `objectRef` *omits* `apiGroup`
+/// there, and [`select_fixture_event`] treats the two spellings as the
+/// same thing.
+///
+/// `name` is the resolved name, not a `generateName` prefix; see this
+/// module's documentation.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ObjectKey {
+    /// The API group, empty for the core group.
+    pub group: String,
+    /// The API version, for example `"v1"`.
+    pub version: String,
+    /// The plural resource name, for example `"pods"`.
+    pub resource: String,
+    /// The namespace, or `None` for a cluster-scoped resource.
+    pub namespace: Option<String>,
+    /// The object's resolved name.
+    pub name: String,
+}
+
+impl fmt::Display for ObjectKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.group.is_empty() {
+            write!(formatter, "{}", self.version)?;
+        } else {
+            write!(formatter, "{}/{}", self.group, self.version)?;
+        }
+        write!(formatter, " {} ", self.resource)?;
+        match &self.namespace {
+            Some(namespace) => write!(formatter, "{namespace}/{}", self.name),
+            None => write!(formatter, "{}", self.name),
+        }
+    }
+}
+
+/// The first criterion an audit event about the right object failed.
+///
+/// Ordered as [`select_fixture_event`] evaluates them, so an event that
+/// fails several is always reported by the same one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NearMissReason {
+    /// Not the request's final `ResponseComplete` event -- most often
+    /// the `RequestReceived` half of the target request itself.
+    Stage,
+    /// Not a CREATE.
+    Verb,
+    /// Not a server-side dry run: the request URI carries no
+    /// `dryRun=All` query parameter. A persisted write to the same object
+    /// lands here.
+    DryRun,
+    /// The event carried no `requestReceivedTimestamp`, so it cannot be
+    /// placed in the request window at all.
+    MissingTimestamp,
+    /// Received outside the caller's request window -- typically the same
+    /// fixture's event from an earlier run.
+    OutsideWindow,
+}
+
+impl NearMissReason {
+    /// A stable, human-readable name for this reason.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Stage => "not the ResponseComplete stage",
+            Self::Verb => "not a create",
+            Self::DryRun => "not a dryRun=All request",
+            Self::MissingTimestamp => "no requestReceivedTimestamp",
+            Self::OutsideWindow => "received outside the request window",
+        }
+    }
+}
+
+impl fmt::Display for NearMissReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// One audit event that named the right object but was not the fixture's
+/// request.
+///
+/// Reported so a correlation failure is actionable -- "the object was
+/// there, four seconds too early" is a different bug from "nothing in the
+/// window mentioned it at all".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearMiss {
+    /// The candidate event's `auditID`.
+    pub audit_id: String,
+    /// The first criterion it failed.
+    pub reason: NearMissReason,
+}
+
+/// A fixture request could not be tied to exactly one audit event.
+///
+/// Never a best guess: see this module's documentation ("Why no tie is
+/// ever broken"). Both variants carry the `auditID`s involved so Task
+/// 3.10 can report which events it was looking at.
+///
+/// `key` is boxed in both variants. [`select_fixture_event`]'s signature
+/// is frozen as `Result<&AuditEvent, CorrelationError>`, so the error's
+/// size is paid on every *successful* correlation too -- and an inline
+/// [`ObjectKey`] (five `String`s) makes that `Result` several times wider
+/// than the reference it usually carries. The indirection costs one
+/// allocation on a path that is already failing the whole fixture.
+#[derive(Debug, Error)]
+pub enum CorrelationError {
+    /// No audit event in the window was the fixture's dry-run CREATE.
+    #[error(
+        "no audit event matched the dry-run create of {key} in the fixture's request window{}",
+        render_near_misses(.near_misses)
+    )]
+    NoMatch {
+        /// The object the fixture request targeted.
+        key: Box<ObjectKey>,
+        /// Events that named the same object but failed a criterion, in
+        /// the order they appeared in the log.
+        near_misses: Vec<NearMiss>,
+    },
+    /// More than one audit event satisfied every criterion equally.
+    #[error(
+        "{} audit events matched the dry-run create of {key} equally well ({}); Admission Lab \
+         does not break such a tie -- picking the nearest timestamp would attach one fixture's \
+         webhook chain to another's report",
+        .audit_ids.len(),
+        .audit_ids.join(", ")
+    )]
+    Ambiguous {
+        /// The object the fixture request targeted.
+        key: Box<ObjectKey>,
+        /// Every equally valid candidate's `auditID`.
+        audit_ids: Vec<String>,
+    },
+}
+
+/// Selects the single audit event produced by one fixture's server-side
+/// dry-run CREATE.
+///
+/// `started` and `finished` are the caller's own request window --
+/// `crate::execute::RawAdmissionResponse`'s `request_started_at` and
+/// `request_finished_at`. See this module's documentation for why the
+/// event's `requestReceivedTimestamp` is what they are compared against,
+/// why the window's lower bound is widened by
+/// [`AUDIT_TIMESTAMP_RESOLUTION`] and its upper bound is not, and why the
+/// `dryRun` parameter is parsed rather than searched for.
+///
+/// # Errors
+///
+/// Returns [`CorrelationError::NoMatch`] when no event satisfied every
+/// criterion -- carrying a [`NearMiss`] for each event that named the
+/// same object, so the failure says *why* rather than only *that* --
+/// and [`CorrelationError::Ambiguous`] when more than one did. An
+/// ambiguity is never resolved by picking the nearest timestamp (Task
+/// 3.7 Step 4).
+pub fn select_fixture_event<'a>(
+    events: &'a [AuditEvent],
+    key: &ObjectKey,
+    started: SystemTime,
+    finished: SystemTime,
+) -> Result<&'a AuditEvent, CorrelationError> {
+    let mut matched: Vec<&AuditEvent> = Vec::new();
+    let mut near_misses: Vec<NearMiss> = Vec::new();
+
+    for event in events {
+        // The object is checked first and separately: an event about some
+        // other object is ordinary cluster traffic, not a near miss, and
+        // listing every lease renewal would bury the candidates that
+        // matter.
+        if !targets_object(event.object_ref.as_ref(), key) {
+            continue;
+        }
+        if let Some(reason) = first_unmet_criterion(event, started, finished) {
+            near_misses.push(NearMiss {
+                audit_id: event.audit_id.clone(),
+                reason,
+            });
+        } else {
+            matched.push(event);
+        }
+    }
+
+    match matched.as_slice() {
+        [event] => Ok(event),
+        [] => Err(CorrelationError::NoMatch {
+            key: Box::new(key.clone()),
+            near_misses,
+        }),
+        candidates => Err(CorrelationError::Ambiguous {
+            key: Box::new(key.clone()),
+            audit_ids: candidates
+                .iter()
+                .map(|event| event.audit_id.clone())
+                .collect(),
+        }),
+    }
+}
+
+/// Whether an audit `objectRef` names exactly the object `key` describes.
+///
+/// An absent `apiGroup` *is* the core group rather than an unknown one
+/// (see [`AuditObjectRef`]), so it compares equal to an empty
+/// [`ObjectKey::group`]. Every other absent field fails the comparison: a
+/// key always names a version, a resource and a name, so an event missing
+/// one cannot be the request that targeted it.
+///
+/// `subresource` must be absent. A fixture replays a CREATE of the
+/// resource itself; a create against `pods/binding` is a different
+/// request that happens to share every other field.
+fn targets_object(object_ref: Option<&AuditObjectRef>, key: &ObjectKey) -> bool {
+    let Some(object_ref) = object_ref else {
+        return false;
+    };
+    object_ref.subresource.is_none()
+        && object_ref.api_group.as_deref().unwrap_or("") == key.group
+        && object_ref.api_version.as_deref() == Some(key.version.as_str())
+        && object_ref.resource.as_deref() == Some(key.resource.as_str())
+        && object_ref.namespace.as_deref() == key.namespace.as_deref()
+        && object_ref.name.as_deref() == Some(key.name.as_str())
+}
+
+/// The first criterion `event` fails, or `None` if it is a valid match.
+///
+/// The evaluation order is the one [`NearMissReason`] documents, so an
+/// event failing several is always reported by the same reason.
+fn first_unmet_criterion(
+    event: &AuditEvent,
+    started: SystemTime,
+    finished: SystemTime,
+) -> Option<NearMissReason> {
+    if !event.is_response_complete() {
+        return Some(NearMissReason::Stage);
+    }
+    if event.verb != VERB_CREATE {
+        return Some(NearMissReason::Verb);
+    }
+    if !is_dry_run_all(&event.request_uri) {
+        return Some(NearMissReason::DryRun);
+    }
+    let Some(received) = event.request_received_timestamp else {
+        return Some(NearMissReason::MissingTimestamp);
+    };
+    let received = SystemTime::from(received);
+    // `checked_sub` can only fail before the Unix epoch, where no audit
+    // log exists; falling back to the un-widened bound keeps this total
+    // without an unreachable panic.
+    let earliest = started
+        .checked_sub(AUDIT_TIMESTAMP_RESOLUTION)
+        .unwrap_or(started);
+    if received < earliest || received > finished {
+        return Some(NearMissReason::OutsideWindow);
+    }
+    None
+}
+
+/// Whether `request_uri`'s query string carries `dryRun=All`.
+///
+/// Parsed, never searched for: see this module's documentation ("Why the
+/// `dryRun` parameter is parsed rather than searched for"). A parameter
+/// with no `=` is treated as having an empty value, which no more matches
+/// [`DRY_RUN_ALL`] than any other wrong value does.
+fn is_dry_run_all(request_uri: &str) -> bool {
+    let Some((_, query)) = request_uri.split_once('?') else {
+        return false;
+    };
+    query.split('&').any(|parameter| {
+        let (name, value) = parameter.split_once('=').unwrap_or((parameter, ""));
+        name == DRY_RUN_QUERY_PARAM && value == DRY_RUN_ALL
+    })
+}
+
+/// Renders the near-miss tail of a [`CorrelationError::NoMatch`] message.
+///
+/// Kept out of the `#[error]` attribute itself because an empty list
+/// needs a different sentence, not an empty one: "nothing in the window
+/// even mentioned that object" and "three events mentioned it and each
+/// missed for a different reason" point at different bugs.
+fn render_near_misses(near_misses: &[NearMiss]) -> String {
+    if near_misses.is_empty() {
+        return "; no audit event in the window referred to that object at all".to_string();
+    }
+    let listed = near_misses
+        .iter()
+        .map(|near_miss| format!("{} ({})", near_miss.audit_id, near_miss.reason))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("; events referring to that object, and why each was rejected: {listed}")
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{FAILED_OPEN_MUTATION_ANNOTATION_PREFIX, MUTATION_ANNOTATION_PREFIX, decimal};
+    use super::{
+        FAILED_OPEN_MUTATION_ANNOTATION_PREFIX, MUTATION_ANNOTATION_PREFIX, decimal, is_dry_run_all,
+    };
 
     /// The mutation this test exists to kill: classifying annotation keys
     /// with `contains` instead of `strip_prefix`, which would read every
@@ -666,5 +1080,41 @@ mod tests {
         assert_eq!(decimal(" 1"), None);
         assert_eq!(decimal(""), None);
         assert_eq!(decimal("4294967296"), None);
+    }
+
+    /// The mutation this test exists to kill: recognizing a dry-run
+    /// request with `request_uri.contains("dryRun=All")`, which accepts
+    /// the marker wherever it appears -- inside another parameter's name
+    /// or value, or as the prefix of a longer, invalid value the API
+    /// server answered with a 400 and audited anyway.
+    #[test]
+    fn only_a_dryrun_parameter_whose_value_is_exactly_all_is_a_dry_run() {
+        assert!(is_dry_run_all("/api/v1/namespaces/x/pods?dryRun=All"));
+        assert!(is_dry_run_all(
+            "/api/v1/namespaces/x/pods?fieldManager=admissionlab&dryRun=All"
+        ));
+        assert!(is_dry_run_all(
+            "/api/v1/namespaces/x/pods?dryRun=All&fieldManager=admissionlab"
+        ));
+
+        assert!(!is_dry_run_all("/api/v1/namespaces/x/pods"));
+        assert!(!is_dry_run_all("/api/v1/namespaces/x/pods?dryRun="));
+        assert!(!is_dry_run_all("/api/v1/namespaces/x/pods?dryRun"));
+        assert!(
+            !is_dry_run_all("/api/v1/namespaces/x/pods?dryRun=AllOfThem"),
+            "a longer value that starts with All is not All"
+        );
+        assert!(
+            !is_dry_run_all("/api/v1/namespaces/x/pods?xdryRun=All"),
+            "a parameter whose name merely ends in dryRun is not the dryRun parameter"
+        );
+        assert!(
+            !is_dry_run_all("/api/v1/namespaces/x/pods?fieldManager=dryRun%3DAll"),
+            "the marker appearing inside another parameter's value proves nothing"
+        );
+        assert!(
+            !is_dry_run_all("/api/v1/namespaces/x/pods?labelSelector=stage%3DdryRun=All"),
+            "nor does it inside a parameter's value that itself contains an equals sign"
+        );
     }
 }
