@@ -1,0 +1,85 @@
+# Sidecar injection: a pod that a mutating webhook adds a container to,
+# in the one namespace of this corpus that Istio's own injector selects.
+#
+# Two mutating webhooks are genuinely invoked for this fixture, in this
+# order, on both sides:
+#
+#   1. `namespace.sidecar-injector.istio.io` — matched, because
+#      `admissionlab-alpha-mesh` carries `istio-injection: enabled`.
+#      It reads the `sidecar.istio.io/inject: "false"` annotation below
+#      and declines, answering `allowed` with no patch. The invocation
+#      is recorded on both sides with `mutated: false`, which is the
+#      evidence that Istio really is live in this cluster's admission
+#      path — a distinction Global Constraint 15 exists to preserve:
+#      "the injector ran and chose not to inject" is not the same
+#      observation as "no injector was installed".
+#   2. Kyverno's `alpha-mesh-sidecar` ClusterPolicy, identical on both
+#      sides, which appends the platform's own `alpha-telemetry`
+#      container. That is the sidecar this fixture is named for, and it
+#      is expected to arrive identically on both sides, making this
+#      fixture `identical`.
+#
+# # Why Istio's real injection is deliberately opted out of
+#
+# This is a measured finding from running this very lab, not a
+# precaution. With the annotation removed, Istio really does inject —
+# `istio-proxy`, `istio-init`, nine volumes, six labels and annotations —
+# and both sides' *admitted pods are byte-identical* once normalized
+# (the only raw difference is `metadata.uid`, which
+# `admissionlab_normalize`'s built-in rules remove). But `istiod` emits
+# the six operations of its JSON Patch in a different order on each of
+# the two clusters:
+#
+#   baseline:  tlsMode, canonical-name, canonical-revision, annotations,
+#              volumes, initContainers
+#   candidate: volumes, initContainers, canonical-name,
+#              canonical-revision, tlsMode, annotations
+#
+# Same six operations, same values, different sequence — Go map
+# iteration order inside the injector, reshuffled per process.
+# `admissionlab_normalize::trace` deliberately does *not* canonicalize
+# JSON Patch operation order (Task 4.2 Step 2: a patch is applied in
+# sequence and later operations depend on earlier ones, so reordering is
+# semantics, not presentation), so `admissionlab_diff::trace` compares
+# the two patches, finds them unequal, and reports one
+# `webhook_invocation_changed` — a `warning` about nothing, on every run.
+#
+# It must not be silenced with an `expectations.yaml` entry, and that is
+# the part worth remembering: the finding's own *presence* is not
+# deterministic. Two shuffles coincide roughly one run in seven hundred,
+# and on that run the expectation matches nothing, is reported stale, and
+# the run's change set differs from the previous one's — trading a
+# spurious warning for a violation of the determinism this corpus exists
+# to demonstrate. Opting this fixture out of Istio's injection removes
+# the nondeterminism at the source instead, which is the same discipline
+# `automountServiceAccountToken: false` applies to the random
+# `kube-api-access-*` volume suffix (see
+# `fixtures/core/alpha-corpus/00-setup.yaml`).
+#
+# The real fix belongs in the tool, not in this corpus: comparing two
+# patches as ordered sequences is right in general and wrong for the
+# common case of operations on disjoint paths. Until a task takes that
+# on, this annotation is the honest workaround and this comment is the
+# record of why it is here.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpha-mesh-workload
+  namespace: admissionlab-alpha-mesh
+  annotations:
+    # Read by `istiod`'s injection webhook, not by Kubernetes. See this
+    # file's header for the measurement behind it.
+    sidecar.istio.io/inject: "false"
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    app: alpha-mesh-workload
+    version: v1
+spec:
+  serviceAccountName: alpha-runner
+  automountServiceAccountToken: false
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.8
+      ports:
+        - name: http
+          containerPort: 8080

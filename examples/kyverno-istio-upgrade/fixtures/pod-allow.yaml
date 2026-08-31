@@ -1,0 +1,30 @@
+# Control group, 1 of 5: the plainest pod this corpus can express.
+#
+# Lives in `admissionlab-alpha-plain`, which no Kyverno rule in either
+# side's `alpha-policies` component names and which carries no
+# `istio-injection` label — so the only admission this pod sees is the
+# API server's own in-tree plugins, identically on both sides.
+#
+# Its job is to be *identical*. A run in which this fixture reports any
+# semantic change at all is reporting something neither stack was
+# configured to do, which is the single most useful thing a control
+# fixture can tell you.
+#
+# `automountServiceAccountToken: false` and the explicit
+# `serviceAccountName` are not optional decoration and are repeated on
+# every fixture in this corpus — `fixtures/core/alpha-corpus/00-setup.yaml`
+# explains both at length (the random `kube-api-access-*` volume suffix,
+# and the asynchronously created `default` ServiceAccount).
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpha-allow
+  namespace: admissionlab-alpha-plain
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  serviceAccountName: alpha-runner
+  automountServiceAccountToken: false
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.8

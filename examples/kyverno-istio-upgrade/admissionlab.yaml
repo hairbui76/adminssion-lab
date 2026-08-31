@@ -1,0 +1,380 @@
+# Admission Lab's canonical Public Alpha demonstration: two real
+# Kubernetes clusters, each running a real Kyverno and a real Istio, told
+# apart by one first-party policy that the candidate stack no longer
+# installs.
+#
+#     admissionlab test examples/kyverno-istio-upgrade/admissionlab.yaml
+#
+# It creates both clusters, installs both stacks, replays nine fixtures
+# through each, prints a PASS/WARN/FAIL summary, writes `result.json` and
+# `report.html`, deletes both clusters, and exits `1` — because one
+# critical, unexpected behavior change was observed:
+#
+#     init_container_removed  [alpha-audit-init]
+#       on fixtures/policy-pod-init-container.yaml
+#       first divergence [observed]: Webhook `mutate.kyverno.svc-fail`
+#       ran in round 0 at index 5 on both sides and responded with a
+#       different patch.
+#
+# `crates/admissionlab-cli/tests/alpha_e2e.rs` runs exactly this
+# configuration end to end against real clusters and asserts that
+# finding, the expected image change beside it, and the exact bucket
+# counts this file is designed to produce:
+#
+#     Summary  9 fixtures
+#       identical    6
+#       expected     2
+#       warnings     0
+#       critical     1
+#       inconclusive 0
+#
+# # What the two sides are
+#
+# Identical, except for one file:
+#
+# | | baseline | candidate |
+# | --- | --- | --- |
+# | Kubernetes | 1.35.8 | 1.35.8 |
+# | Kyverno | chart 3.9.0 | chart 3.9.0 |
+# | Istio (istiod) | chart 1.30.4 | chart 1.30.4 |
+# | policies | `stacks/baseline/policies.yaml` | `stacks/candidate/policies.yaml` |
+#
+# Holding the vendor versions equal is deliberate. A demo that also
+# bumped Kyverno and Istio would produce a report in which the finding
+# that matters is buried among a dozen that do not, and would rot the
+# moment either vendor changed anything. The single-variable design means
+# every line of the report traces back to a diff a reader can hold in
+# their head — and the *mechanism* (a policy that stopped being applied)
+# is the same one a real vendor regression would present through.
+#
+# # Kubernetes 1.35.8
+#
+# The one version at which `compatibility/recipes.yaml` certifies **both**
+# recipes this example uses. Kyverno's chart 3.9.0 documents support for
+# 1.33–1.35 only, so its `certified` list is `["1.35.8"]`; Istio's is the
+# whole supported set. Their intersection is a single version, and this
+# is it. Note that this is *not* Admission Lab's own Tier-1 primary
+# (1.36.4) — that divergence is real, is recorded in
+# `compatibility/recipes.yaml`, and this file follows it rather than
+# quietly running Kyverno outside its documented range.
+#
+# # Why every component declares `readiness`
+#
+# `helm upgrade --install` returns when a release's manifests have been
+# applied. `kubectl apply` returns when its objects exist. Neither waits
+# for Kyverno's admission controller to be running, for the resource
+# webhook configurations Kyverno's controller creates *at runtime* to
+# exist at all, for a `ClusterPolicy` to have been folded into them, or
+# for `istiod` to be serving `/inject`. A lab that replayed fixtures
+# inside that window would observe a stack that is not yet the stack
+# under test — and would observe a *different* amount of it on each side,
+# on every run.
+#
+# So every component below carries an explicit readiness contract,
+# transcribed from the certified recipe that owns it
+# (`recipes/kyverno/recipe.yaml`, `recipes/istio/recipe.yaml`), plus —
+# for the policies — the extra gate `recipes/kyverno/recipe.yaml`'s own
+# comments tell callers they must add for themselves: a `ClusterPolicy`'s
+# `Ready` condition, because the recipe's `webhookConfigurationPresent`
+# checks confirm only that the configuration objects exist, never that
+# any particular policy's rules have reached them.
+#
+# Components install sequentially within a side, in the order written
+# here, each one fully ready before the next begins.
+#
+# # Why the policies are installed last
+#
+# Not cosmetic ordering, and not a guess — this configuration was
+# observed failing without it. Applying a `ClusterPolicy` is itself an
+# admission request, and the API server routes it through Kyverno's own
+# `kyverno-policy-mutating-webhook-cfg`, whose backend is the same
+# `kyverno-svc` Service the admission controller serves. Between that
+# pod becoming Ready (which is exactly what `deploymentAvailable`
+# observes) and kube-proxy actually programming the Service's endpoint
+# there is a short window in which the API server can only answer
+#
+#     failed calling webhook "mutate-policy.kyverno.svc":
+#     dial tcp 10.96.227.1:443: connect: connection refused
+#
+# and `kubectl apply` does not retry it. Measured directly while this
+# example was written: two consecutive runs of this same lab, one
+# succeeding and one failing exactly there.
+#
+# No readiness variant probes a Service endpoint, so this file closes the
+# window structurally instead: the Kyverno component waits for all four
+# of the chart's Deployments and for the policy webhook configurations
+# Kyverno creates for itself, Istio's entire install runs next, and only
+# then are the policies applied — by which point Kyverno has been serving
+# for well over a minute. Every one of those gates is independently
+# meaningful; together they also happen to make the race unreachable in
+# practice.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+
+baseline:
+  kubernetes: "1.35.8"
+  components:
+    # 1. Fixture setup: the namespaces and ServiceAccounts every fixture
+    #    is replayed into. Applied for real, because a namespace created
+    #    by a dry-run CREATE would not exist by the time the pods that
+    #    need it are replayed — see
+    #    `fixtures/core/alpha-corpus/00-setup.yaml`, which is also where
+    #    the corpus-wide `automountServiceAccountToken: false` rule and
+    #    the reason for it are written down.
+    #
+    #    First, so the mesh namespace's `istio-injection` label is in
+    #    place well before Istio's injector could ever be asked about it,
+    #    and so the ServiceAccounts have two Helm charts' worth of
+    #    install time to become visible to the API server's own
+    #    ServiceAccount admission plugin.
+    #
+    #    No `readiness`: `kubectl apply` returning means these objects
+    #    exist, and a Namespace and a ServiceAccount have no readiness to
+    #    wait for beyond that.
+    - name: alpha-setup
+      version: "1"
+      install:
+        type: manifests
+        paths:
+          - ../../fixtures/core/alpha-corpus/00-setup.yaml
+
+    # 2. Kyverno, installed exactly as `recipes/kyverno/recipe.yaml`
+    #    certifies it: same chart, same repository, same pinned version,
+    #    same namespace. The readiness contract below is deliberately
+    #    *wider* than that recipe's — see each check.
+    - name: kyverno
+      install:
+        type: helm
+        chart: kyverno/kyverno
+        repo: https://kyverno.github.io/kyverno/
+        version: "3.9.0"
+        namespace: kyverno
+      readiness:
+        # The only one of the chart's four Deployments that owns a
+        # resource-facing webhook, and the one the certified recipe gates
+        # on.
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-admission-controller
+        # The other three, which the certified recipe deliberately does
+        # *not* gate on because they sit outside the admission path. This
+        # lab gates on them anyway, for a reason unrelated to what they
+        # do: they become Available strictly after the admission
+        # controller does, so waiting for them is a readiness-vocabulary
+        # way of buying the seconds Kyverno's own Service endpoint needs
+        # before this lab applies a ClusterPolicy through it. See this
+        # file's header, "Why the policies are installed last".
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-background-controller
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-cleanup-controller
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-reports-controller
+        # All four created by kyverno-admission-controller at runtime,
+        # never rendered by the chart. The two `resource-*` ones start
+        # with an empty `webhooks: []` list, so their existence is
+        # necessary but not sufficient — which is what the policy
+        # component's own `Ready` gates below are for. The two `policy-*`
+        # ones are what the API server calls when this lab applies a
+        # ClusterPolicy at all.
+        - type: webhookConfigurationPresent
+          name: kyverno-resource-validating-webhook-cfg
+        - type: webhookConfigurationPresent
+          name: kyverno-resource-mutating-webhook-cfg
+        - type: webhookConfigurationPresent
+          name: kyverno-policy-validating-webhook-cfg
+        - type: webhookConfigurationPresent
+          name: kyverno-policy-mutating-webhook-cfg
+
+    # 3. Istio, exactly as `recipes/istio/recipe.yaml` certifies it:
+    #    `istio/istiod` alone (no `istio/base` — see that recipe's README
+    #    for the empirical basis), into `istio-system`, with the same two
+    #    readiness checks.
+    #
+    #    This is the component this lab compares *nothing* across. It is
+    #    here to be the large, realistic, identical part of both stacks,
+    #    and to put a second vendor's mutating webhook into the observed
+    #    chain for `fixtures/pod-sidecar-injection.yaml` — whose own
+    #    header explains at length, with measurements, why that fixture
+    #    opts out of Istio's injection rather than accepting it.
+    - name: istio
+      install:
+        type: helm
+        chart: istio/istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        version: "1.30.4"
+        namespace: istio-system
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+        - type: webhookConfigurationPresent
+          name: istio-sidecar-injector
+
+    # 4. This lab's own policies — the one thing that differs between the
+    #    two sides, and the last thing installed (see this file's header
+    #    for why last). `version` is required because a manifests install
+    #    carries no implicit version of its own; it names this policy
+    #    set's revision, not any vendor's release.
+    - name: alpha-policies
+      version: "1"
+      install:
+        type: manifests
+        paths:
+          - stacks/baseline/policies.yaml
+      readiness:
+        # A `ClusterPolicy` reports `Ready` once Kyverno has accepted it
+        # and reflected its rules into the resource webhook
+        # configurations. Waiting on this — for every policy, on the side
+        # that installs it — is what makes "the policy is enforced" true
+        # before a single fixture is replayed, on both sides, every run.
+        - type: customResourceCondition
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          name: alpha-audit-init
+          conditionType: Ready
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          name: alpha-image-pin
+          conditionType: Ready
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          name: alpha-mesh-sidecar
+          conditionType: Ready
+          status: "True"
+
+candidate:
+  kubernetes: "1.35.8"
+  components:
+    - name: alpha-setup
+      version: "1"
+      install:
+        type: manifests
+        paths:
+          - ../../fixtures/core/alpha-corpus/00-setup.yaml
+
+    - name: kyverno
+      install:
+        type: helm
+        chart: kyverno/kyverno
+        repo: https://kyverno.github.io/kyverno/
+        version: "3.9.0"
+        namespace: kyverno
+      readiness:
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-admission-controller
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-background-controller
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-cleanup-controller
+        - type: deploymentAvailable
+          namespace: kyverno
+          name: kyverno-reports-controller
+        - type: webhookConfigurationPresent
+          name: kyverno-resource-validating-webhook-cfg
+        - type: webhookConfigurationPresent
+          name: kyverno-resource-mutating-webhook-cfg
+        - type: webhookConfigurationPresent
+          name: kyverno-policy-validating-webhook-cfg
+        - type: webhookConfigurationPresent
+          name: kyverno-policy-mutating-webhook-cfg
+
+    - name: istio
+      install:
+        type: helm
+        chart: istio/istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        version: "1.30.4"
+        namespace: istio-system
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+        - type: webhookConfigurationPresent
+          name: istio-sidecar-injector
+
+    - name: alpha-policies
+      version: "2"
+      install:
+        type: manifests
+        paths:
+          - stacks/candidate/policies.yaml
+      readiness:
+        # Two gates, not three: `alpha-audit-init` does not exist on this
+        # side. That absence is the regression, and it is stated here as
+        # plainly as it is in `stacks/candidate/policies.yaml` — a
+        # readiness check for a policy this side never installs would
+        # simply time out.
+        - type: customResourceCondition
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          name: alpha-image-pin
+          conditionType: Ready
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          name: alpha-mesh-sidecar
+          conditionType: Ready
+          status: "True"
+
+fixtures:
+  # Rooted at this file's own directory, and matched only inside it.
+  # `fixtures/core/alpha-corpus/00-setup.yaml` is therefore structurally
+  # unreachable from here, which is exactly what a setup document that
+  # must never be dry-run-replayed needs — see that file's own header for
+  # why the corpus is split across two directories.
+  include:
+    - "fixtures/*.yaml"
+
+expectationsFile: expectations.yaml
+
+policy:
+  # `image_changed` is `info` in Admission Lab's default severity table,
+  # which is the right default: most image changes are a tag bump nobody
+  # needs woken up for. This lab escalates it to `critical`, and that is
+  # a real, load-bearing choice rather than decoration — it is what makes
+  # the expectation in `expectations.yaml` mean something. Delete the
+  # `alpha-pinned-image-bump` entry from that file and this run stops
+  # exiting 1 for one reason and starts exiting 1 for four; the expected
+  # change is genuinely holding the verdict up, not merely annotated.
+  #
+  # `failOn` is additive only: it can raise a kind's severity and never
+  # lower one, so naming `image_changed` here does not quietly relax the
+  # other sixteen kinds.
+  failOn:
+    - image_changed
+
+  latency:
+    # Raised from the 100 ms / 2x Alpha default, deliberately, and this
+    # is the one threshold in this file that is tuned rather than
+    # transcribed.
+    #
+    # Per-webhook latency is derived from a kube-apiserver `/metrics`
+    # delta around each replayed fixture. In this lab those two deltas
+    # come from two *independently scheduled* `kind` clusters that were
+    # created at the same moment on one machine, that pulled their images
+    # concurrently, and that are still running five controllers apiece.
+    # Sub-second differences between them measure the host's scheduler,
+    # not either stack's admission behavior, and a
+    # `webhook_latency_changed` finding sourced from that is precisely
+    # the "known raw nondeterminism creating warnings" the Alpha release
+    # review rules out.
+    #
+    # One second is well above that noise floor and still far below any
+    # latency change a platform team would call acceptable, so the signal
+    # this lab can still report is a real one. The conjunctive rule is
+    # unchanged: a candidate must be at least 1 s slower *and* at least
+    # twice as slow before it counts.
+    absoluteIncrease: 1000
+    relativeMultiplier: 2.0

@@ -1,0 +1,51 @@
+# A Deployment as a policy target: the same pinned-image rule, applied
+# one level down, to a pod template rather than a pod.
+#
+# `admissionlab_diff::workload` finds a pod spec at the first of
+# `/spec/jobTemplate/spec/template/spec`, `/spec/template/spec`, `/spec`
+# that resolves to an object, so this fixture's findings are reported at
+# `/spec/template/spec/containers/0/image` rather than
+# `/spec/containers/0/image`. Having a real Deployment in the corpus is
+# what proves that path selection works against a live API server, not
+# only against hand-written JSON in a unit test.
+#
+# # Why the policy names `Deployment` explicitly
+#
+# Kyverno can *autogenerate* controller rules from a `Pod`-matching rule.
+# Both sides' policies switch that off (`pod-policies.kyverno.io/autogen-controllers: none`)
+# and name `Deployment` and `Job` in a rule of their own instead. Two
+# reasons: the generated rules' names and match semantics are a
+# Kyverno-version detail this corpus would then be pinned to, and a
+# reader of `stacks/*/policies.yaml` can see exactly which kinds are
+# matched without knowing that feature exists at all.
+#
+# # Expected result
+#
+# Both sides pin the image, to two different values, so this fixture
+# produces exactly one `image_changed` — escalated to `critical` by this
+# lab's `policy.failOn`, and then marked *expected* by
+# `expectations.yaml`, which is the path that keeps it visible in the
+# report while stopping it from deciding the verdict.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alpha-web
+  namespace: admissionlab-alpha
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alpha-web
+  template:
+    metadata:
+      labels:
+        app: alpha-web
+        app.kubernetes.io/part-of: admission-lab
+    spec:
+      serviceAccountName: alpha-runner
+      automountServiceAccountToken: false
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.8

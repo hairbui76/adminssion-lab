@@ -1,0 +1,44 @@
+# A Job as a policy target: a second pod-template-carrying kind, matched
+# by the same rule as `policy-deployment.yaml`.
+#
+# Deployment and Job both nest their pod spec at `/spec/template/spec`,
+# so this is not a second *path* case — it is a second *kind* case, and
+# the reason it earns its place is what the API server does to a Job on
+# admission that it does not do to a Deployment: it defaults
+# `spec.selector` and `spec.template.metadata.labels` with a
+# `batch.kubernetes.io/controller-uid` whose value is a freshly generated
+# UUID, different on every CREATE and therefore different on the two
+# sides.
+#
+# That is raw nondeterminism arriving from the API server itself, and it
+# is exactly the case the Alpha release criterion "known raw
+# nondeterminism does not create warnings" is about. It produces no
+# finding here, and not by accident:
+# `admissionlab_diff::diff_workload_objects` compares only
+# `serviceAccountName`, the pod-level `securityContext`,
+# `initContainers`, `containers` and `volumes` inside the located pod
+# spec — a controller UID in `/spec/selector` or in the template's own
+# `metadata.labels` is outside all of them. Keeping this fixture in the
+# corpus is what turns that reasoning into something a run re-checks
+# every time rather than a claim in a comment.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: alpha-batch
+  namespace: admissionlab-alpha
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: alpha-batch
+        app.kubernetes.io/part-of: admission-lab
+    spec:
+      restartPolicy: Never
+      serviceAccountName: alpha-runner
+      automountServiceAccountToken: false
+      containers:
+        - name: app
+          image: registry.k8s.io/pause:3.8

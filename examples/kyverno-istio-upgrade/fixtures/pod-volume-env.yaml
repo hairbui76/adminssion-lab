@@ -1,0 +1,69 @@
+# Control group, 4 of 5: a volume, a volume mount, and an environment
+# block — plus this corpus's redaction sentinel.
+#
+# # The three shapes
+#
+# `admissionlab_diff::workload` models `volume_added`/`volume_removed`
+# (from `spec.volumes`), `volume_mount_changed` (per container), and
+# `environment_changed` (per container) as separate semantic kinds. None
+# of them can be observed by a corpus whose pods declare no volumes and
+# no environment, so this fixture declares all three. Like every other
+# control-group fixture it lives outside both the Kyverno policy
+# namespace and the mesh namespace, so its expected result is "no change
+# at all".
+#
+# # The sentinel, and why it is safe to check in
+#
+# `ALPHA_DEMO_API_TOKEN` below holds a value that is not a credential and
+# never was: it is a fixed marker string whose only purpose is to be
+# looked for, by `crates/admissionlab-cli/tests/alpha_e2e.rs`, in the
+# `result.json` and `report.html` a real run writes. Finding it there
+# would mean `admissionlab_report::redact`'s rule 4 (blank the `value` of
+# any `{name, value}` pair whose `name` contains a credential substring —
+# `token` is one of the thirteen in `DEFAULT_ENV_NAME_PATTERNS`) had
+# stopped running somewhere on the path from a captured admission
+# response to a written artifact.
+#
+# That check is only meaningful if the sentinel really does travel that
+# path, so this must be a literal `value:`, not a `valueFrom:` reference:
+# rule 4 deliberately leaves a reference alone, because a reference holds
+# no literal to leak. The variable name is chosen to match the pattern
+# list without being a plausible real name, and the value is prefixed
+# `adlab-sentinel-` so that a human who ever *does* see it in an artifact
+# knows immediately what it is and that nothing real was disclosed.
+#
+# `DEMO_REGION` sits next to it, unredacted, for the other half of the
+# same assertion: redaction has to blank the credential-shaped entry and
+# leave ordinary configuration legible. A rule that blanked everything
+# would pass a "the secret is gone" test while destroying the report.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpha-volume-env
+  namespace: admissionlab-alpha-plain
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  serviceAccountName: alpha-runner
+  automountServiceAccountToken: false
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.8
+      env:
+        - name: DEMO_REGION
+          value: eu-west-1
+        - name: ALPHA_DEMO_API_TOKEN
+          value: adlab-sentinel-never-real-8f31c2
+      volumeMounts:
+        - name: scratch
+          mountPath: /scratch
+        - name: config
+          mountPath: /etc/alpha
+          readOnly: true
+  volumes:
+    - name: scratch
+      emptyDir: {}
+    - name: config
+      emptyDir:
+        medium: Memory
+        sizeLimit: 1Mi

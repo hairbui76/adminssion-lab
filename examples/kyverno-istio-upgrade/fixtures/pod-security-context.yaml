@@ -1,0 +1,43 @@
+# Control group, 3 of 5: pod-level *and* container-level security
+# context, spelled out rather than defaulted.
+#
+# `security_context_changed` is one of the four semantic kinds
+# `admissionlab_policy::severity` grades `critical` by default, and
+# `admissionlab_diff::workload` compares the pod-level block as a single
+# scalar value: any difference anywhere inside it is one critical
+# finding. That makes this fixture unusually sensitive, which is exactly
+# what it is for — a mutating webhook that quietly relaxes
+# `runAsNonRoot`, drops a `seccompProfile`, or re-adds a capability is
+# the regression class this tool exists to catch, and a corpus with no
+# security context to compare could not catch any of them.
+#
+# Both blocks are written out in full (rather than relying on the API
+# server's own defaulting) so that the compared value is the fixture
+# author's stated intent, not whatever the two API servers happened to
+# default it to.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpha-security-context
+  namespace: admissionlab-alpha-plain
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  serviceAccountName: alpha-runner
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    runAsGroup: 65532
+    fsGroup: 65532
+    seccompProfile:
+      type: RuntimeDefault
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.8
+      securityContext:
+        allowPrivilegeEscalation: false
+        readOnlyRootFilesystem: true
+        privileged: false
+        capabilities:
+          drop: ["ALL"]

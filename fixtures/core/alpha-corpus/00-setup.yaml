@@ -1,0 +1,154 @@
+# Setup, not fixtures: the three namespaces and two ServiceAccounts every
+# fixture in the Public Alpha regression corpus is replayed into.
+#
+# The replayable half of this corpus lives in
+# `examples/kyverno-istio-upgrade/fixtures/`, not next to this file. That
+# split is forced by how Alpha discovers fixtures, and is worth stating
+# once, here, rather than being rediscovered: `admissionlab_spec::resolve_lab`
+# roots `fixtures.include` at the *lab file's own directory*, and
+# `admissionlab_fixtures::discover_fixtures` walks only inside that root
+# (it never follows a symlink and never ascends), so a fixture file
+# physically outside the lab file's directory tree cannot be selected by
+# any glob. A component's `install.paths`, by contrast, is an ordinary
+# relative path with no such confinement — which is exactly why *this*
+# file can live here, be shared by any number of labs, and still be
+# applied by each of them.
+#
+# # Why this is applied for real, and never replayed
+#
+# Every fixture is replayed as a Kubernetes server-side dry-run CREATE
+# (Global Constraint 16), which by definition persists nothing. A
+# namespace that only ever existed as a dry-run CREATE would not exist
+# when the pods are replayed into it, and every one of them would come
+# back `404 NotFound` — an outcome about Admission Lab's own setup rather
+# than about the admission stack under test. So this file is applied by a
+# real `manifests` component (`examples/kyverno-istio-upgrade/admissionlab.yaml`'s
+# `alpha-setup`, the first component on both sides), and it is not — and
+# must not be — reachable from that lab's `fixtures.include` globs.
+#
+# `fixtures/core/admission/00-namespace.yaml` solves the same problem the
+# same way and states the same rule; the difference here is only that
+# Alpha now has a first-class way to apply it (a component), where that
+# corpus still requires its caller to apply it by hand.
+#
+# # Three namespaces, because the corpus needs three admission regimes
+#
+#   - `admissionlab-alpha`        — the Kyverno policy target. Both
+#     sides' `alpha-policies` component scopes every rule to this
+#     namespace by name, so membership *is* the opt-in; no label selector
+#     is involved and none can be misread.
+#   - `admissionlab-alpha-plain`  — deliberately outside every policy and
+#     outside the mesh. Fixtures here are the corpus's control group: any
+#     difference observed on one of them is a difference this lab did not
+#     ask for, which is the whole reason they are replayed.
+#   - `admissionlab-alpha-mesh`   — `istio-injection: enabled`, the
+#     label Istio's own `istio-sidecar-injector` webhook selects on, plus
+#     a Kyverno policy that appends the platform's own telemetry sidecar.
+#     One fixture lives here and both webhooks are genuinely invoked for
+#     it: the Kyverno one injects, the Istio one is observed declining
+#     (see that fixture's own header for the measured reason it opts out
+#     of Istio's injection).
+#
+# # `automountServiceAccountToken: false` is load-bearing on every fixture
+#
+# Not a hardening flourish — it is this corpus's structural answer to the
+# one piece of raw nondeterminism `admissionlab_normalize::rules` documents
+# as unfixable with the frozen normalization vocabulary: the in-tree
+# `ServiceAccount` admission plugin mounts a projected token volume named
+# `kube-api-access-` **plus a random five-character suffix**, into
+# `spec.volumes` and into every container's `volumeMounts`. Two clusters
+# admitting the same pod therefore disagree on that name every single
+# time, and no `NormalizeRule` variant can match a pointer by prefix.
+# Left alone, every pod fixture in this corpus would report a
+# `volume_added`, a `volume_removed` and a `volume_mount_changed` on
+# every run — three findings per fixture, all of them noise, one of them
+# (`volume_removed`) critical.
+#
+# Setting `automountServiceAccountToken: false` on the pod makes the
+# plugin project nothing, so the volume never exists on either side and
+# there is nothing to normalize away. The Alpha release criterion "known
+# raw nondeterminism does not create warnings" is satisfied here, in the
+# corpus, by not manufacturing the nondeterminism in the first place —
+# not by suppressing findings after the fact.
+#
+# # The ServiceAccounts still have to exist
+#
+# `automountServiceAccountToken: false` stops the *token* being
+# projected; it does not stop the admission plugin resolving the pod's
+# `serviceAccountName`, which still fails with
+# `serviceaccount "..." not found` if the account is missing. A freshly
+# created namespace's own `default` ServiceAccount is created
+# asynchronously by a controller, so a fixture that relied on it would be
+# racing that controller. Every fixture in this corpus therefore names an
+# account created *here*, synchronously, by the same `kubectl apply` that
+# creates its namespace.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-alpha
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: alpha-corpus
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-alpha-plain
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: alpha-corpus
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-alpha-mesh
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    admissionlab.dev/fixture: alpha-corpus
+    # Istio's `istio-sidecar-injector` MutatingWebhookConfiguration
+    # selects namespaces on exactly this label. It is the only reason
+    # sidecar injection happens anywhere in this corpus, and the reason
+    # it happens in exactly one namespace.
+    istio-injection: enabled
+---
+# The account every fixture that does not deliberately test service
+# account resolution runs as.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alpha-runner
+  namespace: admissionlab-alpha
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alpha-runner
+  namespace: admissionlab-alpha-plain
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alpha-runner
+  namespace: admissionlab-alpha-mesh
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+automountServiceAccountToken: false
+---
+# A second account in the plain namespace, so `pod-service-account.yaml`
+# can name something other than the corpus default and a
+# `service_account_changed` regression has a distinguishable value to
+# report if a stack ever starts rewriting `serviceAccountName`.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alpha-audit
+  namespace: admissionlab-alpha-plain
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+automountServiceAccountToken: false

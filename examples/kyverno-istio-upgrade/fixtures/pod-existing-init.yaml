@@ -1,0 +1,29 @@
+# Control group, 2 of 5: a pod that already declares an init container
+# of its own.
+#
+# The regression this lab demonstrates is an init container that stops
+# being *injected* (`policy-pod-init-container.yaml`). This fixture is
+# the other half of that question, and it is deliberately outside the
+# policy namespace: an init container the fixture author wrote must
+# survive both stacks untouched, at the same index, with the same image.
+#
+# Without it a reader could not tell "the candidate stopped adding an
+# init container" from "the candidate started dropping init containers",
+# and those are very different incidents. This fixture is what makes the
+# first reading the only available one.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: alpha-existing-init
+  namespace: admissionlab-alpha-plain
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  serviceAccountName: alpha-runner
+  automountServiceAccountToken: false
+  initContainers:
+    - name: legacy-init
+      image: registry.k8s.io/pause:3.8
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.8

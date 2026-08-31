@@ -1,0 +1,138 @@
+# The candidate side's Kyverno policy set — the same file as
+# `../baseline/policies.yaml` with two deliberate differences, and
+# nothing else changed. Read the two side by side; the diff *is* the
+# scenario.
+#
+#   1. `alpha-audit-init` is **gone.** Not disabled, not narrowed —
+#      absent, the way a policy disappears during a real platform
+#      upgrade when it is retired, renamed, or lost in a refactor of a
+#      policy repository. Every pod in `admissionlab-alpha` is therefore
+#      admitted without the platform's audit init container, and
+#      `policy-pod-init-container.yaml` is where that shows up: one
+#      `init_container_removed`, subject `alpha-audit-init`, graded
+#      `critical`, unexpected, and the sole reason this lab exits `1`.
+#
+#   2. `alpha-image-pin` pins `registry.k8s.io/pause:3.10` where the
+#      baseline pins `:3.9`. This one is *known* — it is the upgrade the
+#      team meant to perform — so `expectations.yaml` accounts for it by
+#      id, and it stays in the report at full severity without deciding
+#      the verdict.
+#
+# `alpha-mesh-sidecar` (below `alpha-image-pin`) is the deliberate
+# constant: byte-identical to the baseline's copy, so the corpus can show
+# an unchanged mutating webhook producing an unchanged result alongside
+# the two that did change.
+#
+# Everything else — policy names, rule names, match blocks, the
+# `autogen-controllers` and `background` settings — is byte-identical to
+# the baseline's, on purpose: identical rule identity is what lets both
+# sides' Kyverno mutating webhook be invoked at the same position in the
+# same round for the same fixture, which is in turn what lets
+# `admissionlab_diff::divergence` attribute the first divergence to that
+# named webhook with `observed` confidence instead of reporting
+# `unknown`.
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: alpha-image-pin
+  annotations:
+    pod-policies.kyverno.io/autogen-controllers: none
+    policies.kyverno.io/description: >-
+      Pins the `app` container image for every workload in the
+      admissionlab-alpha namespace. Present on both sides, with a
+      different tag on each: this is the example's deliberate, expected
+      image change.
+spec:
+  background: false
+  rules:
+    - name: pin-pod-image
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - admissionlab-alpha
+      mutate:
+        patchStrategicMerge:
+          spec:
+            containers:
+              - (name): app
+                image: registry.k8s.io/pause:3.10
+    - name: pin-controller-image
+      match:
+        any:
+          - resources:
+              kinds:
+                - Deployment
+                - Job
+              namespaces:
+                - admissionlab-alpha
+      mutate:
+        patchStrategicMerge:
+          spec:
+            template:
+              spec:
+                containers:
+                  - (name): app
+                    image: registry.k8s.io/pause:3.10
+---
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: alpha-mesh-sidecar
+  annotations:
+    pod-policies.kyverno.io/autogen-controllers: none
+    policies.kyverno.io/description: >-
+      Appends the platform's own telemetry sidecar to every pod in the
+      admissionlab-alpha-mesh namespace. Byte-identical on both sides:
+      this is the corpus's container-injection case, and it is expected
+      to produce no difference at all.
+spec:
+  background: false
+  rules:
+    # Deliberately *not* part of `alpha-image-pin` and deliberately not
+    # scoped to `admissionlab-alpha`: keeping container injection in its
+    # own namespace means the headline regression fixture
+    # (`fixtures/policy-pod-init-container.yaml`) carries exactly one
+    # injected element, so the finding it produces names exactly one
+    # subject.
+    - name: add-telemetry-sidecar
+      match:
+        any:
+          - resources:
+              kinds:
+                - Pod
+              namespaces:
+                - admissionlab-alpha-mesh
+      mutate:
+        # An explicit RFC 6902 append rather than the `patchStrategicMerge`
+        # every other rule in this file uses, and the reason is measured
+        # rather than stylistic.
+        #
+        # Strategic merge inserts a patch's list entries *first*, so
+        # merging a new container into a one-container pod does not
+        # append it — it rewrites `containers[0]` into the sidecar field
+        # by field and re-adds the original workload at `containers[1]`.
+        # That is eight JSON Patch operations, five of them `remove`s
+        # that Kyverno emits in Go map order: the same eight operations
+        # in a different sequence on each of the two clusters. The
+        # admitted pods are identical, but
+        # `admissionlab_normalize::trace` deliberately treats JSON Patch
+        # operation order as semantics rather than presentation (Task
+        # 4.2), so the two patches compare unequal and the fixture
+        # reports a `webhook_invocation_changed` warning about nothing.
+        # `fixtures/pod-sidecar-injection.yaml`'s own header records the
+        # identical problem in `istiod`'s injector, which cannot be
+        # avoided the same way because that patch is not ours to write.
+        #
+        # An append is one operation. One operation has no order to
+        # permute, so both sides emit byte-identical patches and the
+        # fixture is `identical` — the outcome an unchanged policy on
+        # both sides should produce.
+        patchesJson6902: |-
+          - op: add
+            path: /spec/containers/-
+            value:
+              name: alpha-telemetry
+              image: registry.k8s.io/pause:3.10
