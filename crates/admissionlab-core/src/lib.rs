@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod artifact;
+pub mod cache;
 pub mod cluster;
 pub mod diagnostic;
 pub mod error;
@@ -12,6 +13,9 @@ pub mod side;
 pub mod tool;
 
 pub use artifact::{ArtifactError, ArtifactStore, RunDisposition, RunPaths};
+pub use cache::{
+    CACHE_DIR_ENV, CacheError, CacheLookup, CacheMiss, CachePaths, ContentKey, default_cache_root,
+};
 pub use cluster::{
     ClusterDiagnostics, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, RollbackOutcome,
 };

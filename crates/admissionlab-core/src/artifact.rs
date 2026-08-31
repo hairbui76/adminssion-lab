@@ -72,6 +72,28 @@
 //! emit a `tracing` warning each time this happens, so the gap is
 //! visible at runtime instead of hidden.
 //!
+//! # This store is not a cache, and the two never share a directory
+//!
+//! Everything under an [`ArtifactStore`]'s root is **run-scoped and
+//! single-use**: a kubeconfig, an audit log, a raw captured object, a
+//! rendered report. None of it is reusable by a later run, and some of it
+//! ([`RunPaths::kubeconfigs`], [`RunPaths::raw`]) is exactly the material
+//! the "Permissions" section above restricts to the owner. Reusable,
+//! immutable, content-addressed downloads live somewhere else entirely —
+//! [`crate::cache`], under its own root — and that separation is
+//! structural: [`crate::cache::CachePaths`] exposes no method that takes a
+//! [`RunId`] or a [`RunPaths`], so a run artifact cannot be addressed as a
+//! cache entry even by mistake (Task 5.6 Step 3). See that module's own
+//! documentation for the other half of the argument.
+//!
+//! What the two modules *do* share is this module's atomic-write
+//! primitive: [`write_bytes_atomically`] is the crate-internal function
+//! [`ArtifactStore::write_bytes_atomic`] performs its containment and
+//! permission work around, and the one [`crate::cache`] writes cache
+//! entries through. Sharing the primitive rather than reimplementing it
+//! is what keeps the "never a partial file" guarantee described above
+//! true of both.
+//!
 //! # Path safety
 //!
 //! [`crate::RunId`] already rejects `..` and path separators, so a path
@@ -397,51 +419,30 @@ impl ArtifactStore {
     /// if creating, writing, syncing, or renaming the temporary file
     /// fails, or if `path`'s parent directory does not exist.
     pub async fn write_bytes_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), ArtifactError> {
-        let (parent, file_name) = self.validate_write_path(path).await?;
+        // The containment check is this method's own responsibility, not
+        // the shared primitive's: it is meaningful only for a path that
+        // is supposed to live inside *this store's* root, which a cache
+        // entry is not (see the module documentation's "This store is
+        // not a cache" section).
+        self.validate_write_path(path).await?;
 
-        let temp_path = parent.join(format!(
-            ".{}.tmp-{}",
-            file_name.to_string_lossy(),
-            Uuid::new_v4()
-        ));
-
-        if let Err(err) = write_and_sync(&temp_path, bytes).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(err);
-        }
-
-        if is_kubeconfig_path(path)
-            && let Err(err) = set_owner_only_mode(&temp_path, 0o600).await
-        {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(err);
-        }
-
-        if let Err(source) = tokio::fs::rename(&temp_path, path).await {
-            let _ = tokio::fs::remove_file(&temp_path).await;
-            return Err(ArtifactError::io(
-                "rename temporary file into place at",
-                path,
-                source,
-            ));
-        }
-
-        Ok(())
+        let mode = if is_kubeconfig_path(path) {
+            Some(0o600)
+        } else {
+            None
+        };
+        write_bytes_atomically(path, bytes, mode).await
     }
 
     /// Validates that `path`'s parent directory resolves to a location
-    /// inside this store's root, returning that parent and `path`'s
-    /// file name on success. See the module documentation's "Path
+    /// inside this store's root. See the module documentation's "Path
     /// safety" section for why the parent (rather than `path` itself)
     /// is canonicalized, and why canonicalizing is necessary at all.
-    async fn validate_write_path<'a>(
-        &self,
-        path: &'a Path,
-    ) -> Result<(&'a Path, &'a OsStr), ArtifactError> {
+    async fn validate_write_path(&self, path: &Path) -> Result<(), ArtifactError> {
         let parent = path.parent().ok_or_else(|| self.path_escapes_root(path))?;
-        let file_name = path
-            .file_name()
-            .ok_or_else(|| self.path_escapes_root(path))?;
+        if path.file_name().is_none() {
+            return Err(self.path_escapes_root(path));
+        }
 
         let canonical_root = tokio::fs::canonicalize(&self.root)
             .await
@@ -451,7 +452,7 @@ impl ArtifactStore {
         })?;
 
         if canonical_parent.starts_with(&canonical_root) {
-            Ok((parent, file_name))
+            Ok(())
         } else {
             Err(self.path_escapes_root(path))
         }
@@ -465,6 +466,73 @@ impl ArtifactStore {
             root: self.root.clone(),
         }
     }
+}
+
+/// Writes `bytes` to `path` atomically, optionally restricting the file
+/// to `mode` (owner-only, Unix) before it becomes reachable at its final
+/// name.
+///
+/// This crate's one atomic-write primitive, shared by
+/// [`ArtifactStore::write_bytes_atomic`] and [`crate::cache`] (see the
+/// module documentation's "This store is not a cache" section for why
+/// they share it rather than each having their own). It performs **no**
+/// containment check and creates no directories: `path`'s parent must
+/// already exist, and whichever caller has a root to enforce enforces it
+/// before calling.
+///
+/// The temporary file is created as a sibling of the destination, so the
+/// final `rename` never crosses a filesystem boundary; a `mode` is
+/// applied to it *before* the rename so there is no window in which the
+/// file is reachable at its final path with looser permissions.
+///
+/// # Errors
+///
+/// Returns [`ArtifactError::Io`] if the temporary file could not be
+/// created, written, synced, permission-restricted, or renamed into
+/// place. On every one of those paths the temporary file is removed
+/// before returning, so a failed call leaves nothing behind.
+pub(crate) async fn write_bytes_atomically(
+    path: &Path,
+    bytes: &[u8],
+    mode: Option<u32>,
+) -> Result<(), ArtifactError> {
+    let parent = path.parent().ok_or_else(|| {
+        ArtifactError::io(
+            "determine the parent directory of",
+            path,
+            io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory"),
+        )
+    })?;
+    let file_name = path.file_name().unwrap_or_else(|| OsStr::new("artifact"));
+
+    let temp_path = parent.join(format!(
+        ".{}.tmp-{}",
+        file_name.to_string_lossy(),
+        Uuid::new_v4()
+    ));
+
+    if let Err(err) = write_and_sync(&temp_path, bytes).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(err);
+    }
+
+    if let Some(mode) = mode
+        && let Err(err) = set_owner_only_mode(&temp_path, mode).await
+    {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(err);
+    }
+
+    if let Err(source) = tokio::fs::rename(&temp_path, path).await {
+        let _ = tokio::fs::remove_file(&temp_path).await;
+        return Err(ArtifactError::io(
+            "rename temporary file into place at",
+            path,
+            source,
+        ));
+    }
+
+    Ok(())
 }
 
 /// Creates `temp_path`, writes `bytes` to it in full, and `fsync`s it
