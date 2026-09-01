@@ -1,0 +1,31 @@
+# A `Gateway` mid-reconcile: its controller has published `Accepted` but
+# cannot yet say whether the data plane is programmed.
+#
+# Provenance: `Programmed: Unknown` with reason `Pending` is upstream
+# `GatewayReasonPending`. This is the state a poll can legitimately catch
+# a healthy Gateway in, which is why `Unknown` is a first-class
+# `ConditionState` here rather than being folded into `False`: they mean
+# "the controller does not know yet" and "the controller says no", and a
+# comparator that confused them would report a transient poll as a
+# regression.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: gateway-lab
+  generation: 1
+spec:
+  gatewayClassName: istio
+status:
+  conditions:
+    - type: Accepted
+      status: "True"
+      reason: Accepted
+      lastTransitionTime: "2026-09-01T10:16:09Z"
+      observedGeneration: 1
+    - type: Programmed
+      status: "Unknown"
+      reason: Pending
+      message: Waiting for controller
+      lastTransitionTime: "2026-09-01T10:16:09Z"
+      observedGeneration: 1

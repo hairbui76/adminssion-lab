@@ -1,0 +1,37 @@
+# An `HTTPRoute` whose named parent Gateway does not exist, and which is
+# also missing its `ResolvedRefs` condition entirely.
+#
+# Provenance: `Accepted: False` with reason `NoMatchingParent` is
+# upstream `RouteReasonNoMatchingParent`. The absent `ResolvedRefs` is
+# also realistic and is the second half of the fixture's purpose: a
+# controller that could not attach the route has nothing to say about
+# whether its backends resolve, so it publishes no such condition --
+# which must read as `Missing`, never as a fabricated `False`.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-orphan
+  namespace: gateway-lab
+  generation: 1
+spec:
+  parentRefs:
+    - name: no-such-gateway
+  rules:
+    - backendRefs:
+        - name: echo-a
+          port: 80
+status:
+  parents:
+    - parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        namespace: gateway-lab
+        name: no-such-gateway
+      controllerName: istio.io/gateway-controller
+      conditions:
+        - type: Accepted
+          status: "False"
+          reason: NoMatchingParent
+          message: Parent reference not found
+          lastTransitionTime: "2026-09-01T10:16:12Z"
+          observedGeneration: 1

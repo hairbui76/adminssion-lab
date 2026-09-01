@@ -1,0 +1,23 @@
+# A `GatewayClass` no controller has claimed yet.
+#
+# Provenance: `Accepted: Unknown` with reason `Pending` is Gateway API
+# v1's own documented *initial* state for a GatewayClass -- upstream
+# constants `GatewayClassConditionStatusAccepted` and
+# `GatewayClassReasonPending`. `observedGeneration` is absent here on
+# purpose: a controller that has not processed the object has published
+# no generation for it, and this project must be able to tell that apart
+# from "processed generation 1".
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: unclaimed
+  generation: 1
+spec:
+  controllerName: example.com/no-such-controller
+status:
+  conditions:
+    - type: Accepted
+      status: "Unknown"
+      reason: Pending
+      message: Waiting for controller
+      lastTransitionTime: "2026-09-01T10:15:04Z"

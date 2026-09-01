@@ -1,0 +1,20 @@
+# An `HTTPRoute` that has just been created and that no controller has
+# touched yet: no `status` key at all.
+#
+# Provenance: `status` is not populated by the API server on create; a
+# freshly applied route genuinely has none until a controller writes one.
+# This is the very first thing ROADMAP Task 6.4's waiter sees on every
+# poll of a healthy route, so it must parse as a valid observation with
+# zero parents -- never as a malformed object, and never as a fabricated
+# empty condition set that could be mistaken for "the controller
+# published nothing".
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-a
+  namespace: gateway-lab
+  generation: 1
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http

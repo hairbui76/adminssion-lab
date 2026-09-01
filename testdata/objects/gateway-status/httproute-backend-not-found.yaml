@@ -1,0 +1,47 @@
+# An `HTTPRoute` the Gateway accepted but whose backend does not exist.
+#
+# Provenance: `ResolvedRefs: False` with reason `BackendNotFound` is
+# upstream `RouteReasonBackendNotFound`. `Accepted: True` alongside it is
+# the realistic pairing: the route itself is well-formed and attached to
+# its listener, and only its `backendRefs` failed to resolve. A reader
+# that required a single "route ok" boolean would have to pick one of the
+# two answers and discard the other.
+#
+# `parentRef` here carries no `namespace`, which Gateway API defines as
+# defaulting to the route's own namespace. This crate resolves that
+# default explicitly rather than treating an absent namespace as a
+# wildcard.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-missing
+  namespace: gateway-lab
+  generation: 1
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  rules:
+    - backendRefs:
+        - name: not-deployed
+          port: 80
+status:
+  parents:
+    - parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        name: lab-gateway
+        sectionName: http
+      controllerName: istio.io/gateway-controller
+      conditions:
+        - type: Accepted
+          status: "True"
+          reason: Accepted
+          lastTransitionTime: "2026-09-01T10:16:12Z"
+          observedGeneration: 1
+        - type: ResolvedRefs
+          status: "False"
+          reason: BackendNotFound
+          message: 'backend(not-deployed.gateway-lab.svc.cluster.local) not found'
+          lastTransitionTime: "2026-09-01T10:16:12Z"
+          observedGeneration: 1

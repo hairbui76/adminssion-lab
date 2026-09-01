@@ -1,0 +1,37 @@
+# An `HTTPRoute` whose spec has moved on from the status describing it.
+#
+# Provenance: same upstream `metadata.generation` /
+# `observedGeneration` semantics as `gateway-stale-status.yaml`. Written
+# for a route because ROADMAP Task 6.4's convergence rule is stated
+# "for the target parent", so staleness has to be detectable per parent
+# status entry, not only on the object as a whole.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-a
+  namespace: gateway-lab
+  generation: 4
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+status:
+  parents:
+    - parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        namespace: gateway-lab
+        name: lab-gateway
+        sectionName: http
+      controllerName: istio.io/gateway-controller
+      conditions:
+        - type: Accepted
+          status: "True"
+          reason: Accepted
+          lastTransitionTime: "2026-09-01T10:16:12Z"
+          observedGeneration: 3
+        - type: ResolvedRefs
+          status: "True"
+          reason: ResolvedRefs
+          lastTransitionTime: "2026-09-01T10:16:12Z"
+          observedGeneration: 3

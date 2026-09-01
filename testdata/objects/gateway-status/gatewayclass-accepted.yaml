@@ -1,0 +1,31 @@
+# A `GatewayClass` an implementation has accepted.
+#
+# Provenance: the shape is Gateway API v1's own `GatewayClass` type
+# (`gateway.networking.k8s.io/v1`), whose `status.conditions` is a
+# `[]metav1.Condition` -- so every entry carries `type`, `status`,
+# `reason`, `message`, `lastTransitionTime`, and the optional
+# `observedGeneration`. The condition type `Accepted` is
+# `GatewayClassConditionStatusAccepted`, and the reason `Accepted` is
+# `GatewayClassReasonAccepted`; both are the upstream constants, not
+# invented names. `controllerName` is Istio's own
+# (`istio.io/gateway-controller`), matching the reference implementation
+# this phase targets.
+#
+# Nothing here is a transcript of one specific cluster run: the fields
+# and their legal values come from the upstream API definition, and the
+# concrete names/timestamps are this lab's own.
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: istio
+  generation: 1
+spec:
+  controllerName: istio.io/gateway-controller
+status:
+  conditions:
+    - type: Accepted
+      status: "True"
+      reason: Accepted
+      message: Handled by Istio controller
+      lastTransitionTime: "2026-09-01T10:15:04Z"
+      observedGeneration: 1

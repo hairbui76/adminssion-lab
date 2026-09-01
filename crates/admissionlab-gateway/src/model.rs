@@ -64,7 +64,14 @@ pub use admissionlab_spec::{
 /// parent as the route wrote it -- where the namespace really can be
 /// absent, meaning "the route's own namespace" -- rather than a
 /// resolved, existing object.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+///
+/// `Serialize` (but not `Deserialize`): this appears inside
+/// [`crate::conditions::GatewayEvidence`], which is captured once from a
+/// live cluster and only ever serialized *outward* into a run's report
+/// -- the same one-way asymmetry, for the same reason,
+/// `admissionlab_admission::AdmissionOutcome` documents.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct GatewayIdentity {
     /// The `Gateway`'s namespace.
     pub namespace: String,

@@ -1,0 +1,72 @@
+# A fully reconciled `Gateway`: accepted by its class's controller and
+# programmed into the data plane, with one listener and an assigned
+# address.
+#
+# Provenance: Gateway API v1 `Gateway`. `status.conditions` holds the
+# `GatewayConditionType` values `Accepted` and `Programmed` (the two
+# standard-channel Gateway conditions; `Ready` is experimental and is
+# deliberately not relied on anywhere in this crate), with the upstream
+# reasons `GatewayReasonAccepted` and `GatewayReasonProgrammed`.
+# `status.addresses` is `[]GatewayStatusAddress` (`type`/`value`, here
+# the `IPAddress` type), and `status.listeners` is `[]ListenerStatus`
+# with `name`, `supportedKinds`, `attachedRoutes`, and its own
+# `[]metav1.Condition`.
+#
+# The listener conditions are present because a real Gateway carries
+# them; this crate does not currently normalize them, and that omission
+# is documented in `conditions.rs` rather than hidden by trimming the
+# fixture down to only the fields the parser reads.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: gateway-lab
+  generation: 1
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+      allowedRoutes:
+        namespaces:
+          from: Same
+status:
+  addresses:
+    - type: IPAddress
+      value: 10.96.42.17
+  conditions:
+    - type: Programmed
+      status: "True"
+      reason: Programmed
+      message: Resource programmed, assigned to service in the "gateway-lab" namespace
+      lastTransitionTime: "2026-09-01T10:16:11Z"
+      observedGeneration: 1
+    - type: Accepted
+      status: "True"
+      reason: Accepted
+      message: Resource accepted
+      lastTransitionTime: "2026-09-01T10:16:09Z"
+      observedGeneration: 1
+  listeners:
+    - name: http
+      attachedRoutes: 1
+      supportedKinds:
+        - group: gateway.networking.k8s.io
+          kind: HTTPRoute
+      conditions:
+        - type: Accepted
+          status: "True"
+          reason: Accepted
+          lastTransitionTime: "2026-09-01T10:16:09Z"
+          observedGeneration: 1
+        - type: Programmed
+          status: "True"
+          reason: Programmed
+          lastTransitionTime: "2026-09-01T10:16:11Z"
+          observedGeneration: 1
+        - type: ResolvedRefs
+          status: "True"
+          reason: ResolvedRefs
+          lastTransitionTime: "2026-09-01T10:16:09Z"
+          observedGeneration: 1

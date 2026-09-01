@@ -187,4 +187,32 @@ pub enum GatewayError {
         /// The API server's own message, verbatim.
         message: String,
     },
+
+    /// An object read back from a cluster does not have the shape a
+    /// Gateway API object must have, so its status could not be
+    /// normalized: no `metadata.name`, no integer
+    /// `metadata.generation`, a `status.conditions` that is not a list,
+    /// a condition with no `type`, a condition whose `status` is not one
+    /// of `"True"`/`"False"`/`"Unknown"`, or a duplicated condition
+    /// type.
+    ///
+    /// Deliberately an error rather than a partial or best-effort
+    /// reading: every one of these cases is *impossible* against a real
+    /// API server serving Gateway API's own CRDs (their schemas require
+    /// each field and enumerate the legal condition statuses), so
+    /// reaching this variant means the value is not the object this code
+    /// believes it is. Filling in a plausible default there --
+    /// generation `0`, status `Unknown` -- would put words in a
+    /// controller's mouth, which Global Constraint 15 forbids. See
+    /// `crate::conditions`'s own documentation for that argument in
+    /// full.
+    #[error("could not read the status of {object}: {reason}")]
+    MalformedStatus {
+        /// Which object, described as specifically as could be
+        /// determined (for example `"Gateway gateway-lab/lab-gateway"`,
+        /// or `"a Gateway object"` when even its name was unreadable).
+        object: String,
+        /// What about its shape could not be read.
+        reason: String,
+    },
 }

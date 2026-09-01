@@ -1,0 +1,35 @@
+# A `Gateway` its controller accepted but could not program: the
+# implementation has no address to give it.
+#
+# Provenance: `Programmed: False` with reason `AddressNotAssigned` is
+# upstream `GatewayReasonAddressNotAssigned`, one of the documented
+# reasons for a false `Programmed`. Accepted stays `True`, which is the
+# point of the fixture: a Gateway can be a perfectly valid object that
+# the data plane has still not been told about, and collapsing the two
+# conditions into one "ready" boolean would lose exactly that.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: gateway-lab
+  generation: 1
+spec:
+  gatewayClassName: istio
+  listeners:
+    - name: http
+      port: 80
+      protocol: HTTP
+status:
+  conditions:
+    - type: Accepted
+      status: "True"
+      reason: Accepted
+      message: Resource accepted
+      lastTransitionTime: "2026-09-01T10:16:09Z"
+      observedGeneration: 1
+    - type: Programmed
+      status: "False"
+      reason: AddressNotAssigned
+      message: Failed to assign to any requested addresses
+      lastTransitionTime: "2026-09-01T10:16:40Z"
+      observedGeneration: 1

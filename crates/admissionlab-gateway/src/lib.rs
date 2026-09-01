@@ -18,6 +18,12 @@
 //!   category order through the dynamic API, and never delete. Read that
 //!   module's documentation before changing anything about ordering or
 //!   apply semantics.
+//! - [`conditions`] (Task 6.3) normalizes what an implementation
+//!   published about a `GatewayClass`, a `Gateway` and an `HTTPRoute`:
+//!   four condition states (including `Missing`, which is not `False`),
+//!   lookup that never depends on list order, and staleness as a
+//!   computed relationship rather than a stored flag. Read that module
+//!   before trusting any condition this crate reports.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -45,12 +51,19 @@
 //! than from an ambient `~/.kube/config`.
 
 pub mod apply;
+pub mod conditions;
 pub mod error;
 pub mod model;
 
 pub use apply::{
     AppliedGatewayFixture, ApplyCategory, FIELD_MANAGER, GatewayApplyPlan, PlannedObject,
     apply_gateway_manifests, apply_gateway_plan_with_client, plan_gateway_apply,
+};
+pub use conditions::{
+    CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionFreshness,
+    ConditionState, GatewayClassEvidence, GatewayEvidence, ObservedCondition, ParentIdentity,
+    ParentLookup, RouteEvidence, RouteParentStatus, gateway_class_evidence, gateway_evidence,
+    observed_conditions, route_evidence,
 };
 pub use error::GatewayError;
 pub use model::{

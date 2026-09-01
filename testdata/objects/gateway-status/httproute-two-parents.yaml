@@ -1,0 +1,61 @@
+# An `HTTPRoute` attached to two listeners of the same Gateway, one of
+# which rejected it.
+#
+# Provenance: `status.parents` is a list precisely because a route may
+# attach to several parents, and Gateway API requires one entry per
+# `parentRef` the controller processed. `NotAllowedByListeners` is
+# upstream `RouteReasonNotAllowedByListeners`, reported when a listener's
+# `allowedRoutes` does not permit the route.
+#
+# This is the fixture behind the ambiguity rule: a contract that names
+# only the Gateway, without a `listenerName`, matches *both* entries here
+# and gets an explicit "ambiguous" answer rather than whichever one
+# happens to be first. The two entries also disagree, so silently picking
+# one would flip a route between converged-true and converged-false
+# depending on list order.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-b
+  namespace: gateway-lab
+  generation: 2
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+    - name: lab-gateway
+      sectionName: http-alt
+status:
+  parents:
+    - parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        namespace: gateway-lab
+        name: lab-gateway
+        sectionName: http
+      controllerName: istio.io/gateway-controller
+      conditions:
+        - type: Accepted
+          status: "True"
+          reason: Accepted
+          lastTransitionTime: "2026-09-01T10:17:02Z"
+          observedGeneration: 2
+        - type: ResolvedRefs
+          status: "True"
+          reason: ResolvedRefs
+          lastTransitionTime: "2026-09-01T10:17:02Z"
+          observedGeneration: 2
+    - parentRef:
+        group: gateway.networking.k8s.io
+        kind: Gateway
+        namespace: gateway-lab
+        name: lab-gateway
+        sectionName: http-alt
+      controllerName: istio.io/gateway-controller
+      conditions:
+        - type: Accepted
+          status: "False"
+          reason: NotAllowedByListeners
+          message: No listener on the gateway allows this route
+          lastTransitionTime: "2026-09-01T10:17:02Z"
+          observedGeneration: 2
