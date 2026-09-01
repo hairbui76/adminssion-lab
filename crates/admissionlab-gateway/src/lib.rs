@@ -24,6 +24,11 @@
 //!   lookup that never depends on list order, and staleness as a
 //!   computed relationship rather than a stored flag. Read that module
 //!   before trusting any condition this crate reports.
+//! - [`reconcile`] (Task 6.4) waits for a route to reach a stable,
+//!   current status and reports [`ReconciliationEvidence`]. Its module
+//!   documentation carries the roadmap's convergence rule verbatim,
+//!   clause by clause, and explains why a timeout is evidence rather
+//!   than a verdict.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -54,6 +59,7 @@ pub mod apply;
 pub mod conditions;
 pub mod error;
 pub mod model;
+pub mod reconcile;
 
 pub use apply::{
     AppliedGatewayFixture, ApplyCategory, FIELD_MANAGER, GatewayApplyPlan, PlannedObject,
@@ -66,6 +72,16 @@ pub use conditions::{
     observed_conditions, route_evidence,
 };
 pub use error::GatewayError;
+pub use reconcile::{
+    DIAGNOSTIC_GATEWAY_CLASS_ABSENT, DIAGNOSTIC_PARENT_ABSENT, DIAGNOSTIC_PARENT_AMBIGUOUS,
+    DIAGNOSTIC_STALE_STATUS, DIAGNOSTIC_TIMEOUT, GATEWAY_API_GROUP, GATEWAY_API_VERSION,
+    GatewayStatusSource, INITIAL_POLL_INTERVAL, KubeGatewayStatusSource, MAX_POLL_INTERVAL,
+    REQUIRED_GATEWAY_CLASS_CONDITIONS, REQUIRED_GATEWAY_CONDITIONS,
+    REQUIRED_ROUTE_PARENT_CONDITIONS, ReconciliationEvidence, STABILITY_INTERVAL,
+    wait_for_route_reconciliation, wait_for_route_reconciliation_with_client,
+    wait_for_route_reconciliation_with_source,
+};
+
 pub use model::{
     ALLOWED_HTTP_METHODS, DEFAULT_RECONCILIATION_TIMEOUT, GatewayIdentity, GatewaySuiteSpec,
     HttpProbeContract, RouteContract, contract_gateway_identity, is_valid_http_status,

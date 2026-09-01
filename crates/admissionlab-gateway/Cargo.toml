@@ -72,6 +72,12 @@ admissionlab-admission = { workspace = true }
 # (`DynamicObject`) API, so an arbitrary Gateway API or vendor CRD needs
 # no generated Rust type, and reaches each cluster only through that
 # cluster's own isolated kubeconfig.
+# `reconcile.rs`'s `GatewayStatusSource` (Task 6.4) is an async trait,
+# implemented both by the kube-backed production source and by
+# `tests/reconcile_unit.rs`'s scripted one -- the same
+# trait-with-an-offline-implementation shape every other seam in this
+# workspace uses.
+async-trait = { workspace = true }
 kube = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -81,6 +87,8 @@ serde_json = { workspace = true }
 # `admissionlab-installer`'s own manifest loader.
 serde_norway = { workspace = true }
 thiserror = { workspace = true }
+# `reconcile.rs`'s capped-backoff poll loop sleeps between polls.
+tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
 # The same `tower_test::mock`-backed `kube::Client` technique
@@ -89,7 +97,6 @@ thiserror = { workspace = true }
 # code against a scripted request/response exchange, never a live
 # cluster. Pinned to the versions those crates' own test suites already
 # resolve in `Cargo.lock`.
-async-trait = { workspace = true }
 http = "1.5.0"
 http-body-util = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "time"] }

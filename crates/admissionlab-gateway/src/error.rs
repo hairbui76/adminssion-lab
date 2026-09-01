@@ -215,4 +215,50 @@ pub enum GatewayError {
         /// What about its shape could not be read.
         reason: String,
     },
+
+    /// A cluster could not be queried while waiting for a route to
+    /// reconcile: its kubeconfig could not be turned into a usable
+    /// client, or a read failed at the transport level.
+    ///
+    /// Never the same thing as "the object is not there", which
+    /// `crate::reconcile::GatewayStatusSource` reports as `Ok(None)` and
+    /// the waiter simply retries.
+    #[error("could not observe {object} on cluster {cluster:?}: {reason}")]
+    ObservationUnavailable {
+        /// The cluster's own name, for the reason
+        /// [`GatewayError::ApplyUnavailable::cluster`] gives.
+        cluster: String,
+        /// Which object was being read (for example
+        /// `"HTTPRoute gateway-lab/echo-a"`).
+        object: String,
+        /// A human-readable explanation, from the underlying failure's
+        /// own `Display`.
+        reason: String,
+    },
+
+    /// The `Gateway` or `HTTPRoute` a route contract names was never
+    /// observed to exist, up to the reconciliation deadline.
+    ///
+    /// An error rather than `converged: false` evidence, and the reason
+    /// is structural: §1.2 freezes
+    /// `crate::reconcile::ReconciliationEvidence`'s `gateway` and
+    /// `route` as non-optional, so an object that never existed has
+    /// nothing to put there -- and filling the field with a fabricated
+    /// empty evidence value carrying a made-up generation is exactly
+    /// what Global Constraint 15 forbids. This is also a genuinely
+    /// different failure from a timeout: a timeout means the
+    /// implementation did not finish reconciling something that exists,
+    /// while this means the fixture (or the contract) names an object
+    /// that is not there at all.
+    ///
+    /// A *transient* 404 during polling is not this: it is retried, and
+    /// only an absence that persists to the deadline reaches here.
+    #[error("{object} does not exist on cluster {cluster:?}")]
+    ObjectAbsent {
+        /// The cluster's own name.
+        cluster: String,
+        /// Which object was expected (for example
+        /// `"Gateway gateway-lab/lab-gateway"`).
+        object: String,
+    },
 }
