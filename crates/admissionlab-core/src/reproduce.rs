@@ -86,7 +86,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use admissionlab_spec::{InstallMethod, ResolvedLab, SpecError, load_lab, resolve_lab};
+use admissionlab_spec::{InstallMethod, ResolvedLab, SpecError, load_any_supported_lab};
 use thiserror::Error;
 
 use crate::diagnostic::{Diagnostic, RedactedValue};
@@ -399,11 +399,12 @@ pub fn plan_reproduction_from_config(
         actual_sha256: read_digest(config)?,
     };
 
-    let loaded = load_lab(config).map_err(|source| ReproduceError::Config {
-        source: Box::new(source),
-        config: Box::new(config_input.clone()),
-    })?;
-    let resolved_lab = resolve_lab(loaded).map_err(|source| ReproduceError::Config {
+    // `load_any_supported_lab`, not the Alpha-only `load_lab`: a run
+    // recorded against a v1beta1 configuration must be reproducible from
+    // that same file (Task 7.1 made more than one `apiVersion` loadable;
+    // the hash above already verified the exact bytes, so which
+    // vocabulary reads them is provenance, not drift).
+    let resolved_lab = load_any_supported_lab(config).map_err(|source| ReproduceError::Config {
         source: Box::new(source),
         config: Box::new(config_input.clone()),
     })?;
