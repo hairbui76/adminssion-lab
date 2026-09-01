@@ -8,6 +8,25 @@
 #
 # Usage:
 #   ./scripts/verify-cleanup.sh <iterations>
+#   ./scripts/verify-cleanup.sh --check-only
+#
+# `--check-only` runs no cluster lifecycle at all: it asserts, once, that
+# no `adlab-*` cluster is present right now, and exits. It exists so that
+# "this job leaked nothing" is one command with one implementation
+# instead of an eight-line `kind get clusters | grep` snippet copied into
+# the tail of every CI job -- and copied, in practice, with the
+# `2>/dev/null ... || true` defect `fetch_clusters` below exists to
+# avoid. `.github/workflows/nightly.yml` ends every one of its jobs with
+# it (ROADMAP Task 5.9 step 1).
+#
+# `--check-only` deliberately does NOT delete what it finds. A leaked
+# cluster is evidence, and a check that tidies away its own evidence
+# makes the next question -- what state was it left in? -- unanswerable.
+# It prints the exact `kind delete cluster --name` command for each
+# instead. (`.github/workflows/integration.yml`'s inline guard does
+# best-effort delete, because there the leak is one matrix entry's and
+# the runner VM is shared with nothing; a nightly job that fails here
+# should be diagnosable.)
 #
 # For normal CI cost, run 10 iterations on PR/release candidates and 100
 # iterations manually/nightly before Public Alpha. Measured on the
@@ -49,6 +68,7 @@ readonly NODE_IMAGE="kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aa
 
 usage() {
   echo "usage: $0 <iterations>" >&2
+  echo "       $0 --check-only" >&2
 }
 
 if [ "$#" -ne 1 ]; then
@@ -56,21 +76,40 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 
-iterations="$1"
+# `--check-only` takes the place of <iterations>; the two modes are
+# mutually exclusive by construction because there is exactly one
+# argument. `check_only` is resolved here, before the numeric validation
+# below, so that `--check-only` never has to survive being parsed as an
+# integer.
+check_only=false
+iterations=0
+if [ "$1" = "--check-only" ]; then
+  check_only=true
+else
+  iterations="$1"
 
-case "${iterations}" in
-  '' | *[!0-9]*)
-    echo "verify-cleanup: error: <iterations> must be a positive integer, got: '${iterations}'" >&2
-    usage
+  case "${iterations}" in
+    '' | *[!0-9]*)
+      echo "verify-cleanup: error: <iterations> must be a positive integer, got: '${iterations}'" >&2
+      usage
+      exit 2
+      ;;
+  esac
+
+  if [ "${iterations}" -lt 1 ]; then
+    echo "verify-cleanup: error: <iterations> must be at least 1, got: ${iterations}" >&2
     exit 2
-    ;;
-esac
-
-if [ "${iterations}" -lt 1 ]; then
-  echo "verify-cleanup: error: <iterations> must be at least 1, got: ${iterations}" >&2
-  exit 2
+  fi
 fi
+readonly check_only
+readonly iterations
 
+# `docker` is required by both modes even though `--check-only` never
+# invokes it directly: `kind get clusters` enumerates Docker containers,
+# so a missing or unreachable Docker daemon is exactly the case where
+# `kind` produces no output and a naive check reports "no leaks". Failing
+# here, with exit 3, keeps that indistinguishable-from-clean case out of
+# the check's own result.
 for tool in kind docker; do
   if ! command -v "${tool}" >/dev/null 2>&1; then
     echo "verify-cleanup: error: '${tool}' is not on PATH" >&2
@@ -108,6 +147,39 @@ fetch_clusters() {
   printf '%s\n' "${output}"
 }
 
+# Asserts that no `adlab-*` cluster exists right now, failing through
+# `fail` (exit 1) if any does. `$1` says *when* the assertion was made,
+# and lands verbatim in the failure message ("after iteration 7", "right
+# now"), because "1 adlab-* cluster is still present" is only actionable
+# alongside what had just finished running.
+#
+# On a real leak it prints the surviving names and the exact
+# `kind delete cluster --name` command for each. It does not run them:
+# see this script's header for why `--check-only` preserves the evidence
+# rather than tidying it away.
+assert_no_leaked_clusters() {
+  local when="$1"
+  local cluster_list
+  local remaining
+
+  cluster_list="$(fetch_clusters)"
+  remaining="$(printf '%s\n' "${cluster_list}" | grep -c '^adlab-' || true)"
+  if [ "${remaining}" -ne 0 ]; then
+    echo "verify-cleanup: surviving adlab-* cluster(s):" >&2
+    printf '%s\n' "${cluster_list}" | grep '^adlab-' >&2 || true
+    echo "verify-cleanup: delete them with:" >&2
+    printf '%s\n' "${cluster_list}" | grep '^adlab-' \
+      | sed 's/^/  kind delete cluster --name /' >&2 || true
+    fail "${remaining} adlab-* cluster(s) still present ${when}"
+  fi
+}
+
+if [ "${check_only}" = "true" ]; then
+  assert_no_leaked_clusters "right now"
+  echo "verify-cleanup: PASS — no adlab-* cluster is present"
+  exit 0
+fi
+
 echo "verify-cleanup: starting ${iterations} iteration(s), node image ${NODE_IMAGE}"
 
 start_epoch="$(date +%s)"
@@ -127,13 +199,7 @@ while [ "${iteration}" -le "${iterations}" ]; do
     fail "kind delete cluster failed on iteration ${iteration}"
   fi
 
-  cluster_list="$(fetch_clusters)"
-  remaining="$(printf '%s\n' "${cluster_list}" | grep -c '^adlab-' || true)"
-  if [ "${remaining}" -ne 0 ]; then
-    echo "verify-cleanup: surviving adlab-* cluster(s):" >&2
-    printf '%s\n' "${cluster_list}" | grep '^adlab-' >&2 || true
-    fail "${remaining} adlab-* cluster(s) still present after iteration ${iteration}"
-  fi
+  assert_no_leaked_clusters "after iteration ${iteration}"
 
   iteration_end="$(date +%s)"
   echo "verify-cleanup: [${iteration}/${iterations}] ok, $(( iteration_end - iteration_start ))s, no adlab-* cluster remains"

@@ -1,0 +1,60 @@
+# Timeout: the webhook never answers in time, and `failurePolicy: Fail`
+# turns that into a rejection.
+#
+# `test.admissionlab.io/delay-ms: "15000"` asks the validating webhook to
+# sleep for fifteen seconds before deciding
+# (`crates/admissionlab-test-webhook/src/validate.rs`). The validating
+# configuration's `timeoutSeconds` is 10
+# (`recipes/test-webhook/manifests/20-webhook-configuration.yaml`), so the
+# API server gives up at ten seconds and never receives a verdict at all.
+# With `failurePolicy: Fail` that becomes a rejection.
+#
+# The number is chosen against the two bounds that make this fixture
+# reachable on purpose rather than by accident, both of which that
+# configuration's own comments already state:
+#
+#   * above `timeoutSeconds: 10` (10 000 ms) by a five-second margin, so
+#     this fixture cannot be turned into a merely-slow success by
+#     ordinary scheduling jitter on a loaded CI runner;
+#   * below `behavior::MAX_DELAY_MS` (60 000 ms), which the webhook
+#     rejects outright — a fixture asking for more than that fails
+#     immediately and explicitly instead of timing out, which would be a
+#     different (and much less interesting) observation.
+#
+# # Why this is a separate fixture from `pod-delay.yaml` and `pod-webhook-failure.yaml`
+#
+# It sits deliberately between the two, and all three must stay
+# distinguishable in a captured result:
+#
+# - `pod-delay.yaml` (250 ms) is well inside the budget: a perfectly
+#   ordinary `Accepted`, only slower. It measures latency.
+# - this fixture is outside the budget: the same webhook, the same code
+#   path, and a `Rejected` the webhook never chose.
+# - `pod-webhook-failure.yaml` also produces a call failure, but an
+#   *immediate* one (HTTP 500). The API server rejects both for
+#   categorically the same reason — it could not obtain a verdict — and
+#   the difference between them is visible in the elapsed time and in the
+#   message, which `crates/admissionlab-admission/tests/kind_capture.rs`
+#   asserts on directly rather than assuming.
+#
+# PRODUCT.md §31.3 lists `timeout` among the cases the deterministic
+# webhook exists to make verifiable, alongside allow, deny, mutation and
+# failure. This is that case, and `.github/workflows/nightly.yml`'s
+# `forced-webhook-timeout` job is the forced-failure run that exercises it
+# (ROADMAP Task 5.9).
+#
+# Like `pod-webhook-failure.yaml`, this is deliberately *not*
+# `UnsupportedDryRun`: dry-run worked exactly as intended and observed a
+# real rejection. The evidence is honest about what happened; it simply
+# happened for a reason the object itself did not cause.
+apiVersion: v1
+kind: Pod
+metadata:
+  name: timeout
+  namespace: admissionlab-fixtures
+  annotations:
+    test.admissionlab.io/delay-ms: "15000"
+spec:
+  containers:
+    - name: app
+      image: registry.k8s.io/pause:3.10

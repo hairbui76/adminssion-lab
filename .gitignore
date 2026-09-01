@@ -5,6 +5,12 @@
 .claude/
 .superpowers/
 
+# Diagnostics collected by .github/workflows/nightly.yml's forced-failure
+# and dogfood loops. Written into the workspace root so `actions/upload-artifact`
+# can find it by a relative path; ignored here so running one of those loops
+# by hand cannot stage a run's evidence bundles by accident.
+/nightly-diagnostics/
+
 # Editor/OS cruft
 .DS_Store
 *.swp

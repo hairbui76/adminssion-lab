@@ -22,6 +22,7 @@ RUST_LOG=debug admissionlab test admissionlab.yaml   # RUST_LOG always wins over
 - [Results that look wrong](#results-that-look-wrong)
 - [Keeping clusters and cleaning up by hand](#keeping-clusters-and-cleaning-up-by-hand)
 - [Where the evidence lives](#where-the-evidence-lives)
+- [The forced-failure catalog](#the-forced-failure-catalog)
 
 ---
 
@@ -418,7 +419,9 @@ ${TMPDIR:-/tmp}/admissionlab-runs/<run-id>/
   run.json                     run metadata
 ```
 
-`--report-dir <DIR>` relocates `result.json` and `report.html` only. Raw evidence
+`--report-dir <DIR>` relocates the rendered reports — `result.json`,
+`report.html`, and the `diagnostics.json` a failed run writes instead of a
+`result.json` — and nothing else. Raw evidence
 always stays in the run workspace, which is where every path inside the reports
 points.
 
@@ -431,6 +434,209 @@ so the evidence survives the clusters. It deliberately does not write a
 the report redaction pass. Read it before attaching it to a public issue; the
 rendered reports are what is intended for sharing. See
 [`docs/security.md`](security.md#what-redaction-does-not-cover).
+
+---
+
+## The forced-failure catalog
+
+Four failures that Admission Lab deliberately breaks itself with every night,
+in `.github/workflows/nightly.yml`. They are catalogued here because they are
+the four you are most likely to hit for real, and because a failure mode that is
+tested on a schedule should be one you can look up rather than one you have to
+reverse-engineer from a stack trace.
+
+Each entry says what the failure looks like, which exit code it produces, where
+the evidence lands, and what to do about it. What the nightly suite asserts is
+listed too — if your symptom does not match, that difference is itself
+information.
+
+| Failure | Exit | Evidence written | Clusters afterward |
+| --- | ---: | --- | --- |
+| [Install timeout](#a-component-never-becomes-ready-install-timeout) | `4` | `diagnostics.json`, `run.json` (stage `installation`) | deleted |
+| [Webhook timeout](#a-webhook-answers-too-late-webhook-timeout) | `0` or `1` — this is a *result*, not a run failure | full reports; the fixture's `raw/` bundle | deleted |
+| [`kind` failure](#kind-itself-fails-infrastructure-failure) | `3` | `run.json` (stage `cluster_creation`); no reports | none created, or deleted |
+| [Artifact write failure](#an-artifact-cannot-be-written) | `3` (or `6`) | the error itself, on stderr | deleted |
+
+In every one of the four, **no `adlab-*` cluster survives**. That is PRODUCT.md
+§33's "no leaked cluster after normal failure paths", and it is the one
+assertion every nightly job ends with. If you ever see one of these failures
+leave a cluster behind, that is a bug worth reporting on its own — attach the
+output of `kind get clusters`.
+
+You can run the leak check yourself, any time:
+
+```bash
+./scripts/verify-cleanup.sh --check-only
+```
+
+It exits `0` when nothing is present, `1` (printing the exact
+`kind delete cluster --name` line for each) when something is, and `3` when
+`kind` or `docker` is missing — never conflating "no clusters" with "could not
+ask".
+
+### A component never becomes ready (install timeout)
+
+```text
+admissionlab: both stacks failed to install: baseline: component "never-ready"
+  failed to install: component "never-ready" did not become ready in time:
+  DeploymentAvailable { namespace: "nightly-never-ready", name: "never-ready" }
+  was never satisfied (waited 599.865215718s); candidate: ...
+```
+
+The message names the component, the side, the specific readiness check that was
+never satisfied, and how long it waited. When only one side fails, only that side
+appears.
+
+**Exit `4`.** Each component gets 600 seconds to install *and* satisfy every
+one of its `readiness` checks; see
+[Exit 4 — a component timed out](#a-component-timed-out) for the usual causes.
+
+**Where the diagnostics land.** `diagnostics.json` in your `--report-dir` (or
+the run's own `reports/`), written **before** cleanup so it outlives the
+clusters, plus `run.json` in the run workspace with `status: failed` and
+`stage: installation`. There is deliberately **no** `result.json`: the run never
+compared both sides, so it has no verdict to state.
+
+**What to do.** Read `diagnostics.json` first — it names the component and the
+side. Then re-run with `--keep-clusters` and look at the workload directly:
+
+```bash
+admissionlab test --keep-clusters admissionlab.yaml
+export KUBECONFIG=<the printed candidate kubeconfig>
+kubectl -n <namespace> get deploy,pods
+kubectl -n <namespace> describe pod <the pending one>
+```
+
+`ImagePullBackOff` (a private registry, a mirror that cannot serve the tag), a
+`Pending` pod (a `LoadBalancer` Service or a `StorageClass` a bare `kind`
+cluster does not have), and a `CrashLoopBackOff` all present identically at the
+Admission Lab level and completely differently under `describe`.
+
+**What nightly forces.** A `manifests` component whose Deployment references
+`registry.admissionlab.invalid/never-exists:0.0.0` — the `.invalid` TLD can
+never resolve — with a `deploymentAvailable` readiness check on it. The apply
+succeeds; the readiness wait spends the whole 600-second budget. The job asserts
+exit `4`, that `diagnostics.json` exists, that `result.json` does *not*, and
+that no cluster leaked.
+
+### A webhook answers too late (webhook timeout)
+
+```text
+Internal error occurred: failed calling webhook "...": failed to call webhook:
+Post "https://...?timeout=10s": context deadline exceeded
+```
+
+**Not a run failure.** The run exits `0` or `1` on its policy verdict like any
+other. A webhook that never answered is a real, observed admission outcome: with
+`failurePolicy: Fail` the API server rejects the request, and Admission Lab
+records `AdmissionDecision::Rejected` for that fixture. If it happens on one
+side only, you will see it graded `webhook_failed`, **critical**.
+
+This is deliberately distinguishable from two neighbours, and the difference is
+in the evidence rather than in anything Admission Lab assumes:
+
+| | Status | Message | Elapsed |
+| --- | --- | --- | --- |
+| A denial | `403` | "... denied the request: ..." | fast |
+| A call failure | `500` | "failed calling webhook ..." | fast |
+| A **timeout** | `500` | "failed calling webhook ... context deadline exceeded" | at least the webhook's `timeoutSeconds` |
+
+**Where the diagnostics land.** The fixture's own evidence bundle:
+`raw/<side>/<fixture-id>/response.json` for the API server's verbatim answer and
+`outcome.json` for the decision and the measured `total_latency`. The latency is
+what tells a timeout apart from an immediate call failure.
+
+**What to do.** A webhook that times out under a lab's load and not under yours
+is usually a readiness problem rather than a latency problem — see
+[`connection refused` calling a webhook](#connection-refused-calling-a-webhook),
+whose fix (a real `readiness` list on the component) is the same. If the webhook
+genuinely is slow, raise its `timeoutSeconds` in *its own* configuration; there
+is nothing to configure on the Admission Lab side, because the timeout is the
+API server's and the lab is only reporting it.
+
+**What nightly forces.** `fixtures/core/admission/pod-timeout.yaml` asks the
+dogfood webhook for a 15 000 ms delay against its own `timeoutSeconds: 10`
+(`recipes/test-webhook`). The capture test asserts a rejection that took at least
+ten seconds, that names a webhook call failure, and that is *not* reported as a
+denial.
+
+### `kind` itself fails (infrastructure failure)
+
+```text
+admissionlab: failed to prepare lab clusters: both clusters failed to create:
+  baseline: `kind create cluster --name adlab-baseline-... --config ...
+  --kubeconfig ...` exited with exit status: 1 (cleanup deleted the cluster)
+```
+
+**Exit `3`.** The message carries the whole argv, so you can run the failing
+command yourself. `(cleanup deleted the cluster)` at the end means a partially
+created cluster was torn down; if cleanup had *also* failed, that would be said
+here too, with the manual `kind delete cluster` command.
+
+**Where the diagnostics land.** `run.json` in the run workspace, with
+`status: failed` and `stage: cluster_creation`. No `result.json` and no
+`diagnostics.json`: nothing was installed and nothing was captured, so there is
+nothing yet to write into them. The console message *is* the diagnostic here,
+which is why it names the command rather than summarizing it.
+
+**What to do.** See [Exit 3 — `kind` cannot create a
+cluster](#kind-cannot-create-a-cluster) for the four usual causes, in order.
+Re-running the printed command by hand is the fastest way to see `kind`'s own
+output, which Admission Lab bounds and captures but does not interleave into its
+own progress lines.
+
+**What nightly forces.** A `kind` shim on `PATH` that fails `create cluster` and
+forwards everything else to the real binary — the failure is injected at the
+process boundary, which is where the real one lives (Global Constraint 2: `kind`
+is a bounded subprocess, not something Admission Lab reimplements). The job
+asserts exit `3`, that `run.json` records `failed`/`cluster_creation`, that the
+console names the failing command, and that nothing leaked.
+
+### An artifact cannot be written
+
+```text
+failed to create temporary file
+  `/tmp/admissionlab-runs/<run-id>/reports/.result.json.tmp-<uuid>`: No space
+  left on device
+```
+
+**Exit `3`** for an I/O failure. (Exit `6` is reserved for the two shapes that
+cannot be your fault: a path that escapes the store root, and a value that fails
+to serialize. Both mean a bug in Admission Lab — please report them.)
+
+Every artifact is written atomically: into a temporary sibling file, synced, and
+renamed into place. So a failed write never leaves a half-written `result.json`,
+never leaves a stray temporary file, and never damages a file that was already
+there. The error names the operation that failed and the exact path it was
+acting on.
+
+**Where the diagnostics land.** On stderr, and nowhere else — writing a
+diagnostic file is the thing that just failed. Read the message: it distinguishes
+"create temporary file" (the destination directory is unwritable, full, or not
+actually a directory) from "rename temporary file into place at" (something else
+holds that name) from "sync temporary file" (the filesystem rejected the write
+after accepting it, typically ENOSPC on a sparse or network mount).
+
+**What to do.** Check free space and permissions on **both** roots, which are
+usually different filesystems:
+
+```bash
+df -h "${TMPDIR:-/tmp}" .          # the run workspace, and --report-dir
+ls -ld "${TMPDIR:-/tmp}/admissionlab-runs"
+```
+
+`admissionlab doctor` warns below roughly 10 GiB free on the run root before a
+run starts, which is the check that exists to stop you discovering this at
+minute nine of a lab.
+
+**What nightly forces.** Not a real disk failure — a real one is not
+reproducible on demand, and a mocked `io::Error` would only prove that the code
+propagates an error somebody handed it. Instead
+`crates/admissionlab-core/tests/artifact.rs` puts the filesystem into two states
+the OS is *required* to reject (a destination whose parent is a regular file, and
+a destination that is an existing directory) and asserts, for each, the error
+variant, that it names the operation and the path, and that nothing is left
+behind.
 
 ---
 

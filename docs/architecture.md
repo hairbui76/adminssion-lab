@@ -43,7 +43,7 @@ and beyond; one exists only to be run inside a disposable cluster.
 | `admissionlab-policy` | Severity. The default severity table, `expectations.yaml` matching, and `evaluate_with_expectations` — the only code in the product that grades anything. |
 | `admissionlab-report` | `LabResult`, the single redaction pass, and the three renderers (terminal, JSON, standalone HTML) plus the GitHub job summary. |
 | `admissionlab-cli` | The `admissionlab` binary — `test`, `doctor`, `reproduce` — the exit-code mapping, and the compare-and-report assembly (`src/pipeline/`). A `[lib]` as well as a `[[bin]]`, so integration tests can drive the pipeline through fake backends. |
-| `admissionlab-test-webhook` | The deterministic dogfood webhook (PRODUCT.md §30): a container image that denies, mutates, fails, or sleeps on command, used by the project's own integration tests. Never part of a user's lab. |
+| `admissionlab-test-webhook` | The deterministic dogfood webhook (PRODUCT.md §30): a container image that denies, mutates, fails, or sleeps on command, driven entirely by annotations on the fixture. It is what the project's own integration tests observe admission with; `recipes/test-webhook` is its on-disk recipe. |
 | `admissionlab-gateway` | Reserved for Phase 6. Currently one line: `#![forbid(unsafe_code)]`. |
 | `admissionlab-echo` | Reserved test fixture binary. Currently `fn main() {}`. |
 

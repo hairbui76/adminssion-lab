@@ -16,7 +16,7 @@
 //! two stacks differ — comparison is Phase 4's subject and has no code
 //! yet to exercise. A second cluster would therefore double the slowest
 //! part of this test (cluster creation, image build, stack install) to
-//! re-observe the same nine fixtures against the same webhook build. So
+//! re-observe the same fixture corpus against the same webhook build. So
 //! this runs one cluster, and takes the one thing a second cluster would
 //! genuinely have proven — that the two sides' captures land in disjoint
 //! `raw/<side>/` trees — from
@@ -746,6 +746,7 @@ fn verify_fixture(file: &str, bundle: &Bundle) -> Result<(), String> {
         "pod-add-init-container.yaml" => verify_add_init_container(bundle),
         "pod-remove-init-container.yaml" => verify_remove_init_container(bundle),
         "pod-delay.yaml" => verify_delay(bundle),
+        "pod-timeout.yaml" => verify_timeout(bundle),
         "pod-webhook-failure.yaml" => verify_webhook_failure(bundle),
         "pod-reinvocation.yaml" => verify_reinvocation(bundle),
         other => Err(format!(
@@ -868,6 +869,79 @@ fn verify_delay(bundle: &Bundle) -> Result<(), String> {
         return Err(format!(
             "a fixture asking the validating webhook to sleep 250 ms completed in {total} ms"
         ));
+    }
+    Ok(())
+}
+
+/// `pod-timeout.yaml`: the validating webhook is asked to sleep for
+/// 15 000 ms against its own `timeoutSeconds: 10`, so the API server
+/// gives up waiting and `failurePolicy: Fail` turns that into a
+/// rejection.
+///
+/// The two assertions are chosen so that this stays a real check even if
+/// upstream rewords its webhook errors:
+///
+///  * **The elapsed time.** A request that really waited out a ten-second
+///    webhook budget cannot come back in less than ten seconds, whatever
+///    the message says. This is the wording-independent proof that a
+///    timeout is what happened, and it is what distinguishes this fixture
+///    from `pod-webhook-failure.yaml`, whose call failure is immediate.
+///  * **The message is not a denial.** A timeout and a deny are
+///    categorically different observations — the webhook refused nothing,
+///    it never answered — and a capture that reported the first as the
+///    second would be exactly the fabrication Global Constraint 15
+///    forbids.
+///
+/// The specific "deadline exceeded" phrasing is checked leniently,
+/// against several spellings, because it belongs to kube-apiserver rather
+/// than to this project; the timing assertion above is the one that
+/// carries the weight.
+fn verify_timeout(bundle: &Bundle) -> Result<(), String> {
+    let (code, message) = require_rejected(bundle)?;
+
+    let total = bundle.outcome["total_latency"]
+        .as_u64()
+        .ok_or_else(|| "outcome.json carries no total_latency".to_string())?;
+    // `timeoutSeconds: 10` in
+    // `recipes/test-webhook/manifests/20-webhook-configuration.yaml`.
+    if total < 10_000 {
+        return Err(format!(
+            "a fixture asking the validating webhook to sleep past its 10s timeout was \
+             rejected after only {total} ms, so something other than a timeout rejected it"
+        ));
+    }
+
+    if message.contains("denied the request") {
+        return Err(format!(
+            "a webhook timeout was reported as an ordinary denial: {message:?}"
+        ));
+    }
+    if !message.contains("failed calling webhook") {
+        return Err(format!(
+            "the rejection message does not describe a webhook call failure: {message:?}"
+        ));
+    }
+    let lowercase = message.to_lowercase();
+    if ![
+        "deadline exceeded",
+        "timeout",
+        "timed out",
+        "context canceled",
+    ]
+    .iter()
+    .any(|phrase| lowercase.contains(phrase))
+    {
+        return Err(format!(
+            "the rejection message does not describe a timeout: {message:?}"
+        ));
+    }
+    if code == Some(403) {
+        return Err(
+            "a webhook timeout was reported with a denial's own 403 status code".to_string(),
+        );
+    }
+    if !bundle.outcome["final_object"].is_null() {
+        return Err("a rejected fixture reported a final object".to_string());
     }
     Ok(())
 }

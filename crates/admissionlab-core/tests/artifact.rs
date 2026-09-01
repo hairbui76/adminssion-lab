@@ -431,6 +431,139 @@ fn failed_rename_does_not_leave_a_stray_temp_file() {
 }
 
 // ---------------------------------------------------------------------
+// Deterministic write failure (ROADMAP Task 5.9)
+// ---------------------------------------------------------------------
+//
+// The nightly reliability matrix's fourth forced-failure case is "a
+// deterministic artifact-store write failure injected through the test
+// filesystem abstraction". These two tests are that case, and
+// `.github/workflows/nightly.yml`'s `forced-artifact-store-failure` job
+// runs this test binary for exactly them.
+//
+// The injection is the real filesystem in a state the OS is *required*
+// to reject, not a mocked `io::Error`: a fake would prove that the code
+// propagates an error somebody handed it, which is a much weaker claim
+// than that a genuine `ENOTDIR`/`EISDIR` from a real syscall arrives at
+// the caller intact and leaves nothing behind. Both shapes are also
+// root-immune — unlike a read-only directory, which a test running as
+// `root` (as many CI containers do) would sail straight through, turning
+// this into a check that silently stops checking.
+//
+// The two shapes cover the write path's two halves. `write_bytes_atomic`
+// creates a sibling temporary file, syncs it, then renames it into
+// place; `failed_rename_does_not_leave_a_stray_temp_file` above already
+// forces the *rename* half, so these force the *create* half and pin
+// what the caller is told in each.
+
+/// The create-the-temporary-file half fails, and the error names what was
+/// attempted and where.
+///
+/// A destination whose parent is a regular file rather than a directory:
+/// `validate_write_path` accepts it (canonicalizing a regular file
+/// succeeds, and it does resolve inside the store root), so the failure
+/// lands where it should — on the `File::create` of the temporary file,
+/// as `ENOTDIR`.
+///
+/// The assertion is on `ArtifactError::Io`'s `operation` and `path`
+/// rather than only on `is_err()`, because those two fields are the
+/// whole reason the variant carries them: PRODUCT.md §33's last target is
+/// "sufficient diagnostics on first failure so users do not need to rerun
+/// solely to discover which setup stage failed", and an artifact write
+/// that fails with an unadorned `io::Error` tells a user that something
+/// somewhere could not be written.
+#[test]
+fn a_write_whose_parent_is_a_file_fails_as_io_naming_the_operation_and_path() {
+    let rt = test_runtime();
+    let root = unique_store_root("write-failure-not-a-directory");
+    let store = ArtifactStore::new(&root);
+    let run_id = RunId::generate();
+    let paths = rt
+        .block_on(store.create_run(&run_id))
+        .expect("create_run should succeed");
+
+    let blocking_file = paths.reports().join("occupied");
+    std::fs::write(&blocking_file, b"i am a file, not a directory").expect("seed blocking file");
+    let destination = blocking_file.join("result.json");
+
+    let result = rt.block_on(store.write_bytes_atomic(&destination, b"payload"));
+
+    match result {
+        Err(ArtifactError::Io {
+            operation, path, ..
+        }) => {
+            assert_eq!(
+                operation, "create temporary file",
+                "the error must name the operation that actually failed"
+            );
+            assert!(
+                path.starts_with(&blocking_file),
+                "the error must name the temporary path it tried to create, got {}",
+                path.display()
+            );
+        }
+        other => panic!("expected ArtifactError::Io, got {other:?}"),
+    }
+
+    // The blocking file is untouched and no temporary file exists beside
+    // it: a failed write leaves the store exactly as it found it.
+    assert_eq!(
+        std::fs::read(&blocking_file).expect("read blocking file"),
+        b"i am a file, not a directory"
+    );
+    assert_eq!(sorted_entry_names(paths.reports()), vec!["occupied"]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// The same failure reaches a caller of `write_json_atomic`, which is the
+/// method every report and manifest actually goes through.
+///
+/// Serialization succeeds here — the value is an ordinary struct — so
+/// this is specifically *not* the `ArtifactError::Serialize` shortcut the
+/// tests above cover: the bytes were produced and the filesystem refused
+/// them.
+#[test]
+fn write_json_atomic_surfaces_the_same_io_failure_after_serializing() {
+    let rt = test_runtime();
+    let root = unique_store_root("write-json-failure-not-a-directory");
+    let store = ArtifactStore::new(&root);
+    let run_id = RunId::generate();
+    let paths = rt
+        .block_on(store.create_run(&run_id))
+        .expect("create_run should succeed");
+
+    let blocking_file = paths.reports().join("occupied");
+    std::fs::write(&blocking_file, b"blocking").expect("seed blocking file");
+    let destination = blocking_file.join("result.json");
+
+    let manifest = SampleManifest {
+        run_id: run_id.as_str().to_string(),
+        fixture_count: 100,
+    };
+    let result = rt.block_on(store.write_json_atomic(&destination, &manifest));
+
+    assert!(
+        matches!(result, Err(ArtifactError::Io { .. })),
+        "expected ArtifactError::Io, got {result:?}"
+    );
+    // Rendered, because this string is what a user sees on stderr and in
+    // a diagnostic: it has to say what failed and where.
+    let rendered = result.expect_err("must fail").to_string();
+    assert!(
+        rendered.contains("create temporary file"),
+        "the rendered error must name the operation, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("result.json"),
+        "the rendered error must name the destination, got {rendered:?}"
+    );
+
+    assert_eq!(sorted_entry_names(paths.reports()), vec!["occupied"]);
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+// ---------------------------------------------------------------------
 // Path safety (brief Step 1)
 // ---------------------------------------------------------------------
 

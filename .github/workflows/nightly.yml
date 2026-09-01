@@ -1,0 +1,959 @@
+name: Nightly reliability
+
+# The Alpha hardening reliability matrix (ROADMAP Task 5.9): the slow,
+# repetitive, deliberately-broken runs that per-commit CI cannot afford
+# and that PRODUCT.md §33's closing sentence — "Before v1, repeated-run
+# reliability is more important than optimizing a few seconds of runtime"
+# — makes the point of.
+#
+# Seven jobs, in three groups.
+#
+#   Repetition (does the happy path stay the happy path?)
+#     cluster-cycles           100 kind create/delete cycles
+#     dogfood-basic            50 full lab runs of examples/admission-basic
+#     dogfood-regression        5 full lab runs of examples/kyverno-istio-upgrade
+#
+#   Forced failure (does the unhappy path fail the way it promises to?)
+#     forced-install-timeout   a component that can never become ready
+#     forced-webhook-timeout   a webhook that answers later than its own timeoutSeconds
+#     forced-kind-failure      `kind create cluster` fails
+#     forced-artifact-store-failure   an artifact write the filesystem refuses
+#
+# Every job ends with `./scripts/verify-cleanup.sh --check-only`, under
+# `if: always()`, so no job can pass while having leaked an `adlab-*`
+# cluster (Task 5.9 step 1). That is one script with one implementation
+# rather than a grep snippet pasted seven times — and pasted, in
+# practice, with the `2>/dev/null ... || true` defect that makes such a
+# check incapable of failing.
+#
+# # Kubernetes version
+#
+# Six of the seven jobs run against **1.36.4, Tier 1's primary supported
+# Kubernetes version** (`compatibility/kubernetes.yaml`), which is
+# ROADMAP Task 5.9's "supported primary Kubernetes minor" entry:
+# `examples/admission-basic` pins it, `scripts/verify-cleanup.sh` pins
+# its node image, and `crates/admissionlab-admission/tests/kind_capture.rs`
+# pins it as a constant.
+#
+# `dogfood-regression` is the exception, and deliberately so: it runs at
+# **1.35.8**, because `examples/kyverno-istio-upgrade` pins that and
+# cannot pin anything else. The certified Kyverno recipe version
+# (`compatibility/recipes.yaml`) documents a 1.33-1.35 range and
+# certifies exactly `1.35.8`; running it on 1.36.4 would be running an
+# uncertified combination, which is a different experiment from "is the
+# known regression still detected". That is Tier 1's *second* bullet
+# ("current certified recipe versions") rather than its first, and both
+# belong in this suite.
+#
+# `dogfood-basic` asserts all three pins explicitly rather than leaving
+# them true by coincidence, so a matrix or recipe update that moves any
+# of them fails here and forces this paragraph to be updated with it.
+#
+# PRODUCT.md §32's Tier 2 also describes nightly as the tier that covers
+# *all three* supported minors. That is deliberately not in this
+# workflow: ROADMAP Task 5.9 scopes this suite to the primary, and a
+# three-minor matrix over jobs this long is a separate cost decision from
+# the reliability one. `compatibility/kubernetes.yaml`'s own comments
+# already record 1.37 as awaiting that nightly coverage.
+#
+# # Flake versus regression (Task 5.9 step 2)
+#
+# The two dogfood jobs are separate jobs, not two loops in one, because
+# they are tracked as different things:
+#
+#   * `dogfood-basic` runs an example built to pass. Its expected exit
+#     code is 0, on every one of 50 runs, and *any* non-zero result is a
+#     flake or a regression in Admission Lab itself. This job's failure
+#     means "the tool is not reliable".
+#   * `dogfood-regression` runs the example built to find a real
+#     regression. Its expected exit code is 1 — a policy failure is the
+#     correct answer — and a 0 there would mean Admission Lab stopped
+#     detecting the known candidate regression. This job's failure means
+#     "the tool stopped being correct".
+#
+# Folding them together would produce one red X that answers neither
+# question. Both loops assert the *expected* exit code rather than
+# "success", and both distinguish an unexpected exit code (which fails
+# the job) from the expected verdict (which does not).
+#
+# # Diagnostics (Task 5.9 step 3)
+#
+# Every job that can produce artifacts collects them per iteration into a
+# diagnostics directory and uploads it with `if: failure()`. Successful
+# iterations are deleted as they go: 50 lab runs each keep a workspace
+# with per-fixture evidence bundles, and a runner that fills its disk on
+# run 31 tells you nothing about runs 32 through 50.
+#
+# # Cost
+#
+# This suite is expensive on purpose. Rough sizing against the measured
+# figures each job's own comment cites: the whole matrix is a few hours
+# of runner time per night, running in parallel, with `cluster-cycles`
+# the long pole at up to ~55 minutes.
+
+on:
+  schedule:
+    # 03:17 UTC. Off the hour deliberately: GitHub queues scheduled
+    # workflows across all of GitHub at once, and the top of the hour is
+    # the most contended slot there is.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Deliberately no `cancel-in-progress`. A nightly run that is still going
+# when the next one starts is itself a signal worth keeping, and
+# cancelling a 50-run reliability loop halfway through would discard the
+# evidence rather than saving anything: the runner minutes are already
+# spent.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # =====================================================================
+  # Repetition
+  # =====================================================================
+
+  cluster-cycles:
+    name: 100 kind create/delete cycles
+    runs-on: ubuntu-latest
+    # `scripts/verify-cleanup.sh`'s own header measures one create/delete
+    # cycle at roughly 32 seconds warm (roughly 105 seconds on a cold
+    # first node-image pull), so 100 cycles is roughly 53 minutes plus
+    # one cold pull. ROADMAP Task 5.7's measurement of the same `kind`
+    # commands inside a real lab run is faster still (9.3-9.9s per
+    # cluster creation on a 16-core host), so 53 minutes is the
+    # pessimistic figure and the one this ceiling is sized against.
+    # 90 minutes leaves a runner roughly 1.7x slower than the reference
+    # machine room to finish rather than to be killed mid-loop, which
+    # would report a timeout where the actual question is whether
+    # anything leaked.
+    timeout-minutes: 90
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        # Same pinned version and same published checksum as
+        # `.github/workflows/integration.yml`; see that file for why this
+        # is downloaded and checksummed rather than taken from whatever
+        # the runner image ships.
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Run 100 create/delete cycles
+        # Unsharded, deliberately. ROADMAP Task 5.9 allows "100
+        # create/delete cycles (or sharded equivalent)", and four
+        # 25-cycle shards on four fresh runner VMs would finish sooner —
+        # but they would test something weaker than the claim being
+        # made. What this job asserts is that a long, unattended sequence
+        # of create/delete on *one* machine never leaks, which is the
+        # shape a real user's laptop and a real self-hosted runner both
+        # have. Sharding resets exactly the accumulating state (Docker's
+        # storage, network namespaces, inotify watches) that a leak would
+        # show up in.
+        #
+        # The script prints progress after every iteration and fails the
+        # moment anything is wrong, so a failure here names the iteration
+        # it happened on rather than only the job.
+        run: ./scripts/verify-cleanup.sh 100
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  dogfood-basic:
+    name: 50 dogfood runs (examples/admission-basic, expect exit 0)
+    runs-on: ubuntu-latest
+    # 50 runs. `examples/admission-basic`'s own header measures one run
+    # at "about a minute" (two `kind` clusters, no components, four
+    # dry-run requests); ROADMAP Task 5.7 measured a comparable
+    # two-cluster lab end to end at ~22 seconds on a 16-core host. At the
+    # example's own pessimistic figure that is ~50 minutes, plus one
+    # release build. 180 minutes is roughly 3x that, which is the margin
+    # a GitHub-hosted runner needs against a 16-core reference machine.
+    timeout-minutes: 180
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          # Its own entry: this job builds the release profile, which
+          # shares almost nothing with the debug artifacts the
+          # cargo-test jobs below cache.
+          key: nightly-dogfood-basic
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Assert which Kubernetes versions this suite actually covers
+        # ROADMAP Task 5.9 lists "supported primary Kubernetes minor" as
+        # one of the nightly matrix's own entries. Nothing here *selects*
+        # a version — the examples, `scripts/verify-cleanup.sh` and
+        # `kind_capture.rs` each pin their own — so this step checks that
+        # what they pin is still what this workflow's header claims it
+        # covers. A matrix update that promotes 1.37, or a recipe
+        # certification that moves Kyverno onto a newer minor, fails here
+        # instead of silently turning this suite into coverage of a
+        # version nobody meant to test.
+        #
+        # Deliberately a grep against the checked-in files rather than a
+        # YAML query: these are three exact strings in three files, and a
+        # parser would add a dependency to assert something a literal
+        # already asserts.
+        run: |
+          set -euo pipefail
+          primary="1.36.4"
+          certified_with_kyverno="1.35.8"
+
+          if ! grep -q "^# ${primary} is Tier 1's primary supported version\.\$" compatibility/kubernetes.yaml; then
+            echo "::error::compatibility/kubernetes.yaml no longer names ${primary} as Tier 1's primary supported version"
+            exit 1
+          fi
+          if ! grep -q "kubernetes: \"${primary}\"" examples/admission-basic/admissionlab.yaml; then
+            echo "::error::examples/admission-basic no longer pins the primary version ${primary}"
+            exit 1
+          fi
+          # The regression example is bound to the Kyverno recipe's own
+          # certified version, not to the primary. If that moves, this
+          # workflow's header has to move with it.
+          if ! grep -q "kubernetes: \"${certified_with_kyverno}\"" examples/kyverno-istio-upgrade/admissionlab.yaml; then
+            echo "::error::examples/kyverno-istio-upgrade no longer pins ${certified_with_kyverno}; check compatibility/recipes.yaml and update this workflow"
+            exit 1
+          fi
+          echo "nightly covers Kubernetes ${primary} (Tier 1 primary) and ${certified_with_kyverno} (certified Kyverno recipe)"
+
+      - name: Build admissionlab (release)
+        # Release, because a debug build measures a program nobody ships
+        # — the same rule `scripts/benchmark-alpha.sh` enforces on its own
+        # `ADMISSIONLAB_BIN`.
+        run: cargo build --release -p admissionlab-cli --bin admissionlab
+
+      - name: Run examples/admission-basic 50 times
+        # `examples/admission-basic` is designed to pass: two identical
+        # bare clusters, so the two sides agree by construction and the
+        # run exits 0. Any other exit code is therefore a flake or a
+        # regression in Admission Lab itself, never a finding about the
+        # example — which is exactly why this is the loop that measures
+        # reliability.
+        #
+        # Each iteration gets its own `TMPDIR`, so its run workspace
+        # (which the CLI places under `${TMPDIR:-/tmp}/admissionlab-runs`
+        # — there is no `--run-root` flag) is isolated and collectable.
+        # A successful iteration's workspace is deleted immediately:
+        # 50 workspaces of per-fixture evidence would fill the runner's
+        # disk, and a job that dies of ENOSPC on run 31 answers nothing
+        # about runs 32-50.
+        run: |
+          set -euo pipefail
+          runs=50
+          binary="${GITHUB_WORKSPACE}/target/release/admissionlab"
+          diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
+          mkdir -p "${diagnostics}"
+          failures=0
+
+          for i in $(seq 1 "${runs}"); do
+            workspace="${RUNNER_TEMP}/basic-${i}"
+            reports="${workspace}/reports"
+            mkdir -p "${reports}"
+
+            status=0
+            TMPDIR="${workspace}" "${binary}" test \
+              examples/admission-basic/admissionlab.yaml \
+              --report-dir "${reports}" \
+              >"${workspace}/console.log" 2>&1 || status=$?
+
+            if [ "${status}" -eq 0 ]; then
+              echo "run ${i}/${runs}: exit 0 (expected)"
+              rm -rf "${workspace}"
+            else
+              failures=$(( failures + 1 ))
+              echo "::error::run ${i}/${runs}: exit ${status}, expected 0 — flake or regression"
+              tail -n 40 "${workspace}/console.log" || true
+              mv "${workspace}" "${diagnostics}/basic-run-${i}"
+            fi
+          done
+
+          echo "admission-basic: ${runs} runs, ${failures} unexpected exit code(s)"
+          if [ "${failures}" -ne 0 ]; then
+            echo "::error::${failures} of ${runs} admission-basic runs did not exit 0"
+            exit 1
+          fi
+
+      - name: Strip kubeconfigs from the collected diagnostics
+        if: failure()
+        # Raw run evidence is protected by file permissions, not by the
+        # report redaction pass (`docs/security.md`), and a run workspace
+        # carries per-cluster kubeconfigs at mode 0600. The clusters they
+        # name are deleted by the time anything is uploaded, so these
+        # files are useless to a reader and are simply removed rather
+        # than shipped into an artifact that is easier to hand around
+        # than the workspace ever was.
+        run: |
+          set -euo pipefail
+          find nightly-diagnostics -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload diagnostics from failed runs
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nightly-dogfood-basic-diagnostics
+          path: nightly-diagnostics
+          # A job that failed before the loop wrote anything should still
+          # fail on its own account, not on a missing-artifact warning.
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  dogfood-regression:
+    name: 5 dogfood runs (examples/kyverno-istio-upgrade, expect exit 1)
+    runs-on: ubuntu-latest
+    # Kubernetes 1.35.8, not the primary 1.36.4 — see this workflow's
+    # header: the certified Kyverno recipe version is certified on 1.35.8
+    # alone, and running it anywhere else would be an uncertified
+    # combination rather than the regression check this job is.
+    #
+    # `examples/kyverno-istio-upgrade` installs a real Kyverno and a real
+    # Istio on each of two clusters and replays ten fixtures per side.
+    # `.github/workflows/integration.yml`'s `alpha_e2e` entry measures two
+    # such runs at 169.33 seconds combined on a warm reference machine,
+    # and notes that its cost is dominated by container image pulls, so a
+    # GitHub-hosted runner is several times slower. Five runs at that
+    # multiple is well inside 120 minutes; the CLI's own 600-second
+    # per-component install timeout is what actually bounds a wedged run.
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: nightly-dogfood-regression
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Build admissionlab (release)
+        run: cargo build --release -p admissionlab-cli --bin admissionlab
+
+      - name: Run examples/kyverno-istio-upgrade 5 times
+        # Five, not fifty: this loop is not measuring flake rate, it is
+        # checking that the known candidate regression is still detected.
+        # That is a *product* question with a binary answer, and repeating
+        # a ten-minute two-vendor-stack run fifty times to ask it again
+        # would spend hours to learn nothing the fifth run did not
+        # already say.
+        #
+        # Exit 1 is the pass condition. The candidate stack in this
+        # example carries a real regression, the policy grades it
+        # critical, and `admissionlab test` reports a policy failure —
+        # which is the correct behavior, not a broken run. Exit 0 here
+        # would mean Admission Lab stopped detecting it; any other code
+        # means the run did not reach a verdict at all, which is a
+        # different failure and is reported as such.
+        run: |
+          set -euo pipefail
+          runs=5
+          binary="${GITHUB_WORKSPACE}/target/release/admissionlab"
+          diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
+          mkdir -p "${diagnostics}"
+          failures=0
+
+          for i in $(seq 1 "${runs}"); do
+            workspace="${RUNNER_TEMP}/regression-${i}"
+            reports="${workspace}/reports"
+            mkdir -p "${reports}"
+
+            status=0
+            TMPDIR="${workspace}" "${binary}" test \
+              examples/kyverno-istio-upgrade/admissionlab.yaml \
+              --report-dir "${reports}" \
+              >"${workspace}/console.log" 2>&1 || status=$?
+
+            if [ "${status}" -eq 1 ]; then
+              echo "run ${i}/${runs}: exit 1 (expected — the known regression was detected)"
+              rm -rf "${workspace}"
+            elif [ "${status}" -eq 0 ]; then
+              failures=$(( failures + 1 ))
+              echo "::error::run ${i}/${runs}: exit 0 — the known candidate regression was NOT detected (product regression)"
+              mv "${workspace}" "${diagnostics}/regression-run-${i}"
+            else
+              failures=$(( failures + 1 ))
+              echo "::error::run ${i}/${runs}: exit ${status} — the run never reached a verdict"
+              tail -n 40 "${workspace}/console.log" || true
+              mv "${workspace}" "${diagnostics}/regression-run-${i}"
+            fi
+          done
+
+          echo "kyverno-istio-upgrade: ${runs} runs, ${failures} unexpected exit code(s)"
+          if [ "${failures}" -ne 0 ]; then
+            echo "::error::${failures} of ${runs} kyverno-istio-upgrade runs did not exit 1"
+            exit 1
+          fi
+
+      - name: Strip kubeconfigs from the collected diagnostics
+        if: failure()
+        # Raw run evidence is protected by file permissions, not by the
+        # report redaction pass (`docs/security.md`), and a run workspace
+        # carries per-cluster kubeconfigs at mode 0600. The clusters they
+        # name are deleted by the time anything is uploaded, so these
+        # files are useless to a reader and are simply removed rather
+        # than shipped into an artifact that is easier to hand around
+        # than the workspace ever was.
+        run: |
+          set -euo pipefail
+          find nightly-diagnostics -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload diagnostics from failed runs
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nightly-dogfood-regression-diagnostics
+          path: nightly-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  # =====================================================================
+  # Forced failure
+  # =====================================================================
+  #
+  # Each of these four asserts three things: the promised exit code
+  # class, that diagnostics survive the failure, and that no cluster was
+  # leaked. Each is forced at the most honest level available for the
+  # failure in question, and each job's comment says which level that is
+  # — a forced failure injected somewhere the product does not actually
+  # fail would be a test of the injection, not of the product.
+
+  forced-install-timeout:
+    name: Forced install timeout (expect exit 4)
+    runs-on: ubuntu-latest
+    # Real forcing, at the real timeout. `DEFAULT_COMPONENT_TIMEOUT` is
+    # 600 seconds and is not configurable outside tests
+    # (`crates/admissionlab-cli/src/pipeline/mod.rs`), so this job pays
+    # the full ten minutes on each side — concurrently, since both sides
+    # install at once — plus cluster creation and cleanup. 45 minutes is
+    # roughly 3x that.
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: nightly-forced-install-timeout
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Build admissionlab (release)
+        run: cargo build --release -p admissionlab-cli --bin admissionlab
+
+      - name: Write a lab whose component can never become ready
+        # The forcing is a real component that really never becomes
+        # ready, not a stubbed installer: a Deployment whose image cannot
+        # be pulled (the `.invalid` TLD is reserved by RFC 2606 and can
+        # never resolve, so this needs no network access to fail and
+        # cannot accidentally succeed) plus a `deploymentAvailable`
+        # readiness check on it. `kubectl apply` succeeds — the objects
+        # are valid — and then the component spends its whole 600-second
+        # budget waiting for an `Available` condition that will never be
+        # true. That is precisely the failure users hit with a chart that
+        # needs a LoadBalancer, a StorageClass, or an image their
+        # registry mirror cannot serve.
+        run: |
+          set -euo pipefail
+          lab="${RUNNER_TEMP}/install-timeout"
+          mkdir -p "${lab}"
+
+          cat >"${lab}/never-ready.yaml" <<'YAML'
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: nightly-never-ready
+          ---
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: never-ready
+            namespace: nightly-never-ready
+          spec:
+            replicas: 1
+            selector:
+              matchLabels:
+                app: never-ready
+            template:
+              metadata:
+                labels:
+                  app: never-ready
+              spec:
+                containers:
+                  - name: app
+                    image: registry.admissionlab.invalid/never-exists:0.0.0
+          YAML
+
+          cat >"${lab}/admissionlab.yaml" <<'YAML'
+          apiVersion: admissionlab.io/v1alpha1
+          kind: Lab
+
+          baseline:
+            kubernetes: "1.36.4"
+            components:
+              - name: never-ready
+                version: "1"
+                install:
+                  type: manifests
+                  paths:
+                    - never-ready.yaml
+                readiness:
+                  - type: deploymentAvailable
+                    namespace: nightly-never-ready
+                    name: never-ready
+
+          candidate:
+            kubernetes: "1.36.4"
+            components:
+              - name: never-ready
+                version: "1"
+                install:
+                  type: manifests
+                  paths:
+                    - never-ready.yaml
+                readiness:
+                  - type: deploymentAvailable
+                    namespace: nightly-never-ready
+                    name: never-ready
+
+          fixtures:
+            include:
+              - "fixtures/*.yaml"
+          YAML
+
+          mkdir -p "${lab}/fixtures"
+          cat >"${lab}/fixtures/configmap.yaml" <<'YAML'
+          apiVersion: v1
+          kind: ConfigMap
+          metadata:
+            name: nightly-probe
+            namespace: default
+          data:
+            key: value
+          YAML
+
+      - name: Run it and assert exit 4 with diagnostics
+        # Exit 4 is `RunDisposition::InstallationFailed`. The run must
+        # also have written `diagnostics.json` *before* cleanup — a run
+        # that failed at or after installation preserves what it knows,
+        # and deliberately writes no `result.json`, because it never
+        # compared both sides and so never earned a verdict.
+        run: |
+          set -euo pipefail
+          lab="${RUNNER_TEMP}/install-timeout"
+          diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
+          mkdir -p "${diagnostics}"
+          reports="${lab}/reports"
+          # Both, ahead of the run: `doctor`'s free-space check probes
+          # the run root before the workspace under it is created, and
+          # warns (harmlessly, but confusingly) if `TMPDIR` does not
+          # exist yet.
+          mkdir -p "${reports}" "${lab}/workspace"
+
+          status=0
+          TMPDIR="${lab}/workspace" "${GITHUB_WORKSPACE}/target/release/admissionlab" test \
+            "${lab}/admissionlab.yaml" \
+            --report-dir "${reports}" \
+            >"${lab}/console.log" 2>&1 || status=$?
+
+          cp -R "${lab}" "${diagnostics}/install-timeout" || true
+
+          if [ "${status}" -ne 4 ]; then
+            echo "::error::expected exit 4 (installation failure), got ${status}"
+            tail -n 60 "${lab}/console.log" || true
+            exit 1
+          fi
+          if [ ! -s "${reports}/diagnostics.json" ]; then
+            echo "::error::a failed install wrote no diagnostics.json"
+            ls -R "${reports}" || true
+            exit 1
+          fi
+          if [ -e "${reports}/result.json" ]; then
+            echo "::error::a run that never compared both sides wrote a result.json"
+            exit 1
+          fi
+          echo "forced install timeout: exit 4, diagnostics.json present, no result.json"
+
+      - name: Strip kubeconfigs from the collected diagnostics
+        if: failure()
+        # Raw run evidence is protected by file permissions, not by the
+        # report redaction pass (`docs/security.md`), and a run workspace
+        # carries per-cluster kubeconfigs at mode 0600. The clusters they
+        # name are deleted by the time anything is uploaded, so these
+        # files are useless to a reader and are simply removed rather
+        # than shipped into an artifact that is easier to hand around
+        # than the workspace ever was.
+        run: |
+          set -euo pipefail
+          find nightly-diagnostics -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nightly-forced-install-timeout-diagnostics
+          path: nightly-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  forced-webhook-timeout:
+    name: Forced webhook timeout (real cluster capture)
+    runs-on: ubuntu-latest
+    # `.github/workflows/integration.yml` measures `kind_capture` at
+    # 83.80 seconds end to end on a warm reference machine; the
+    # `pod-timeout.yaml` fixture adds one request that waits out a
+    # ten-second webhook budget. Its own internal bounds — a 600-second
+    # image build, a 120-second component install, a 10-second audit
+    # correlation deadline per fixture — are what stop it hanging.
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: nightly-forced-webhook-timeout
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Capture a real webhook timeout
+        # This is the honest level for this failure, and it is the
+        # highest one available. A webhook timeout can only be forced
+        # against a real webhook, and `recipes/test-webhook` is built to
+        # be forced: `fixtures/core/admission/pod-timeout.yaml` asks the
+        # validating webhook for a 15 000 ms delay against its own
+        # `timeoutSeconds: 10`, the API server gives up, and
+        # `failurePolicy: Fail` turns that into a rejection.
+        #
+        # It cannot be driven through `admissionlab test` — the webhook's
+        # image has to be `kind load`ed into each cluster by name, and
+        # `admissionlab test` creates and deletes its own clusters with
+        # run-scoped names inside the process. `scripts/benchmark-alpha.sh`
+        # documents the same constraint at length. So the assertion is on
+        # the *captured evidence* rather than on a process exit code:
+        # `verify_timeout` in `kind_capture.rs` requires a rejection that
+        # took at least ten seconds, that names a webhook call failure,
+        # and that is not reported as a denial. `cargo test`'s own exit
+        # code is this step's.
+        #
+        # PRODUCT.md §31.3 lists `timeout` among the cases the
+        # deterministic webhook exists to make verifiable; this is that
+        # case running.
+        #
+        # `ADMISSIONLAB_KEEP_RUN_ARTIFACTS` stops the test deleting its
+        # scratch run directory, and `TMPDIR` puts that directory
+        # somewhere this job can find it — the test places it under the
+        # OS temp dir. Together they are what makes the failed-run
+        # diagnostics below exist at all; without them a failure here
+        # would leave only the assertion message, and the assertion is
+        # about the contents of files that had already been deleted.
+        env:
+          ADMISSIONLAB_KEEP_RUN_ARTIFACTS: "1"
+          TMPDIR: ${{ runner.temp }}/kind-capture
+        run: |
+          set -euo pipefail
+          mkdir -p "${TMPDIR}"
+          cargo test -p admissionlab-admission --test kind_capture -- --ignored --nocapture
+
+      - name: Collect the captured evidence bundles
+        if: failure()
+        # The raw per-fixture evidence is the whole subject of this test,
+        # so a failure that did not ship it would be a failure you have
+        # to reproduce locally to read. Kubeconfigs are stripped for the
+        # same reason as everywhere else in this workflow.
+        run: |
+          set -euo pipefail
+          mkdir -p nightly-diagnostics
+          cp -R "${RUNNER_TEMP}/kind-capture" nightly-diagnostics/ 2>/dev/null || true
+          find nightly-diagnostics -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nightly-forced-webhook-timeout-diagnostics
+          path: nightly-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  forced-kind-failure:
+    name: Forced kind failure (expect exit 3)
+    runs-on: ubuntu-latest
+    # Nothing here reaches a cluster: the run dies at the first
+    # `kind create cluster`. The build dominates.
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: nightly-forced-kind-failure
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Build admissionlab (release)
+        run: cargo build --release -p admissionlab-cli --bin admissionlab
+
+      - name: Make `kind create cluster` fail, and assert exit 3
+        # The injection point is the `kind` process boundary, which is
+        # where the product's own trust boundary is: Global Constraint 2
+        # says `kind` is invoked as a bounded subprocess rather than
+        # reimplemented, so "kind failed" means exactly "that subprocess
+        # exited non-zero", and a shim that makes it do so is the real
+        # thing rather than a simulation of it.
+        #
+        # A shim rather than a bad node image, because Admission Lab
+        # deliberately gives a user no way to request one: `kubernetes:`
+        # resolves against the digest-pinned
+        # `compatibility/kubernetes.yaml` and never against free text, so
+        # "point kind at a nonexistent digest" is not reachable through
+        # the product's own interface. The shim reproduces what the user
+        # would see if it were — the message is copied from `kind`'s own
+        # failure text for that case.
+        #
+        # Everything except `create cluster` is forwarded to the real
+        # binary, so the prerequisite probe (`kind version`, see
+        # `admissionlab_core::tool`) still passes and the run fails where
+        # it is meant to, not before it starts.
+        run: |
+          set -euo pipefail
+          real_kind="$(command -v kind)"
+          shim_dir="${RUNNER_TEMP}/kind-shim"
+          mkdir -p "${shim_dir}"
+          cat >"${shim_dir}/kind" <<EOF
+          #!/usr/bin/env bash
+          if [ "\$1" = "create" ] && [ "\$2" = "cluster" ]; then
+            echo 'ERROR: failed to create cluster: failed to pull image "kindest/node@sha256:deadbeef": exit status 1' >&2
+            exit 1
+          fi
+          exec "${real_kind}" "\$@"
+          EOF
+          chmod +x "${shim_dir}/kind"
+
+          diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
+          mkdir -p "${diagnostics}"
+          workspace="${RUNNER_TEMP}/kind-failure"
+          reports="${workspace}/reports"
+          mkdir -p "${reports}"
+
+          status=0
+          PATH="${shim_dir}:${PATH}" TMPDIR="${workspace}" \
+            "${GITHUB_WORKSPACE}/target/release/admissionlab" test \
+            examples/admission-basic/admissionlab.yaml \
+            --report-dir "${reports}" \
+            >"${workspace}/console.log" 2>&1 || status=$?
+
+          cp -R "${workspace}" "${diagnostics}/kind-failure" || true
+
+          if [ "${status}" -ne 3 ]; then
+            echo "::error::expected exit 3 (infrastructure failure), got ${status}"
+            cat "${workspace}/console.log" || true
+            exit 1
+          fi
+          # The failure must have reached the user, naming the command
+          # that failed — PRODUCT.md §33's "sufficient diagnostics on
+          # first failure so users do not need to rerun solely to
+          # discover which setup stage failed". A run that dies before
+          # any cluster exists writes no reports (there is nothing to
+          # report on), so the run manifest is the machine-readable
+          # diagnostic and the console is what a human reads. Both are
+          # checked.
+          if ! grep -q "kind create cluster" "${workspace}/console.log"; then
+            echo "::error::the failure message does not name the command that failed"
+            cat "${workspace}/console.log" || true
+            exit 1
+          fi
+          manifest="$(find "${workspace}" -name 'run.json' -type f | head -n 1)"
+          if [ -z "${manifest}" ]; then
+            echo "::error::no run.json was written for a run that failed at cluster creation"
+            find "${workspace}" -type f | sort || true
+            exit 1
+          fi
+          recorded="$(jq -r '"\(.status)/\(.stage)"' "${manifest}")"
+          if [ "${recorded}" != "failed/cluster_creation" ]; then
+            echo "::error::run.json records ${recorded}, expected failed/cluster_creation"
+            cat "${manifest}"
+            exit 1
+          fi
+          echo "forced kind failure: exit 3, run.json records failed/cluster_creation, failure named on the console"
+
+      - name: Strip kubeconfigs from the collected diagnostics
+        if: failure()
+        # Raw run evidence is protected by file permissions, not by the
+        # report redaction pass (`docs/security.md`), and a run workspace
+        # carries per-cluster kubeconfigs at mode 0600. The clusters they
+        # name are deleted by the time anything is uploaded, so these
+        # files are useless to a reader and are simply removed rather
+        # than shipped into an artifact that is easier to hand around
+        # than the workspace ever was.
+        run: |
+          set -euo pipefail
+          find nightly-diagnostics -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nightly-forced-kind-failure-diagnostics
+          path: nightly-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        # Nothing should have been created at all — which is the point.
+        # A `kind create cluster` that fails partway can leave a
+        # half-built node container behind, and this is where that would
+        # show up.
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  forced-artifact-store-failure:
+    name: Forced artifact-store write failure (unit level)
+    runs-on: ubuntu-latest
+    # This is the one forced case whose honest level is a unit test, so
+    # it creates no cluster and is over in seconds. It still installs
+    # `kind`, only so that the trailing leak check can run: the check
+    # refuses to answer at all without `kind` and `docker` present, on
+    # purpose, because "kind is missing" and "there are no clusters"
+    # produce identical output and must not be conflated.
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: nightly-forced-artifact-store-failure
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Force a deterministic artifact-store write failure
+        # ROADMAP Task 5.9 asks for this one "injected through the test
+        # filesystem abstraction", and unit level is the honest level:
+        # `ArtifactStore` is the filesystem abstraction, and there is no
+        # way to make a real lab run's disk fail on cue that would not be
+        # a less controlled version of this.
+        #
+        # `crates/admissionlab-core/tests/artifact.rs` forces both halves
+        # of the atomic-write path with real filesystem states the OS is
+        # required to reject — a destination whose parent is a regular
+        # file (`ENOTDIR`, on the temporary-file create) and a
+        # destination that is an existing directory (`EISDIR`, on the
+        # rename) — and asserts, in each case, the error variant, that it
+        # names the operation and the path, and that nothing was left
+        # behind. Both shapes work identically when the tests run as
+        # `root`, which a mocked permission denial would not.
+        #
+        # Run as a plain `cargo test` here, and also on every commit
+        # through `.github/workflows/ci.yml`'s `cargo test --workspace`.
+        # It is repeated in this suite because the nightly matrix is
+        # meant to be readable as one list of forced failures, and a
+        # missing fourth entry would read as a gap rather than as
+        # coverage that lives elsewhere.
+        run: cargo test -p admissionlab-core --test artifact
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        # Trivially true for this job — it creates none — and kept
+        # anyway: "every job in this workflow ends with the leak check"
+        # is a rule worth more than the seconds saved by carving out an
+        # exception somebody would have to revisit the moment this job
+        # grows a cluster.
+        run: ./scripts/verify-cleanup.sh --check-only
