@@ -61,6 +61,14 @@
 //! The 0-6 contract every command answers with is owned, documented,
 //! and frozen in [`admissionlab_cli::exit`], and reproduced for users in
 //! `docs/troubleshooting.md`.
+//!
+//! A run an operator *interrupts* answers `130` (`SIGINT`) or `143`
+//! (`SIGTERM`) instead — deliberately outside that table, because such a
+//! run reached none of the seven conclusions it assigns. That decision,
+//! and why `128 + signal` rather than an eighth meaning, is argued in
+//! [`admissionlab_cli::exit::code_for_cancellation`]; what the process
+//! does between the signal and the exit is
+//! [`admissionlab_cli::cancel`].
 
 use std::process::ExitCode;
 

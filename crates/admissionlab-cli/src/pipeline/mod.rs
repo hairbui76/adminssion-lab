@@ -88,6 +88,36 @@
 //! forbids, and it is the reason the failure path has its own artifact
 //! shape rather than a half-filled result.
 //!
+//! ## Cancellation stops the next stage, never the current one
+//!
+//! ROADMAP Task 9.6. `crate::cancel` watches `SIGINT`/`SIGTERM` and sets
+//! the [`Cancellation`] this run's backend handed over
+//! ([`LabBackend::cancellation`]); this module reads it at each stage
+//! boundary — before install, before capture, before the behavior
+//! suites, and before the comparison — through [`stop_if_canceled`], and
+//! answers by declining to start the next stage. Nothing is aborted.
+//! Work already running finishes or hits its own bound (Global
+//! Constraint 13 requires every external interaction to have one), which
+//! is the only way a `kind create` in flight can be prevented from
+//! leaking the cluster it is halfway through building.
+//!
+//! Teardown from there is the ordinary path: the boundary returns into
+//! [`run_lab`]'s single route to [`finish`], long-lived children (a
+//! `kubectl port-forward`) have already died with the stage that owned
+//! them, the `diagnostics.json` is written before cleanup exactly as it
+//! is for a failure, and both clusters are deleted unless
+//! `--keep-clusters` asked for them. A canceled run therefore never
+//! states a verdict, and never gets a second cleanup implementation to
+//! keep in sync with the one every other path uses.
+//!
+//! The boundary is a *stage*, not a fixture: the per-fixture loop lives
+//! inside a `FixtureCapture` implementation in another crate
+//! (`admissionlab-admission`), and the handle is not threaded through
+//! that trait. What bounds an already-started capture is what has always
+//! bounded it — each fixture's own timeout — so "in flight" stays
+//! finite; it is not instant, which is what the second interrupt
+//! (`crate::cancel`) is for.
+//!
 //! ## The run manifest is written before anything is provisioned
 //!
 //! ROADMAP Task 5.2. `run.json` is created after every input has been
@@ -179,11 +209,11 @@ use std::time::{Duration, SystemTime};
 
 use admissionlab_admission::AdmissionOutcome;
 use admissionlab_core::{
-    ArtifactStore, ClusterManager, Diagnostic, DoctorReport, InstalledLab, LabRunner, PreparedLab,
-    RedactedValue, ReproductionPin, ResolvedNodeImages, RunDisposition, RunError,
+    ArtifactStore, Cancellation, ClusterManager, Diagnostic, DoctorReport, InstalledLab, LabRunner,
+    PreparedLab, RedactedValue, ReproductionPin, ResolvedNodeImages, RunDisposition, RunError,
     RunManifestWriter, RunOptions, RunPaths, RunStage, Side, StackInstaller, TimedClusterManager,
     TimedFixtureCapture, TimedSideStage, TimedStackInstaller, TimedStage, TimingRecorder,
-    preserved_cluster_report,
+    manual_cluster_deletion_commands, preserved_cluster_report,
 };
 use admissionlab_fixtures::{FixtureSource, discover_fixtures};
 use admissionlab_gateway::GatewayCaseResult;
@@ -398,6 +428,32 @@ pub trait LabBackend: Send + Sync {
     fn reproduction_pin(&self) -> Option<&ReproductionPin> {
         None
     }
+
+    /// The handle this run watches for a cancellation request (ROADMAP
+    /// Task 9.6), and registers its own manual-recovery commands with.
+    ///
+    /// On the backend rather than on [`RunRequest`] for the same reason
+    /// [`Self::reproduction_pin`] is: it describes the *world* the run
+    /// executes in — one where a process can be interrupted — rather
+    /// than something the user asked for on the command line. It also
+    /// keeps every existing construction site of [`RunRequest`]
+    /// untouched, which matters more here than elsewhere: the request is
+    /// built by two commands and half a dozen tests, and a run nobody
+    /// interrupts must behave exactly as it did before.
+    ///
+    /// The default is a handle nothing ever requests, so a backend that
+    /// does not opt in (every fake that does not care, and any future
+    /// caller embedding the pipeline) runs to completion exactly as
+    /// before. `commands::test` and `commands::reproduce` return the
+    /// same handle `cancel::install` watches signals into, which is the
+    /// whole of the wiring.
+    ///
+    /// Returned by value: [`Cancellation`] is an `Arc` inside, so a
+    /// clone is a refcount bump, and returning one rather than a
+    /// borrow lets a backend keep it wherever it likes.
+    fn cancellation(&self) -> Cancellation {
+        Cancellation::new()
+    }
 }
 
 /// Everything the run validated out of the user's own input, before any
@@ -448,6 +504,12 @@ struct Run<'a> {
     request: &'a RunRequest<'a>,
     /// Where every stage's measured duration lands.
     timings: &'a TimingRecorder,
+    /// Whether somebody has asked this run to stop, and the list of
+    /// manual recovery commands a forced exit would print (Task 9.6).
+    /// Read at every stage boundary below; written only by
+    /// [`crate::cancel`] and by [`provision`]/[`finish`], which register
+    /// and retire the cluster deletions.
+    cancel: &'a Cancellation,
 }
 
 /// Where a post-cluster stage puts what it produced.
@@ -491,9 +553,11 @@ pub async fn run_lab<B: LabBackend>(
     // difference between it and the stages' sum is what configuration
     // loading, hashing, and the doctor probe cost.
     let timings = TimingRecorder::start();
+    let cancel = backend.cancellation();
     let run = Run {
         request,
         timings: &timings,
+        cancel: &cancel,
     };
     let mut inputs = match prepare_inputs(request, console) {
         Ok(inputs) => inputs,
@@ -541,6 +605,13 @@ pub async fn run_lab<B: LabBackend>(
             .await;
         }
     };
+
+    // The last boundary before anything is provisioned. A run canceled
+    // here has created nothing, so there is nothing to delete and
+    // nothing to confess: it says what stopped it and ends.
+    if cancel.is_requested() {
+        return canceled_before_provisioning(request, console, &cancel).await;
+    }
 
     // The backend's own cluster manager, wrapped so that each side's
     // `create` and `delete` is measured separately. Both are driven
@@ -775,12 +846,127 @@ async fn provision<C: ClusterManager>(
             return Err(no_verdict(request, console, started, stage, &failure, disposition).await);
         }
     };
+    // Registered the instant both clusters exist, and retired by
+    // `finish` once they are gone: from here until then, a *second*
+    // interrupt exits without unwinding, and this list is the only thing
+    // that can tell the operator what to delete by hand (Task 9.6 step
+    // 4). Registering after the fact rather than before is deliberate —
+    // a `create` that failed has already rolled its own side back, and
+    // printing a delete command for a cluster that never existed sends
+    // somebody looking for a leak that is not there.
+    for command in manual_cluster_deletion_commands(&prepared) {
+        run.cancel.register_cleanup_command(command);
+    }
     console.say(&format!(
         "created baseline cluster {:?} and candidate cluster {:?}.",
         prepared.baseline.spec.name, prepared.candidate.spec.name
     ));
     record_stage(&mut manifest, RunStage::ClusterCreation, |_| {}, console).await;
     Ok((prepared, manifest))
+}
+
+/// The `stage` label every canceled run's `diagnostics.json` and job
+/// summary carry.
+///
+/// One label for every boundary rather than the name of whichever stage
+/// was next, because the stage is not what went wrong: nothing failed,
+/// somebody stopped the run. *Which* boundary it stopped at is in the
+/// failure sentence beside it, where a reader looking for "how far did
+/// this get" will actually read it.
+const CANCELED_STAGE: &str = "canceled";
+
+/// Ends a run that was asked to stop at the boundary before `next`.
+///
+/// Called only when `run.cancel.is_requested()` already said so — the
+/// check is at the call site so that a run nobody interrupted pays one
+/// atomic load per stage and nothing else.
+///
+/// Everything a canceled run owes anybody happens here: it says what
+/// stopped it, writes the `diagnostics.json` naming the interruption and
+/// the boundary it stopped at, and hands back the canceled disposition.
+/// It writes no `result.json` and touches no verdict, because a run that
+/// stopped before its comparison has none; and it does not mark a
+/// manifest stage *failed*, because none did. `run.json` is left exactly
+/// as it is, which already says what happened: its last recorded stage
+/// is the last one that completed, and its status stays `in_progress`
+/// because nothing completed this run.
+///
+/// Cleanup is deliberately not done here. The caller returns straight
+/// into [`run_lab`]'s single path to [`finish`], which deletes both
+/// clusters (or prints them for `--keep-clusters`) exactly as it does on
+/// every other path — see this module's "Cancellation" section for why a
+/// separate teardown for this case would be a second implementation to
+/// keep in sync with the one that matters.
+async fn canceled(
+    run: &Run<'_>,
+    console: &mut Console<'_>,
+    prepared: &PreparedLab,
+    outputs: &Outputs<'_>,
+    next: &str,
+    diagnostics: &[Diagnostic],
+) -> RunDisposition {
+    let cause = cancellation_cause(run.cancel);
+    console.problem(&format!(
+        "canceled by {cause}: not starting the {next} stage. Tearing down."
+    ));
+    let failure = format!(
+        "interrupted by {cause} before the {next} stage; this run stopped without comparing \
+         baseline and candidate, so it states no verdict"
+    );
+    write_failure(
+        outputs,
+        prepared,
+        CANCELED_STAGE,
+        &failure,
+        diagnostics.to_vec(),
+        console,
+    )
+    .await;
+    crate::exit::CANCELED_DISPOSITION
+}
+
+/// How a message should name whatever asked this run to stop.
+///
+/// The signal is `Some` for every caller here: a boundary only asks
+/// after `Cancellation::is_requested` said yes, and a request records
+/// its signal before it becomes visible as one. The fallback wording
+/// exists so that stays true without an `expect` — a panic on the
+/// teardown path would cost the operator the very cleanup these
+/// functions exist to reach, in exchange for a message.
+fn cancellation_cause(cancel: &Cancellation) -> String {
+    cancel.signal().map_or_else(
+        || "a cancellation request".to_owned(),
+        |signal| signal.to_string(),
+    )
+}
+
+/// Ends a run canceled before anything was provisioned.
+///
+/// Separate from [`canceled`] because it has strictly less to say and
+/// nowhere to say it: with no cluster there is no run workspace, so
+/// there is no report directory to write a `diagnostics.json` into and
+/// nothing to tear down. What it can still write is the job summary,
+/// which is written on every path out of this module (see "The job
+/// summary is written whatever happens").
+async fn canceled_before_provisioning(
+    request: &RunRequest<'_>,
+    console: &mut Console<'_>,
+    cancel: &Cancellation,
+) -> RunDisposition {
+    let cause = cancellation_cause(cancel);
+    console.problem(&format!(
+        "canceled by {cause} before any cluster was created; nothing was provisioned."
+    ));
+    let failure = format!("interrupted by {cause} before any cluster was created");
+    no_verdict(
+        request,
+        console,
+        None,
+        CANCELED_STAGE,
+        &failure,
+        crate::exit::CANCELED_DISPOSITION,
+    )
+    .await
 }
 
 /// Writes the no-verdict job summary for a run that is ending without
@@ -1173,6 +1359,46 @@ fn report_cluster_failure(error: &RunError, console: &mut Console<'_>) -> RunDis
 /// Split out from [`run_lab`] purely so cleanup cannot be skipped by an
 /// early return: this function may return from anywhere, and its caller
 /// always runs [`finish`] afterwards.
+/// Resolves and creates the directory this run's reports go in, or
+/// reports the failure and ends the run.
+///
+/// Called before anything that can fail, so every later stage has
+/// somewhere to write its evidence — and split out of
+/// [`run_with_clusters`] for the same reason each stage below it is: it
+/// is one step with its own failure handling, and inline it pushed the
+/// function that lists the stages past the point where it reads as a
+/// list of them.
+///
+/// Recorded as a `reporting` failure when it fails: preparing where the
+/// reports go is the reporting stage's first act, even though it happens
+/// this early.
+async fn report_directory(
+    request: &RunRequest<'_>,
+    console: &mut Console<'_>,
+    prepared: &PreparedLab,
+    manifest: &mut RunManifestWriter,
+) -> Result<PathBuf, RunDisposition> {
+    match resolve_report_dir(request, prepared).await {
+        Ok(directory) => Ok(directory),
+        Err(error) => {
+            console.problem(&format!("failed to prepare the report directory: {error}"));
+            record_stage_failure(manifest, RunStage::Reporting, console).await;
+            let started = Some(prepared.run_id.as_str());
+            let failure = error.to_string();
+            let disposition = RunDisposition::InfrastructureFailed;
+            Err(no_verdict(
+                request,
+                console,
+                started,
+                "reporting",
+                &failure,
+                disposition,
+            )
+            .await)
+        }
+    }
+}
+
 async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
     backend: &B,
     run: &Run<'_>,
@@ -1183,29 +1409,9 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
     manifest: &mut RunManifestWriter,
 ) -> RunDisposition {
     let request = run.request;
-    // Resolved before anything can fail, so every later stage has
-    // somewhere to write its evidence. Recorded as a `reporting` failure
-    // when it fails: preparing where the reports go is the reporting
-    // stage's first act, even though it happens early for the reason
-    // above.
-    let report_dir = match resolve_report_dir(request, prepared).await {
+    let report_dir = match report_directory(request, console, prepared, manifest).await {
         Ok(directory) => directory,
-        Err(error) => {
-            console.problem(&format!("failed to prepare the report directory: {error}"));
-            record_stage_failure(manifest, RunStage::Reporting, console).await;
-            let started = Some(prepared.run_id.as_str());
-            let failure = error.to_string();
-            let disposition = RunDisposition::InfrastructureFailed;
-            return no_verdict(
-                request,
-                console,
-                started,
-                "reporting",
-                &failure,
-                disposition,
-            )
-            .await;
-        }
+        Err(disposition) => return disposition,
     };
     let mut outputs = Outputs {
         report_dir,
@@ -1213,6 +1419,13 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
         manifest,
         timings: run.timings,
     };
+
+    // Nothing is installed yet, so the certification warnings are the
+    // only thing a run canceled here has observed.
+    let observed = &inputs.certification;
+    if run.cancel.is_requested() {
+        return canceled(run, console, prepared, &outputs, "install", observed).await;
+    }
 
     let stacks = match install_both_stacks(
         backend,
@@ -1246,6 +1459,9 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
     // fixture.
     let mut diagnostics = inputs.certification.clone();
     diagnostics.extend(install_diagnostics(&stacks));
+    if run.cancel.is_requested() {
+        return canceled(run, console, prepared, &outputs, "capture", &diagnostics).await;
+    }
     let captured = {
         let _stage = run.timings.stage(TimedStage::FixtureCapture);
         runner.capture_fixtures(prepared, &capture).await
@@ -1275,6 +1491,10 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
     ));
     record_stage(outputs.manifest, RunStage::FixtureCapture, |_| {}, console).await;
 
+    if run.cancel.is_requested() {
+        return canceled(run, console, prepared, &outputs, "behavior", &diagnostics).await;
+    }
+
     let (gateway, migration) =
         match run_behavior_suites(backend, run, console, inputs, prepared, &mut outputs).await {
             Ok(observed) => observed,
@@ -1282,6 +1502,15 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
         };
     diagnostics.extend(gateway.diagnostics.iter().cloned());
     diagnostics.extend(migration.diagnostics.iter().cloned());
+
+    // The last boundary, and the one that matters most: everything above
+    // is evidence-gathering, and everything below states a verdict. A
+    // run interrupted after its evidence exists still must not grade it
+    // -- an interrupted corpus is a partial one, and a comparison over
+    // part of a corpus is not the comparison the user asked for.
+    if run.cancel.is_requested() {
+        return canceled(run, console, prepared, &outputs, "comparison", &diagnostics).await;
+    }
 
     compare_and_report(
         console,
@@ -1834,6 +2063,12 @@ async fn finish<C: ClusterManager>(
         runner.cleanup(prepared).await
     };
     if diagnostics.is_empty() {
+        // Both clusters are gone, so the delete commands `provision`
+        // registered describe nothing: a forced exit from here on must
+        // not print them, which would read as a leak that is not there
+        // (Task 9.6). A *failed* cleanup below keeps them registered,
+        // for the opposite and equally literal reason.
+        run.cancel.clear_cleanup_commands();
         console.say("baseline and candidate clusters deleted.");
         return disposition;
     }

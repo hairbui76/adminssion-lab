@@ -13,6 +13,11 @@
 //!    ([`code_for_disposition`]), reusing the enum's own discriminant so
 //!    the frozen 0–6 numbering (ROADMAP §0.4) is never re-derived.
 //!
+//! A third mapping sits deliberately *outside* both:
+//! [`code_for_cancellation`] answers `130`/`143` for a run an operator
+//! interrupted, because such a run reached none of the seven meanings
+//! the frozen table assigns. Its own documentation argues the case.
+//!
 //! This is the one module in the workspace that can see all of those
 //! error types at once — `admissionlab-core` cannot name
 //! `admissionlab_policy::PolicySpecErrors` or
@@ -60,7 +65,8 @@
 use std::process::ExitCode;
 
 use admissionlab_core::{
-    ArtifactError, DoctorReport, ReproduceError, RunDisposition, RunError, StackInstallFailure,
+    ArtifactError, CancelSignal, DoctorReport, ReproduceError, RunDisposition, RunError,
+    StackInstallFailure,
 };
 use admissionlab_fixtures::FixtureError;
 use admissionlab_normalize::{NormalizeError, RuleTier};
@@ -80,6 +86,91 @@ use admissionlab_spec::SpecError;
 pub fn code_for_disposition(disposition: RunDisposition) -> ExitCode {
     ExitCode::from(disposition as u8)
 }
+
+/// The process exit code a run canceled by `signal` returns: `130` for
+/// `SIGINT`, `143` for `SIGTERM` (ROADMAP Task 9.6).
+///
+/// # Why this is not one of the frozen seven
+///
+/// ROADMAP §0.4 fixed `0`-`6`, and Task 9.2 froze them: each states
+/// something definite about a run that reached its own conclusion —
+/// it passed, its policy failed, its input was invalid, its
+/// infrastructure or its install or its capture failed, or Admission Lab
+/// itself is broken. A run somebody interrupted established none of
+/// those. Answering `3` would report an infrastructure failure that did
+/// not happen, `6` an Admission Lab bug that does not exist, and `0` a
+/// pass that was never computed. Adding a seventh meaning to the frozen
+/// table was the other option, and it is worse: the table is a published
+/// contract with a promise that its meanings will not be reassigned.
+///
+/// `128 + signal number` is what every Unix shell already reports for a
+/// process that *died* of a signal, so a script that treats `130` as
+/// "the operator stopped this" is reading a convention it already knows
+/// rather than an Admission Lab invention — and a gate written the
+/// ordinary way (`exit code != 0` fails) keeps working untouched. This
+/// is additive and frozen in exactly the same sense the seven are: `130`
+/// and `143` now mean "canceled, no verdict" and will not be reassigned.
+/// [`admissionlab_core::CancelSignal::exit_code`] owns the numbers, so
+/// they are stated once, and `docs/troubleshooting.md` publishes them
+/// beside the table.
+///
+/// A canceled run reaches this *instead of*
+/// [`code_for_disposition`] — never in addition to it. The disposition
+/// such a run returns from `pipeline::run_lab` is
+/// [`CANCELED_DISPOSITION`], which exists only so a caller that ignores
+/// cancellation entirely still cannot read a canceled run as a pass.
+#[must_use]
+pub fn code_for_cancellation(signal: CancelSignal) -> ExitCode {
+    ExitCode::from(signal.exit_code())
+}
+
+/// The code the process returns for a run that ended with `disposition`
+/// while `canceled_by` says whether anything asked it to stop.
+///
+/// One function because the interaction between the two is a rule, not a
+/// preference, and it has exactly one place to live:
+///
+/// - **A run that reached a verdict reports the verdict**, even if a
+///   signal arrived afterwards. `pipeline::run_lab` refuses to grade a
+///   run canceled before its comparison, so a [`RunDisposition::Passed`]
+///   or [`RunDisposition::PolicyFailed`] here means the comparison
+///   happened, the reports are on disk, and cleanup finished — the
+///   signal landed in the seconds after all of that. Answering `130`
+///   there would tell a CI gate to discard a comparison that really was
+///   performed and really is readable.
+/// - **Otherwise a canceled run reports the cancellation** — `130`/`143`
+///   (see [`code_for_cancellation`]) — rather than the fallback
+///   disposition the pipeline returned.
+/// - **Otherwise the disposition decides**, exactly as it always has.
+#[must_use]
+pub fn code_for_run(disposition: RunDisposition, canceled_by: Option<CancelSignal>) -> ExitCode {
+    let reached_verdict = matches!(
+        disposition,
+        RunDisposition::Passed | RunDisposition::PolicyFailed
+    );
+    match canceled_by {
+        Some(signal) if !reached_verdict => code_for_cancellation(signal),
+        _ => code_for_disposition(disposition),
+    }
+}
+
+/// What `pipeline::run_lab` returns for a run that stopped because it was
+/// canceled.
+///
+/// Not a verdict, and not the code the process actually answers with:
+/// `commands::test` and `commands::reproduce` both consult the
+/// [`Cancellation`] handle first and return
+/// [`code_for_cancellation`]'s `130`/`143`. This value is the fallback
+/// for a caller that does not — a future command, or a test driving
+/// `run_lab` directly — and it is
+/// [`RunDisposition::InfrastructureFailed`] because that is the most
+/// conservative "this run produced no verdict" answer inside the frozen
+/// table: whatever else is true of an interrupted run, it did not pass
+/// and its policy did not fail, so the two codes a CI gate reads as
+/// *results* are exactly the two it must never be.
+///
+/// [`Cancellation`]: admissionlab_core::Cancellation
+pub const CANCELED_DISPOSITION: RunDisposition = RunDisposition::InfrastructureFailed;
 
 /// A configuration that failed to load, parse, or resolve.
 ///

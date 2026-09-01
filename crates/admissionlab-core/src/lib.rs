@@ -37,10 +37,11 @@ pub use reproduce::{
     verify_effective_digests, verify_fixtures,
 };
 pub use run::{
-    CapturedFixture, CapturedLab, ClusterCreationFailure, FixtureCapture, FixtureCaptureError,
-    FixtureCaptureFailure, InstalledComponent, InstalledLab, LabRunner, PreparedLab,
-    ResolvedNodeImages, RunError, RunOptions, SideCapture, SideInstall, StackInstallError,
-    StackInstallFailure, StackInstaller, preserved_cluster_report,
+    CancelSignal, Cancellation, CapturedFixture, CapturedLab, ClusterCreationFailure,
+    FixtureCapture, FixtureCaptureError, FixtureCaptureFailure, InstalledComponent, InstalledLab,
+    LabRunner, PreparedLab, ResolvedNodeImages, RunError, RunOptions, SideCapture, SideInstall,
+    StackInstallError, StackInstallFailure, StackInstaller, manual_cluster_deletion_commands,
+    preserved_cluster_report,
 };
 pub use run_manifest::{
     ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, GatewayProvenance,

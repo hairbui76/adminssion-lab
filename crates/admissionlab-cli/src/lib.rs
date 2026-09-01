@@ -12,6 +12,9 @@
 //! shell would; `tests/test_command.rs` exercises the pipeline's
 //! decisions without needing Docker.
 //!
+//! - [`cancel`] holds the `SIGINT`/`SIGTERM` watch and the one decision
+//!   it makes: the first signal cancels the run cooperatively, the
+//!   second abandons it and prints what is left running.
 //! - [`commands`] holds one module per subcommand (`doctor`, `test`,
 //!   `reproduce`): argument parsing, the production backends, and
 //!   terminal wording.
@@ -24,6 +27,7 @@
 //!   every disposition to a process exit code.
 //! - [`output`] holds `tracing` subscriber initialization.
 
+pub mod cancel;
 pub mod commands;
 pub mod exit;
 pub mod output;

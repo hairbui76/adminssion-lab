@@ -9,6 +9,7 @@
 # Usage:
 #   ./scripts/verify-cleanup.sh <iterations>
 #   ./scripts/verify-cleanup.sh --check-only
+#   ./scripts/verify-cleanup.sh --after-interrupt
 #
 # `--check-only` runs no cluster lifecycle at all: it asserts, once, that
 # no `adlab-*` cluster is present right now, and exits. It exists so that
@@ -27,6 +28,27 @@
 # best-effort delete, because there the leak is one matrix entry's and
 # the runner VM is shared with nothing; a nightly job that fails here
 # should be diagnosable.)
+#
+# `--after-interrupt` is the deliberate opposite of `--check-only`, and it
+# exists for exactly one path: a run an operator interrupted *twice*.
+# `admissionlab` cancels cooperatively on the first `SIGINT`/`SIGTERM` and
+# tears everything down itself; a second one is the operator saying they
+# are not waiting, and the process exits without unwinding, printing the
+# `kind delete cluster` commands for whatever it is abandoning (ROADMAP
+# Task 9.6). So after a forced exit a surviving cluster is *expected*
+# rather than a leak, "assert nothing is there" is the wrong question, and
+# preserving the evidence would only leave a container running.
+#
+# This mode therefore sweeps: it lists every surviving `adlab-*` cluster,
+# deletes each one, and says what it removed (or that there was nothing).
+# It exits 0 whether or not it found anything — finding a cluster is not a
+# failure here — and non-zero only if a delete itself failed, which is the
+# one case where a human still has work to do.
+#
+# It is NOT a substitute for `--check-only` anywhere else. A normal or
+# failed or singly-interrupted run leaking a cluster is a real defect, and
+# sweeping one away silently is precisely how such a defect stays
+# undiscovered.
 #
 # For normal CI cost, run 10 iterations on PR/release candidates and 100
 # iterations manually/nightly before Public Alpha. Measured on the
@@ -69,6 +91,7 @@ readonly NODE_IMAGE="kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aa
 usage() {
   echo "usage: $0 <iterations>" >&2
   echo "       $0 --check-only" >&2
+  echo "       $0 --after-interrupt" >&2
 }
 
 if [ "$#" -ne 1 ]; then
@@ -82,9 +105,12 @@ fi
 # below, so that `--check-only` never has to survive being parsed as an
 # integer.
 check_only=false
+after_interrupt=false
 iterations=0
 if [ "$1" = "--check-only" ]; then
   check_only=true
+elif [ "$1" = "--after-interrupt" ]; then
+  after_interrupt=true
 else
   iterations="$1"
 
@@ -102,6 +128,7 @@ else
   fi
 fi
 readonly check_only
+readonly after_interrupt
 readonly iterations
 
 # `docker` is required by both modes even though `--check-only` never
@@ -174,10 +201,99 @@ assert_no_leaked_clusters() {
   fi
 }
 
+# How hard the sweep tries to delete one cluster, and how long it waits
+# between attempts.
+#
+# Retries are not defensive padding here, they are the actual shape of
+# this situation: the forced exit this mode cleans up after can land in
+# the middle of the run's own `kind delete`, leaving the Docker daemon
+# still removing a node container. `kind delete` on that cluster fails
+# with "removal of container ... is already in progress" until the daemon
+# finishes, which takes seconds. Half a minute of attempts covers that
+# comfortably; a single attempt fails a sweep for a cluster that was
+# already on its way out.
+readonly SWEEP_ATTEMPTS=6
+readonly SWEEP_RETRY_SECONDS=5
+
+# Whether `kind` still reports a cluster named `$1`.
+cluster_is_present() {
+  fetch_clusters | grep -Fxq -- "$1"
+}
+
+# Deletes one cluster, tolerating a removal that was already in flight.
+# Returns non-zero only if the cluster is still there when the attempts
+# run out — "somebody else deleted it" is a deleted cluster.
+delete_cluster_with_retries() {
+  local name="$1"
+  local attempt=1
+
+  while [ "${attempt}" -le "${SWEEP_ATTEMPTS}" ]; do
+    if kind delete cluster --name "${name}"; then
+      echo "verify-cleanup: deleted '${name}'"
+      return 0
+    fi
+    if ! cluster_is_present "${name}"; then
+      echo "verify-cleanup: '${name}' is gone; its removal was already in flight"
+      return 0
+    fi
+    echo "verify-cleanup: '${name}' did not delete (attempt ${attempt}/${SWEEP_ATTEMPTS}); retrying in ${SWEEP_RETRY_SECONDS}s" >&2
+    sleep "${SWEEP_RETRY_SECONDS}"
+    attempt=$(( attempt + 1 ))
+  done
+
+  if cluster_is_present "${name}"; then
+    return 1
+  fi
+  echo "verify-cleanup: '${name}' is gone after ${SWEEP_ATTEMPTS} attempt(s)"
+  return 0
+}
+
+# Deletes every surviving `adlab-*` cluster and reports what it removed.
+# See this script's header for why this mode deletes what `--check-only`
+# deliberately preserves, and why finding a cluster here is not a failure.
+sweep_after_interrupt() {
+  local cluster_list
+  local survivors
+  local failed=0
+
+  cluster_list="$(fetch_clusters)"
+  survivors="$(printf '%s\n' "${cluster_list}" | grep '^adlab-' || true)"
+  if [ -z "${survivors}" ]; then
+    echo "verify-cleanup: PASS — no adlab-* cluster survived the interrupt; nothing to sweep"
+    exit 0
+  fi
+
+  echo "verify-cleanup: sweeping cluster(s) left by an interrupted run:"
+  printf '%s\n' "${survivors}" | sed 's/^/  /'
+  while IFS= read -r cluster_name; do
+    [ -n "${cluster_name}" ] || continue
+    if ! delete_cluster_with_retries "${cluster_name}"; then
+      echo "verify-cleanup: could not delete '${cluster_name}'" >&2
+      failed=1
+    fi
+  done <<EOF
+${survivors}
+EOF
+
+  if [ "${failed}" -ne 0 ]; then
+    fail "at least one adlab-* cluster could not be deleted; delete it by hand"
+  fi
+  # Re-checked rather than assumed: a delete that reported success and
+  # left the cluster present is the one outcome a sweep must not paper
+  # over.
+  assert_no_leaked_clusters "after sweeping an interrupted run"
+  echo "verify-cleanup: PASS — swept every adlab-* cluster left by the interrupted run"
+  exit 0
+}
+
 if [ "${check_only}" = "true" ]; then
   assert_no_leaked_clusters "right now"
   echo "verify-cleanup: PASS — no adlab-* cluster is present"
   exit 0
+fi
+
+if [ "${after_interrupt}" = "true" ]; then
+  sweep_after_interrupt
 fi
 
 echo "verify-cleanup: starting ${iterations} iteration(s), node image ${NODE_IMAGE}"

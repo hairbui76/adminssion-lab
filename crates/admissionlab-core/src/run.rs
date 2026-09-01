@@ -234,10 +234,40 @@
 //!   code) lives in `admissionlab-cli`'s `exit` module, where every one
 //!   of those error types is nameable at once.
 
+//! # Cancellation is cooperative (Task 9.6)
+//!
+//! [`Cancellation`] and [`CancelSignal`] live here, beside the lifecycle
+//! they interrupt, for the same reason [`ClusterManager`] does: this
+//! crate hosts [`LabRunner`], so it must be able to name whatever type
+//! decides that a run stops early, and a type living in a crate that
+//! depends on `admissionlab-core` could not be named from here. Nothing
+//! in this crate *watches* for a signal — that is
+//! `admissionlab-cli`'s `cancel` module, which is where a process's
+//! `tokio::signal` handlers and its `main` belong.
+//!
+//! The contract itself is two sentences. A cancellation request never
+//! aborts anything: it stops the *next* stage from starting, and work
+//! already in flight finishes or hits its own bound. And a canceled run
+//! never reports a verdict it did not reach — it writes what it
+//! observed, names the interruption, and exits with a code that is
+//! deliberately outside the frozen verdict table
+//! ([`CancelSignal::exit_code`]).
+//!
+//! Teardown after a cancellation is the ordinary teardown, in the
+//! ordinary order, for the ordinary reason: long-lived children die with
+//! the stages that own them, then the reports are flushed, then
+//! [`LabRunner::cleanup`] deletes both clusters unless the run was asked
+//! to keep them. A run that stops early is exactly the case PRODUCT.md
+//! §33's "no leaked cluster" promise is about, so the cancellation path
+//! does not get its own cleanup implementation to keep in sync with this
+//! one — it reaches the same [`LabRunner::cleanup`] call every other
+//! path does.
+
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, SystemTime};
 
 use admissionlab_spec::{ResolvedComponent, ResolvedLab};
@@ -1206,4 +1236,214 @@ impl<C: ClusterManager> LabRunner<C> {
             }),
         }
     }
+}
+
+// =========================================================================
+// Cooperative cancellation (Task 9.6). See this module's documentation
+// ("Cancellation is cooperative") for the contract this type carries and
+// for why it lives here rather than in `admissionlab-cli`.
+// =========================================================================
+
+/// The signal that asked a run to stop.
+///
+/// Two, and only two, because those are the two a lab run can be asked
+/// to stop by in practice: a terminal's Ctrl-C and a `kill`/CI-job
+/// cancellation/container stop. Anything else (`SIGKILL`, a lost
+/// machine) cannot be observed by the process at all, which is why
+/// `run.json` is written before a cluster exists and left
+/// [`crate::RunStatus::InProgress`] until a run completes — that, not
+/// this type, is what makes an unobservable death diagnosable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CancelSignal {
+    /// `SIGINT`: a terminal's Ctrl-C.
+    Interrupt,
+    /// `SIGTERM`: `kill`, a canceled CI job, a stopped container.
+    Terminate,
+}
+
+impl CancelSignal {
+    /// The signal's conventional name, as a message should spell it.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Interrupt => "SIGINT",
+            Self::Terminate => "SIGTERM",
+        }
+    }
+
+    /// The process exit code a run canceled by this signal returns:
+    /// `128 + the signal number`, which is `130` for `SIGINT` and `143`
+    /// for `SIGTERM`.
+    ///
+    /// That is the Unix convention every shell already reports for a
+    /// process that *died* of the signal, and mirroring it is what makes
+    /// a cooperatively canceled run indistinguishable — to a CI gate, a
+    /// `$?` check, or a person — from the same run killed outright. It
+    /// deliberately lands outside the frozen 0-6 table (ROADMAP §0.4):
+    /// every one of those codes states something about a run that
+    /// reached its own conclusion, and a canceled run reached none of
+    /// them. `admissionlab-cli`'s `exit` module documents the decision
+    /// in full, and `docs/troubleshooting.md` publishes it.
+    #[must_use]
+    pub const fn exit_code(self) -> u8 {
+        match self {
+            Self::Interrupt => 130,
+            Self::Terminate => 143,
+        }
+    }
+}
+
+impl fmt::Display for CancelSignal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// A shared, cheaply cloned handle carrying everything an interrupted
+/// run needs to know: whether a stop has been asked for, which signal
+/// asked, how many times, and what an operator would have to run by hand
+/// if this process is killed before its own teardown finishes.
+///
+/// # Cooperative, never abortive
+///
+/// Requesting cancellation cancels *nothing* by itself. It sets a flag
+/// that whoever is driving the run reads at its own stage boundaries and
+/// answers by declining to start the next stage. Work already in flight
+/// runs to its own completion or its own timeout — every external
+/// interaction Admission Lab starts is already bounded (Global
+/// Constraint 13), so "in flight" is never "forever", and dropping a
+/// future mid-`kind create` is exactly how a cluster gets leaked (the
+/// same argument this module's `tokio::join!`-never-`try_join!` section
+/// makes about the failure path).
+///
+/// # Why the manual-cleanup list is part of this and not a second type
+///
+/// The list exists for one situation and one only: a *second* interrupt,
+/// where the operator has said they are not waiting for teardown and the
+/// process exits without unwinding. Whatever prints that list is the
+/// same code path that observes the second signal, so keeping the two
+/// halves in one handle is what makes it impossible to wire up the
+/// signal watch and forget the confession.
+///
+/// Only resources with **stable names** are ever registered here — in
+/// practice the `kind delete cluster --name <name>` for each side (see
+/// [`manual_cluster_deletion_commands`]). A process id is deliberately
+/// never registered: pids are reused, so a `kill -- -<pid>` line printed
+/// for a child that has since exited could name an unrelated process
+/// group by the time somebody pastes it, and a recovery instruction that
+/// can kill the wrong thing is worse than none. A `kubectl port-forward`
+/// child that was live at a forced exit is left to
+/// [`crate::process::ManagedChild`]'s own `Drop` warning (which prints
+/// the pid at the moment it is still valid) and, failing that, to the
+/// deletion of the cluster it is forwarding into.
+#[derive(Debug, Clone, Default)]
+pub struct Cancellation {
+    state: Arc<CancellationState>,
+}
+
+/// [`Cancellation`]'s shared interior.
+#[derive(Debug, Default)]
+struct CancellationState {
+    /// How many times a stop has been asked for. `0` is a run nobody has
+    /// interrupted; `1` is cooperative cancellation; `2` or more is the
+    /// operator saying they are not waiting.
+    requests: AtomicUsize,
+    /// The signal behind the *first* request, which is the one whose
+    /// exit code the run answers with. A later `SIGTERM` after a
+    /// `SIGINT` does not rewrite what stopped the run.
+    signal: Mutex<Option<CancelSignal>>,
+    /// Manual recovery commands, in registration order.
+    cleanup_commands: Mutex<Vec<String>>,
+}
+
+impl Cancellation {
+    /// A handle for a run nobody has interrupted.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records that `signal` asked this run to stop, and returns how
+    /// many requests have now been made — `1` for the first, `2` or more
+    /// for a repeat.
+    ///
+    /// The count, not a second flag, is what distinguishes "stop
+    /// cleanly" from "stop now": a caller watching signals decides
+    /// between cooperative cancellation and a forced exit purely from
+    /// this return value, so the two cannot drift apart or be observed
+    /// in the wrong order.
+    #[must_use = "the request count is what tells a cooperative cancellation from a forced exit"]
+    pub fn request(&self, signal: CancelSignal) -> usize {
+        let mut recorded = lock(&self.state.signal);
+        if recorded.is_none() {
+            *recorded = Some(signal);
+        }
+        drop(recorded);
+        self.state.requests.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Whether a stop has been asked for at all.
+    #[must_use]
+    pub fn is_requested(&self) -> bool {
+        self.state.requests.load(Ordering::SeqCst) > 0
+    }
+
+    /// The signal behind the first request, or `None` if this run has
+    /// not been interrupted.
+    #[must_use]
+    pub fn signal(&self) -> Option<CancelSignal> {
+        *lock(&self.state.signal)
+    }
+
+    /// Registers a command an operator would have to run by hand if this
+    /// process died right now. See this type's documentation for what
+    /// may be registered and what deliberately may not.
+    pub fn register_cleanup_command(&self, command: impl Into<String>) {
+        lock(&self.state.cleanup_commands).push(command.into());
+    }
+
+    /// Every registered command, in registration order.
+    #[must_use]
+    pub fn pending_cleanup_commands(&self) -> Vec<String> {
+        lock(&self.state.cleanup_commands).clone()
+    }
+
+    /// Forgets every registered command, because the resources they
+    /// describe are gone.
+    ///
+    /// Called by whoever completed teardown successfully: a forced exit
+    /// that happens *after* the clusters were deleted must not print
+    /// delete commands for clusters that no longer exist, which reads as
+    /// a leak that is not there.
+    pub fn clear_cleanup_commands(&self) {
+        lock(&self.state.cleanup_commands).clear();
+    }
+}
+
+/// Locks `mutex`, recovering rather than propagating a poisoned lock.
+///
+/// Every critical section behind this function is a field read, a field
+/// write, or a `Vec` push — none of them can leave the value meaningfully
+/// inconsistent, and a panic elsewhere in the process must not be turned
+/// into a *second* panic inside a signal watch whose entire job is to
+/// tell an operator what is still running.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The exact commands that delete `prepared`'s two clusters by hand.
+///
+/// One per side, in baseline-then-candidate order, spelled identically to
+/// the `kind delete cluster --name <name>` line
+/// [`preserved_cluster_report`] and [`delete_failure_diagnostic`] already
+/// print — an operator must never see two different remedies for one
+/// cluster, which is the same rule
+/// [`crate::process::manual_termination_command`] exists to enforce for a
+/// leaked child process.
+#[must_use]
+pub fn manual_cluster_deletion_commands(prepared: &PreparedLab) -> Vec<String> {
+    [&prepared.baseline, &prepared.candidate]
+        .into_iter()
+        .map(|handle| format!("kind delete cluster --name {}", handle.spec.name))
+        .collect()
 }

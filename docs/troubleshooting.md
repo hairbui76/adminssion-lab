@@ -22,6 +22,7 @@ RUST_LOG=debug admissionlab test admissionlab.yaml   # RUST_LOG always wins over
 - [Results that look wrong](#results-that-look-wrong)
 - [The Gateway suite](#the-gateway-suite)
 - [Keeping clusters and cleaning up by hand](#keeping-clusters-and-cleaning-up-by-hand)
+- [You interrupted a run](#you-interrupted-a-run)
 - [Where the evidence lives](#where-the-evidence-lives)
 - [The forced-failure catalog](#the-forced-failure-catalog)
 
@@ -29,9 +30,10 @@ RUST_LOG=debug admissionlab test admissionlab.yaml   # RUST_LOG always wins over
 
 ## Exit code quick reference
 
-**This table is frozen for v1.** Every `admissionlab` command answers with one
-of these seven codes and no others, the meanings will not be reassigned, and no
-eighth code will be added. Write your CI gate against it.
+**This table is frozen for v1.** Every run that reaches its own conclusion
+answers with one of these seven codes and no others, the meanings will not be
+reassigned, and no eighth verdict code will be added. Write your CI gate
+against it.
 
 | Code | Meaning |
 | ---: | --- |
@@ -42,6 +44,22 @@ eighth code will be added. Write your CI gate against it.
 | `4` | Installation or readiness failure. |
 | `5` | Fixture execution or capture failure. |
 | `6` | Internal Admission Lab error — please report it. |
+
+A run **you** stopped reaches none of those conclusions, and says so with the
+Unix convention instead — `128 + the signal number`, outside the table on
+purpose and frozen in the same way:
+
+| Code | Meaning |
+| ---: | --- |
+| `130` | Canceled by `SIGINT` (Ctrl-C). No verdict. |
+| `143` | Canceled by `SIGTERM` (`kill`, a canceled CI job, a stopped container). No verdict. |
+
+Reporting `3` there would claim an infrastructure failure that did not happen,
+and `0` a pass that was never computed; every shell already reports `130`/`143`
+for a process that *died* of those signals, so a gate reading them is reading a
+convention it already knows. A gate written the ordinary way (non-zero fails)
+needs no change. See [You interrupted a run](#you-interrupted-a-run) for what
+the process does between the signal and the exit.
 
 Everything in the `2` class is checked **before any cluster is created**, so
 those failures are fast and cost nothing.
@@ -553,6 +571,48 @@ kubectl get pods -A
 kubectl get validatingwebhookconfigurations,mutatingwebhookconfigurations
 kubectl logs -n kyverno deploy/kyverno-admission-controller
 ```
+
+### You interrupted a run
+
+Ctrl-C (or `SIGTERM`) cancels **cooperatively**. Admission Lab does not abandon
+what it is doing mid-flight — that is how a half-created `kind` cluster gets
+leaked — it declines to start the next stage and tears down what exists:
+
+1. whatever is already running finishes or hits its own timeout, and the
+   long-lived children it owns (a `kubectl port-forward`) die with it;
+2. `diagnostics.json` is written, naming the interruption and the stage the run
+   stopped before. No `result.json`: an interrupted run compared nothing, so it
+   states no verdict;
+3. both clusters are deleted — unless `--keep-clusters`, which prints the
+   `kind delete cluster --name` command for each instead;
+4. the process exits `130` (`SIGINT`) or `143` (`SIGTERM`).
+
+```text
+admissionlab: SIGINT received; not starting any further work. Tearing down:
+reports first, then the clusters. Send it again to exit immediately instead.
+```
+
+Teardown is bounded but not instant — a slow `kind delete` can take a minute.
+**Press Ctrl-C again** and the process leaves at once, printing exactly what it
+is abandoning:
+
+```text
+admissionlab: second SIGINT; exiting now without finishing teardown.
+admissionlab: these may still exist; remove them with:
+admissionlab:   kind delete cluster --name adlab-baseline-01hq...
+admissionlab:   kind delete cluster --name adlab-candidate-01hq...
+```
+
+Those clusters really do survive: nothing runs after that exit. Run the printed
+commands, or sweep them with:
+
+```bash
+./scripts/verify-cleanup.sh --after-interrupt
+```
+
+which deletes every surviving `adlab-*` cluster and reports what it removed.
+(Use `--check-only` everywhere else — after a normal or failed run, a surviving
+cluster is a defect, and sweeping it away silently would hide it.)
 
 ### Cleaning up after a killed run
 

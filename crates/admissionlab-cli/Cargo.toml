@@ -121,7 +121,13 @@ tracing-subscriber = { workspace = true, features = ["env-filter"] }
 # `fs`: `doctor --deep`'s real probe (Task 1.9) best-effort removes its
 # own temporary workspace directory after deleting its temporary cluster
 # (`tokio::fs::remove_dir_all` in `commands::doctor::run_deep_probe`).
-tokio = { workspace = true, features = ["rt", "fs"] }
+# `signal`: `cancel::install` watches `SIGINT`/`SIGTERM` through
+# `tokio::signal` so a run can be canceled cooperatively (Task 9.6)
+# rather than dying mid-`kind create` and leaking a cluster. Required in
+# production, not only in dev-dependencies — the watch is what
+# `commands::test`/`commands::reproduce` install before driving the
+# pipeline.
+tokio = { workspace = true, features = ["rt", "fs", "signal"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

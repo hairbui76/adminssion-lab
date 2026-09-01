@@ -97,9 +97,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use admissionlab_core::{
-    ArtifactStore, DiscoveredFixture, DoctorReport, ReproduceError, ReproducePlan, ReproductionPin,
-    RunDisposition, RunManifest, RunPaths, plan_reproduction, plan_reproduction_from_config,
-    read_run_manifest, verify_effective_digests, verify_fixtures,
+    ArtifactStore, Cancellation, DiscoveredFixture, DoctorReport, ReproduceError, ReproducePlan,
+    ReproductionPin, RunDisposition, RunManifest, RunPaths, plan_reproduction,
+    plan_reproduction_from_config, read_run_manifest, verify_effective_digests, verify_fixtures,
 };
 use admissionlab_fixtures::{FixtureSource, discover_fixtures};
 use admissionlab_report::TerminalOptions;
@@ -211,6 +211,13 @@ impl LabBackend for ReproduceBackend {
     fn reproduction_pin(&self) -> Option<&ReproductionPin> {
         Some(&self.pin)
     }
+
+    fn cancellation(&self) -> Cancellation {
+        // Delegated like everything else: a reproduction is interrupted
+        // by the same Ctrl-C, tears down the same way, and answers with
+        // the same 130/143 as the `admissionlab test` it is repeating.
+        self.inner.cancellation()
+    }
 }
 
 /// Everything the pre-cluster verification established.
@@ -239,8 +246,9 @@ pub fn run(args: &ReproduceArgs) -> ExitCode {
     };
 
     let _ = write!(out, "{}", verified.pin.pinned_summary());
+    let cancellation = Cancellation::new();
     let backend = ReproduceBackend {
-        inner: KindBackend::new(&default_run_root()),
+        inner: KindBackend::new(&default_run_root()).with_cancellation(cancellation.clone()),
         pin: verified.pin,
     };
     let request = RunRequest {
@@ -268,11 +276,23 @@ pub fn run(args: &ReproduceArgs) -> ExitCode {
             out: &mut out,
             err: &mut err,
         };
-        runtime.block_on(run_lab(&backend, &request, &mut console))
+        runtime.block_on(async {
+            // Same one-line window as `commands::test::run`, and for the
+            // same reason: see there.
+            crate::cancel::install(cancellation.clone());
+            run_lab(&backend, &request, &mut console).await
+        })
     };
 
-    report_possible_unavailability(&backend.pin, disposition, &mut err);
-    exit::code_for_disposition(disposition)
+    // Not reported for a canceled run: `report_possible_unavailability`
+    // explains a *failure to reproduce* the recorded environment, and a
+    // run somebody interrupted established nothing about whether that
+    // environment is still available.
+    let canceled_by = cancellation.signal();
+    if canceled_by.is_none() {
+        report_possible_unavailability(&backend.pin, disposition, &mut err);
+    }
+    exit::code_for_run(disposition, canceled_by)
 }
 
 /// Everything ROADMAP Task 5.3 step 1 requires, before any cluster.

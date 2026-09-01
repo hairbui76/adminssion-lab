@@ -49,8 +49,8 @@ use std::sync::Arc;
 use admissionlab_admission::{KubeFixtureCapture, KubeMetricsSource};
 use admissionlab_cluster::KindClusterManager;
 use admissionlab_core::{
-    ArtifactStore, DoctorReport, ProcessRunner, ProcessSpawner, RunPaths, TokioProcessRunner,
-    collect_doctor_report,
+    ArtifactStore, Cancellation, DoctorReport, ProcessRunner, ProcessSpawner, RunPaths,
+    TokioProcessRunner, collect_doctor_report,
 };
 use admissionlab_fixtures::FixtureSource;
 use admissionlab_report::TerminalOptions;
@@ -133,6 +133,13 @@ pub struct KindBackend {
     /// timeout, separate stdout/stderr capture, and structured error
     /// context (Global Constraint 13).
     process_runner: Arc<dyn ProcessRunner>,
+    /// The handle `crate::cancel`'s signal watch sets and the pipeline
+    /// reads at every stage boundary (Task 9.6). Held by the backend
+    /// because [`LabBackend::cancellation`] is where the pipeline asks
+    /// for it; the *same* handle must be the one the watch was installed
+    /// with, which is why it is constructed by the caller and passed in
+    /// rather than made here.
+    cancellation: Cancellation,
     /// The `kind` backend, built once from `process_runner`.
     cluster_manager: Arc<KindClusterManager>,
     /// The same runner again, behind the trait a long-lived child needs.
@@ -154,6 +161,10 @@ pub struct KindBackend {
 
 impl KindBackend {
     /// Builds the production backend for a run rooted at `run_root`.
+    ///
+    /// The run is not cancellable until [`Self::with_cancellation`] hands
+    /// it the handle a signal watch was installed with — a backend built
+    /// and used without one behaves exactly as it did before Task 9.6.
     #[must_use]
     pub fn new(run_root: &std::path::Path) -> Self {
         let tokio_runner = Arc::new(TokioProcessRunner::new());
@@ -162,6 +173,7 @@ impl KindBackend {
             cluster_manager: Arc::new(KindClusterManager::new(Arc::clone(&process_runner))),
             port_forward_spawner: tokio_runner,
             process_runner,
+            cancellation: Cancellation::new(),
             // The root itself may not exist yet on a first run, and the
             // free-space check needs an existing path; its parent (the
             // OS temp directory) is on the same filesystem and always
@@ -170,6 +182,20 @@ impl KindBackend {
                 .parent()
                 .map_or_else(std::env::temp_dir, std::path::Path::to_path_buf),
         }
+    }
+
+    /// Runs against `cancellation`: the pipeline reads it at every stage
+    /// boundary, and registers this run's manual cluster-deletion
+    /// commands with it (ROADMAP Task 9.6).
+    ///
+    /// Takes the handle rather than making one because the *same* handle
+    /// has to be the one [`crate::cancel::install`] watches signals into
+    /// — two handles would give a run that ignores every Ctrl-C and a
+    /// watch that cancels nothing.
+    #[must_use]
+    pub fn with_cancellation(mut self, cancellation: Cancellation) -> Self {
+        self.cancellation = cancellation;
+        self
     }
 }
 
@@ -220,6 +246,10 @@ impl LabBackend for KindBackend {
         // is worth it and why it can never fail a run.
         KubeFixtureCapture::new(fixtures, store).with_metrics(Arc::new(KubeMetricsSource::new()))
     }
+
+    fn cancellation(&self) -> Cancellation {
+        self.cancellation.clone()
+    }
 }
 
 /// Runs `admissionlab test`.
@@ -239,7 +269,8 @@ pub fn run(args: &TestArgs) -> ExitCode {
         .expect("failed to build the test command's tokio runtime");
 
     let run_root = default_run_root();
-    let backend = KindBackend::new(&run_root);
+    let cancellation = Cancellation::new();
+    let backend = KindBackend::new(&run_root).with_cancellation(cancellation.clone());
     let request = RunRequest {
         config: &args.config,
         keep_clusters: args.keep_clusters,
@@ -263,6 +294,21 @@ pub fn run(args: &TestArgs) -> ExitCode {
         err: &mut err,
     };
 
-    let disposition = runtime.block_on(run_lab(&backend, &request, &mut console));
-    exit::code_for_disposition(disposition)
+    let disposition = runtime.block_on(async {
+        // Installed first, and inside the runtime: from this line until
+        // the run returns, a `SIGINT`/`SIGTERM` cancels cooperatively
+        // instead of killing the process mid-`kind create` and leaving
+        // the cluster behind. A signal that beats this line to the
+        // process keeps the platform's default disposition; nothing can
+        // close that window, which is why it is one line wide.
+        crate::cancel::install(cancellation.clone());
+        run_lab(&backend, &request, &mut console).await
+    });
+
+    // An interrupted run reports that it was interrupted (130/143)
+    // rather than the fallback disposition the pipeline returned — but a
+    // run that already reached its verdict reports the verdict, even if
+    // the signal arrived a moment later. `crate::exit::code_for_run`
+    // owns that rule and argues both halves of it.
+    exit::code_for_run(disposition, cancellation.signal())
 }
