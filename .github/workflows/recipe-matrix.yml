@@ -1,0 +1,519 @@
+# Tiered Kubernetes recipe certification (ROADMAP Task 7.5).
+#
+# One workflow, three schedules, and exactly one source of truth for
+# which recipe x Kubernetes combinations get certified:
+# `compatibility/recipes.yaml`. The `generate-matrix` job below runs
+# `scripts/recipe-matrix.py`, which joins that file's certified rows to
+# `compatibility/kubernetes.yaml`'s digest-pinned node images and prints
+# the job matrix as JSON; `fromJSON` turns it into the `certify` job's
+# `strategy.matrix`. There is no hardcoded array of versions anywhere in
+# this file -- Task 7.5 step 1 -- so adding a certified combination is an
+# edit to the checked-in matrix and nothing else, and a combination
+# nobody scheduled cannot exist.
+#
+# # The three tiers, and what each one costs
+#
+# `tier` is recorded per certified combination in
+# `compatibility/recipes.yaml` and is cumulative downward (see
+# `admissionlab_recipes::CertificationTier`): each tier runs its own rows
+# and every more frequent tier's, so the row count grows 3 -> 5 -> 7.
+#
+#   Tier 1 (perCommit)      Every push to `main`, plus any pull request
+#                           that touches the compatibility metadata or
+#                           the matrix machinery itself. 3 clusters.
+#   Tier 2 (nightly)        Called by `.github/workflows/nightly.yml`
+#                           (`workflow_call`, below), so the nightly
+#                           suite runs *this* generated matrix rather
+#                           than a second copy of it. 5 clusters.
+#   Tier 3 (weeklyRelease)  Weekly cron and manual dispatch: all 7
+#                           combinations, each certified three times
+#                           over for reliability, plus the canonical
+#                           Gateway regression demo.
+#
+# # Why the pull_request path filter is so narrow
+#
+# `.github/workflows/integration.yml` already runs `kyverno_recipe`,
+# `istio_recipe` and `istio_gateway_recipe` on every pull request that
+# touches `crates/admissionlab-recipes/**` or `recipes/**` -- each over
+# that recipe's whole certified list. Repeating that here on the same
+# trigger would double the per-PR real-cluster bill for no new signal.
+#
+# So this workflow's `pull_request` trigger watches only the files that
+# decide *what* the matrix is: `compatibility/**`, this workflow, and the
+# generator. Those are precisely the files `integration.yml`'s own path
+# list does NOT cover, so a pull request that edits
+# `compatibility/recipes.yaml` alone -- exactly the change most likely to
+# certify something untested -- gets a real certification run today,
+# where before it got none. The two path sets are near-disjoint by
+# construction, not by luck.
+#
+# Tier 1's "per commit" claim is carried by the `push` trigger on `main`,
+# whose path list is the broader one. Consolidating `integration.yml`'s
+# three recipe entries into this workflow is the obvious follow-up and is
+# deliberately not done here: that file belongs to a different task, and
+# a certification workflow that quietly deleted someone else's jobs would
+# be the harder change to review.
+#
+# # actionlint
+#
+# `actionlint` is not available in this environment, so this file was
+# validated by parsing it as YAML (`python3 -c "import yaml,sys;
+# yaml.safe_load(...)"`) and by checking every `run:` body with `bash -n`.
+# That catches malformed YAML and shell syntax errors; it does not catch
+# an invalid GitHub Actions expression, which only a real run can.
+
+name: Recipe certification matrix
+
+on:
+  push:
+    branches:
+      - main
+    # Tier 1's per-commit trigger. Broader than the pull_request list
+    # below on purpose: on `main` there is no `integration.yml` run to
+    # overlap with (that workflow is pull_request-only), so this is the
+    # only certification a merge commit gets.
+    paths:
+      - "compatibility/**"
+      - "recipes/**"
+      - "crates/admissionlab-recipes/**"
+      - "scripts/recipe-matrix.py"
+      - ".github/workflows/recipe-matrix.yml"
+  pull_request:
+    # Deliberately only the files that decide what the matrix *is* --
+    # see this file's header for why this must not overlap
+    # `integration.yml`'s own path list.
+    paths:
+      - "compatibility/**"
+      - "scripts/recipe-matrix.py"
+      - ".github/workflows/recipe-matrix.yml"
+  schedule:
+    # 04:23 UTC on Mondays. Off the hour for the reason
+    # `.github/workflows/nightly.yml` documents (GitHub queues every
+    # scheduled workflow across all of GitHub at the top of the hour),
+    # and after the nightly's 03:17 so the two do not contend for
+    # runners on the one night a week they coincide.
+    - cron: "23 4 * * 1"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: "Which tier to run (cumulative downward)"
+        required: false
+        default: weeklyRelease
+        type: choice
+        options:
+          - perCommit
+          - nightly
+          - weeklyRelease
+  workflow_call:
+    inputs:
+      tier:
+        description: "Which tier to run (cumulative downward)"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # Keyed by tier as well as ref: the nightly's Tier 2 call and a Tier 1
+  # push on the same commit are different runs of different sizes, and
+  # cancelling one because the other started would lose the larger.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ inputs.tier || github.event_name }}
+  # Never cancel a scheduled or called run: like the nightly suite, the
+  # runner minutes are already spent and a half-finished certification
+  # answers nothing. Pull-request runs are cancelled, since a newer push
+  # supersedes them outright.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  # The exact `kind` this project validates its cluster lifecycle
+  # against, and the version whose release notes
+  # `compatibility/kubernetes.yaml`'s node-image digests were captured
+  # from. Same pin, same published checksum, as
+  # `.github/workflows/integration.yml` and `nightly.yml`.
+  KIND_VERSION: v0.33.0
+  KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+
+jobs:
+  generate-matrix:
+    name: Generate the certification matrix
+    runs-on: ubuntu-latest
+    # No Docker, no cluster, no cargo: this job reads two YAML files.
+    timeout-minutes: 5
+    outputs:
+      tier: ${{ steps.tier.outputs.tier }}
+      include: ${{ steps.generate.outputs.include }}
+      count: ${{ steps.generate.outputs.count }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Resolve which tier this run is
+        id: tier
+        # Four ways in, one answer out.
+        #
+        # `inputs.tier` is checked FIRST, and that order is load-bearing
+        # rather than stylistic: inside a reusable workflow,
+        # `github.event_name` is the *caller's* triggering event, not
+        # `workflow_call`. When `nightly.yml` (a cron workflow) calls
+        # this one, `github.event_name` is `schedule` -- so a `case` that
+        # matched on the event first would silently promote every nightly
+        # Tier 2 run to the weekly Tier 3 matrix. An explicit input wins;
+        # only a run that supplied none falls back to its own event.
+        #
+        # `workflow_dispatch` always supplies one (its input defaults to
+        # `weeklyRelease`), so the fallback covers exactly this
+        # workflow's own `schedule`, `push` and `pull_request` triggers.
+        # Written as a script rather than a chain of `${{ }}` defaults so
+        # an unhandled event is a loud failure instead of an empty string
+        # that would later select nothing.
+        run: |
+          set -euo pipefail
+          tier="${{ inputs.tier }}"
+          if [ -z "${tier}" ]; then
+            case "${{ github.event_name }}" in
+              schedule)          tier="weeklyRelease" ;;
+              push|pull_request) tier="perCommit" ;;
+              *)
+                echo "::error::unhandled event ${{ github.event_name }} with no tier input; this workflow does not know which tier it is"
+                exit 1
+                ;;
+            esac
+          fi
+          case "${tier}" in
+            perCommit|nightly|weeklyRelease) ;;
+            *)
+              echo "::error::unknown tier '${tier}'; expected perCommit, nightly or weeklyRelease"
+              exit 1
+              ;;
+          esac
+          echo "tier=${tier}" >>"${GITHUB_OUTPUT}"
+          echo "certifying tier ${tier}"
+
+      - name: Generate the matrix from compatibility/
+        id: generate
+        # `--format github` writes `include=<json>` and `count=<n>`.
+        # The script exits non-zero -- failing this job, and with it the
+        # whole workflow -- when a certified row names a recipe with no
+        # registered test, an unsupported Kubernetes version, or a tier
+        # nobody recognizes, so a bad matrix stops here rather than
+        # silently producing fewer jobs than it should.
+        run: python3 scripts/recipe-matrix.py --tier "${{ steps.tier.outputs.tier }}" --format github >>"${GITHUB_OUTPUT}"
+
+      - name: Show the matrix
+        # Printed in full so a failing certification job can be traced
+        # back to the row that produced it without rerunning anything.
+        run: python3 scripts/recipe-matrix.py --tier "${{ steps.tier.outputs.tier }}" --pretty | tee recipe-matrix.json
+
+      - name: Upload the generated matrix
+        # ROADMAP Task 7.5 step 4 asks for failed lab reports *and*
+        # matrices. `always()` rather than `failure()` for this one
+        # artifact: the matrix is what every other job in this run was
+        # asked to do, and it is as useful for explaining a green run
+        # that certified fewer combinations than expected as for a red
+        # one. It is a few hundred bytes.
+        if: always()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: recipe-matrix-${{ steps.tier.outputs.tier }}
+          path: recipe-matrix.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  certify:
+    name: Certify ${{ matrix.name }}
+    needs: generate-matrix
+    runs-on: ubuntu-latest
+    # Sized against `.github/workflows/integration.yml`'s own measured
+    # figures, which cover *every* certified version of a recipe in one
+    # job (istio_recipe: 222.00 s for three; istio_gateway_recipe: 269.95
+    # s for three). Each job here runs ONE combination, so the same
+    # ceiling is roughly three times more generous than it was there --
+    # deliberately, because Tier 3 repeats each combination three times
+    # (see `repeats` below) and because a GitHub-hosted runner on a cold
+    # image cache is several times slower than the reference machine.
+    timeout-minutes: 45
+    strategy:
+      # One combination failing must never hide whether the others
+      # passed: a certification suite that stops at the first red row
+      # reports "something is broken" where the question is "what is
+      # still certified?"
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.generate-matrix.outputs.include) }}
+    env:
+      # The certification tests loop over their entry's whole certified
+      # list by default. This narrows each job to the single row it owns
+      # -- see `admissionlab_recipes::CERTIFY_KUBERNETES_ENV`, and note
+      # that a version the entry does not certify is an error there, not
+      # a silent skip, so a matrix/metadata disagreement fails loudly.
+      ADMISSIONLAB_CERTIFY_KUBERNETES: ${{ matrix.kubernetes }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          # Per recipe and test, not per matrix entry: every Kubernetes
+          # version of one recipe compiles the identical test binary, so
+          # keying on `kubernetes` too would multiply one cache entry
+          # into three copies of the same artifacts.
+          key: recipe-matrix-${{ matrix.package }}-${{ matrix.test }}
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind ${{ env.KIND_VERSION }}
+        # Downloaded from the upstream release and checked against
+        # kind's own published checksum, rather than trusting whichever
+        # `kind` the runner image ships -- identical to
+        # `integration.yml`'s and `nightly.yml`'s step.
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Restore the pinned kind node image
+        id: node-image-cache
+        # v6.1.0: verified against the GitHub API
+        # (api.github.com/repos/actions/cache/releases/latest) on
+        # 2026-09-01, the same way every other action pin in this
+        # repository was.
+        #
+        # # What this shares, and what it deliberately does not
+        #
+        # The key is the node image's own content digest, taken straight
+        # from `compatibility/kubernetes.yaml`. A cache entry is
+        # therefore immutable by construction: the bytes it holds are the
+        # bytes that digest names, and a different image is a different
+        # key rather than an overwrite. Nothing mutable crosses between
+        # jobs -- no kubeconfig, no cluster, no run workspace, no Helm
+        # state (Global Constraint 4: baseline and candidate must not
+        # share mutable cluster state, and neither may two certification
+        # jobs).
+        #
+        # # What is NOT cached, and why
+        #
+        # - The images installed *inside* the cluster (istiod, Kyverno's
+        #   four Deployments, the echo backend). They are pulled by the
+        #   node's own containerd, not by the runner's Docker, and there
+        #   is no supported way to seed that from a host cache without
+        #   snapshotting a live node -- which is exactly the mutable
+        #   state this must not share.
+        # - Helm chart tarballs. `admissionlab_installer::HelmInstaller`
+        #   deliberately runs with an isolated, per-run Helm state
+        #   directory (never `~/.config/helm`), so there is no stable
+        #   path to cache and caching one would defeat that isolation.
+        uses: actions/cache@v6.1.0
+        with:
+          path: ~/.cache/admissionlab/node-images
+          key: kind-node-${{ matrix.node_digest }}-${{ env.KIND_VERSION }}
+
+      - name: Ensure the pinned node image is present locally
+        # # Why a tag round-trip, measured rather than assumed
+        #
+        # `kind create cluster --image` is given the digest-pinned
+        # reference `kindest/node:v1.36.4@sha256:...` (that is what
+        # `admissionlab_cluster::resolve_node_image` returns), and Docker
+        # resolves such a reference locally only when the image carries
+        # that repo digest.
+        #
+        # Measured directly against a real daemon while writing this
+        # step (Docker 29.4.1), because the behavior is not obvious:
+        #
+        #   - `docker pull repo:tag@digest` stores the image with NO tag
+        #     at all -- `docker images` shows `<none>` -- and only the
+        #     digest reference.
+        #   - `docker save` of an image that has only a digest reference
+        #     produces a tar that `docker load` restores as a bare image
+        #     ID with no reference whatsoever, and the digest-pinned
+        #     reference then does not resolve. A cache built that way
+        #     would silently re-pull every time.
+        #   - `docker tag` it to its plain tag first, then `docker save`
+        #     that tag, and `docker load` restores BOTH the tag and the
+        #     repo digest -- the digest-pinned reference resolves with no
+        #     registry access.
+        #
+        # Hence: pull, tag, save. The `docker image inspect` check
+        # afterwards is not decoration -- repo-digest preservation across
+        # save/load is a property of the daemon's image store, so on a
+        # daemon that does not preserve it this degrades to an ordinary
+        # pull rather than failing or, worse, running against an image
+        # nobody verified.
+        run: |
+          set -euo pipefail
+          image="${{ matrix.node_image }}"
+          digest="${{ matrix.node_digest }}"
+          tag="${image%@*}"
+          dir="${HOME}/.cache/admissionlab/node-images"
+          archive="${dir}/${digest#sha256:}.tar"
+          mkdir -p "${dir}"
+
+          if [ -f "${archive}" ]; then
+            echo "loading cached node image from ${archive}"
+            docker load -i "${archive}"
+          fi
+
+          if docker image inspect "${image}" >/dev/null 2>&1; then
+            echo "node image ${image} is present locally; no pull needed"
+          else
+            echo "node image ${image} is not present locally; pulling"
+            docker pull "${image}"
+            docker tag "${image}" "${tag}"
+            rm -f "${archive}"
+            docker save -o "${archive}" "${tag}"
+          fi
+
+          # Never proceed on an image whose digest was not confirmed: a
+          # certification run against an unverified node image certifies
+          # nothing.
+          docker image inspect "${image}" \
+            --format 'certifying against {{.Id}} ({{.RepoDigests}})'
+
+      - name: Certify ${{ matrix.name }}
+        # Tier 3 repeats each combination, which is ROADMAP Task 7.5's
+        # own "reliability repetition": a certification that passed once
+        # says the stack installs, and a certification that passed three
+        # times in a row says it installs *reliably*, which is the claim
+        # a release candidate needs (PRODUCT.md §33). Tiers 1 and 2 run
+        # it once -- repeating a per-commit job would triple the bill for
+        # a signal the weekly run already produces.
+        #
+        # The output is teed rather than only streamed, so the failure
+        # artifact below carries the same text the log does.
+        run: |
+          set -euo pipefail
+          repeats=1
+          if [ "${{ needs.generate-matrix.outputs.tier }}" = "weeklyRelease" ]; then
+            repeats=3
+          fi
+          mkdir -p certification-logs
+          slug="${{ matrix.recipe }}-${{ matrix.kubernetes }}"
+          status=0
+          for attempt in $(seq 1 "${repeats}"); do
+            echo "::group::${{ matrix.name }} (attempt ${attempt}/${repeats})"
+            log="certification-logs/${slug}-attempt-${attempt}.log"
+            if cargo test -p "${{ matrix.package }}" --test "${{ matrix.test }}" \
+                 -- --ignored --nocapture 2>&1 | tee "${log}"; then
+              echo "attempt ${attempt}/${repeats}: certified"
+            else
+              status=1
+              echo "::error::${{ matrix.name }} failed on attempt ${attempt}/${repeats}"
+            fi
+            echo "::endgroup::"
+          done
+          exit "${status}"
+
+      - name: Collect evidence from the failed certification
+        if: failure()
+        # What there is to collect. These tests remove their own
+        # scratch root on every exit path (each file's "Cleanup
+        # discipline" section), so there is no run workspace left to
+        # upload -- the evidence is the captured console output plus
+        # whatever a cluster that failed to come up left behind, which
+        # `kind export logs` is the only way to reach. Both are
+        # best-effort: a failure early enough that no cluster existed
+        # should still upload the log it does have.
+        run: |
+          set -euo pipefail
+          mkdir -p certification-logs/kind
+          for cluster in $(kind get clusters 2>/dev/null | grep '^adlab-' || true); do
+            echo "exporting logs for surviving cluster ${cluster}"
+            kind export logs "certification-logs/kind/${cluster}" --name "${cluster}" || true
+          done
+          # Raw cluster evidence is protected by file permissions rather
+          # than by report redaction (`docs/security.md`), and a
+          # kubeconfig names a cluster that is about to be deleted
+          # anyway -- the same strip `nightly.yml` performs before every
+          # one of its uploads.
+          find certification-logs -type f -name 'kubeconfig*' -delete 2>/dev/null || true
+          find certification-logs -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload the failed certification's evidence
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          # Named by combination, not by job number: an artifact list
+          # should say which certification failed.
+          name: certification-${{ matrix.recipe }}-${{ matrix.kubernetes }}
+          path: certification-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        # PRODUCT.md §33's "no leaked cluster after normal failure
+        # paths", checked with the one implementation this repository
+        # has rather than a copy of it -- see
+        # `scripts/verify-cleanup.sh`'s own header for why
+        # `--check-only` reports a leak instead of tidying it away.
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  gateway-demo:
+    name: Gateway regression demo (Tier 3)
+    needs: generate-matrix
+    # ROADMAP Task 7.5's Tier 3 line ends with "Gateway demos", and this
+    # is the canonical one (Task 6.12, and the Phase 6 exit gate's own
+    # second command): the same lab with one line of a `ReferenceGrant`
+    # changed on the candidate side, asserted to exit 1 with the route,
+    # the changed condition, its reason and the skipped traffic behavior
+    # in the first user-facing failure -- run twice over to prove the
+    # finding is identical both times.
+    #
+    # A separate job rather than a matrix row because it is not a
+    # certification of a recipe/Kubernetes combination at all: it
+    # certifies that a *regression is still detected and still reported
+    # the same way*, which no row of `compatibility/recipes.yaml`
+    # describes.
+    if: needs.generate-matrix.outputs.tier == 'weeklyRelease'
+    runs-on: ubuntu-latest
+    # `integration.yml`'s own `gateway_demo` entry measures four full
+    # Gateway lab runs (two clusters and two Istio installs each) at
+    # 204.5 s per run warm, and gives that entry a 60-minute ceiling for
+    # exactly that reason. Same ceiling here, same measurement.
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: recipe-matrix-gateway-demo
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind ${{ env.KIND_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Run the canonical Gateway regression demo
+        run: |
+          set -euo pipefail
+          mkdir -p gateway-demo-logs
+          cargo test -p admissionlab-cli --test gateway_demo -- --ignored --nocapture 2>&1 \
+            | tee gateway-demo-logs/gateway-demo.log
+
+      - name: Upload the failed demo's evidence
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: gateway-demo-logs
+          path: gateway-demo-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only

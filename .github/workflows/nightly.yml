@@ -6,7 +6,7 @@ name: Nightly reliability
 # reliability is more important than optimizing a few seconds of runtime"
 # — makes the point of.
 #
-# Eight jobs, in three groups.
+# Nine jobs, in four groups.
 #
 #   Repetition (does the happy path stay the happy path?)
 #     cluster-cycles           100 kind create/delete cycles
@@ -14,15 +14,20 @@ name: Nightly reliability
 #     dogfood-regression        5 full lab runs of examples/kyverno-istio-upgrade
 #     dogfood-gateway           3 full lab runs of examples/gateway-istio
 #
+#   Certification (are the certified stacks still certified?)
+#     recipe-certification     Tier 2 of the generated recipe matrix
+#
 #   Forced failure (does the unhappy path fail the way it promises to?)
 #     forced-install-timeout   a component that can never become ready
 #     forced-webhook-timeout   a webhook that answers later than its own timeoutSeconds
 #     forced-kind-failure      `kind create cluster` fails
 #     forced-artifact-store-failure   an artifact write the filesystem refuses
 #
-# Every job ends with `./scripts/verify-cleanup.sh --check-only`, under
-# `if: always()`, so no job can pass while having leaked an `adlab-*`
-# cluster (Task 5.9 step 1). That is one script with one implementation
+# Every job defined in this file ends with
+# `./scripts/verify-cleanup.sh --check-only`, under `if: always()`, so no
+# job can pass while having leaked an `adlab-*` cluster (Task 5.9 step
+# 1); `recipe-certification` is a call into another workflow, whose own
+# jobs end with the identical step. That is one script with one implementation
 # rather than a grep snippet pasted eight times — and pasted, in
 # practice, with the `2>/dev/null ... || true` defect that makes such a
 # check incapable of failing.
@@ -51,11 +56,21 @@ name: Nightly reliability
 # of them fails here and forces this paragraph to be updated with it.
 #
 # PRODUCT.md §32's Tier 2 also describes nightly as the tier that covers
-# *all three* supported minors. That is deliberately not in this
-# workflow: ROADMAP Task 5.9 scopes this suite to the primary, and a
-# three-minor matrix over jobs this long is a separate cost decision from
-# the reliability one. `compatibility/kubernetes.yaml`'s own comments
-# already record 1.37 as awaiting that nightly coverage.
+# *all three* supported minors. Task 5.9 scoped this suite to the primary
+# and left that coverage to a later task; ROADMAP Task 7.5 is that task,
+# and `recipe-certification` below is how it arrives -- as a call into
+# `.github/workflows/recipe-matrix.yml` with `tier: nightly`, so the
+# combinations this suite certifies are generated from
+# `compatibility/recipes.yaml` rather than written down a second time
+# here. Between the `istio` and `kyverno` rows that matrix selects at
+# Tier 2, all three supported minors are exercised by a certified recipe
+# every night (the Phase 7 exit gate's "run Tier 2 across all three
+# Kubernetes minors").
+#
+# The eight jobs defined in this file still run against the primary as
+# described above. They measure repeated-run reliability, which is a
+# different question from certification and one that a three-minor matrix
+# would make three times more expensive without making more reliable.
 #
 # # Flake versus regression (Task 5.9 step 2)
 #
@@ -90,7 +105,9 @@ name: Nightly reliability
 # This suite is expensive on purpose. Rough sizing against the measured
 # figures each job's own comment cites: the whole matrix is a few hours
 # of runner time per night, running in parallel, with `cluster-cycles`
-# the long pole at up to ~55 minutes.
+# the long pole at up to ~55 minutes. `recipe-certification` adds five
+# real-cluster jobs of its own, in parallel with these and with each
+# other; `.github/workflows/recipe-matrix.yml` sizes them.
 
 on:
   schedule:
@@ -175,6 +192,38 @@ jobs:
       - name: Verify no adlab-* cluster was left behind
         if: always()
         run: ./scripts/verify-cleanup.sh --check-only
+
+  # =====================================================================
+  # Certification
+  # =====================================================================
+
+  recipe-certification:
+    name: Tier 2 recipe certification
+    # ROADMAP Task 7.5 step 1: the nightly tier runs the *generated*
+    # matrix, not a duplicate of it. `recipe-matrix.yml` reads
+    # `compatibility/recipes.yaml`, selects every combination at
+    # `nightly` or more frequent (tiers are cumulative downward), and
+    # runs one real cluster per row -- so adding a certified combination
+    # to that file changes what this suite covers tonight, with no edit
+    # here at all.
+    #
+    # A `uses:` call rather than a copied job, and rather than a `needs:`
+    # dependency on anything above: certification is independent of the
+    # reliability loops, must not wait for `cluster-cycles`' 55 minutes
+    # to start, and must not be skipped because a forced-failure job
+    # found something.
+    #
+    # `tier` is passed explicitly and must be: inside a reusable
+    # workflow, `github.event_name` is the *caller's* event, which for
+    # this cron-driven suite is `schedule` -- and `schedule` is exactly
+    # what `recipe-matrix.yml` reads as its own weekly Tier 3 when no
+    # input is given. See that file's "Resolve which tier this run is"
+    # step for the full explanation.
+    uses: ./.github/workflows/recipe-matrix.yml
+    with:
+      tier: nightly
+    permissions:
+      contents: read
 
   dogfood-basic:
     name: 50 dogfood runs (examples/admission-basic, expect exit 0)
