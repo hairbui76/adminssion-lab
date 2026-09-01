@@ -66,6 +66,13 @@
 //!   assuming this project converts anything -- it does not, on purpose,
 //!   and the module explains why a self-converting suite could not
 //!   detect its own converter's mistakes.
+//! - [`ingress`] (Task 8.4) is the *baseline* half of a migration
+//!   comparison: it persists one migration case's `Ingress` manifests,
+//!   records a validating webhook's refusal as admission evidence rather
+//!   than as a failure, and -- because an `Ingress` has no status worth
+//!   waiting on -- proves readiness with traffic under a deadline. Read
+//!   its "THE FINDING" before assuming an `Ingress` can be waited on the
+//!   way a `Gateway` can.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -98,6 +105,7 @@ pub mod conditions;
 pub mod diff;
 pub mod endpoint;
 pub mod error;
+pub mod ingress;
 pub mod migration;
 pub mod model;
 pub mod port_forward;
@@ -126,6 +134,12 @@ pub use endpoint::{
     resolve_gateway_endpoint_with_client,
 };
 pub use error::{EndpointLookup, GatewayError};
+pub use ingress::{
+    DIAGNOSTIC_INGRESS_DENIED, DIAGNOSTIC_INGRESS_NOT_SERVING, INGRESS_GROUP,
+    INGRESS_REPROBE_INTERVAL, INGRESS_RESOURCE, IngressCaseResult, admission_denial,
+    applied_ingress_identity, probe_matches_contract, run_ingress_case,
+    run_ingress_case_with_resolver,
+};
 pub use migration::{
     MigrationCaseSpec, MigrationSuiteSpec, NonPortableFeatureExpectation,
     expected_nonportable_features,

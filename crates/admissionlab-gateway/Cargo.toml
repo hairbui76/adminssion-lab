@@ -190,6 +190,28 @@ tokio = { workspace = true, features = ["time"] }
 tracing = { workspace = true }
 
 [dev-dependencies]
+# `tests/ingress_e2e.rs` (Task 8.4) drives the legacy `Ingress` runner
+# against a real cluster running the real pinned `ingress-nginx` chart,
+# and `tests/portable_contracts.rs` (Task 8.7) runs one corpus of
+# portable Gateway behavior contracts against both certified
+# implementations. Both need the same three crates the certification
+# suites in `admissionlab-recipes` already use: `cluster` to create and
+# delete the disposable `kind` clusters, `installer` to install each
+# stack through the real pipeline, and `recipes` to load the certified
+# recipe documents rather than restating their pins in a test.
+#
+# All three are **dev**-dependency edges only; no shipped code here
+# reaches any of them, and none may ever become a normal dependency.
+# `recipes` closes a dev-dependency *cycle* -- `admissionlab-recipes`
+# already dev-depends on this crate for its own Gateway certification
+# tests. Cargo permits that (the cycle is broken at both ends by being
+# dev-only: building either crate's library never requires the other),
+# and the alternative -- restating both recipes' chart pins, readiness
+# gates and endpoint strategies inside this crate -- would be a second
+# source of truth for exactly the metadata those recipes exist to own.
+admissionlab-cluster = { workspace = true }
+admissionlab-installer = { workspace = true }
+admissionlab-recipes = { workspace = true }
 # The same `tower_test::mock`-backed `kube::Client` technique
 # `admissionlab-fixtures`'s `resources.rs` and `admissionlab-admission`'s
 # `tests/execute_unit.rs` already use: drives this crate's HTTP-level

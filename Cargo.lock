@@ -148,10 +148,13 @@ name = "admissionlab-gateway"
 version = "0.1.0"
 dependencies = [
  "admissionlab-admission",
+ "admissionlab-cluster",
  "admissionlab-core",
  "admissionlab-diff",
  "admissionlab-echo",
  "admissionlab-fixtures",
+ "admissionlab-installer",
+ "admissionlab-recipes",
  "admissionlab-spec",
  "async-trait",
  "bytes",

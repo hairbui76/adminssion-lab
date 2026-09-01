@@ -391,9 +391,16 @@ fn the_category_order_is_the_roadmap_table() {
         ApplyCategory::Service,
         ApplyCategory::Workload,
         ApplyCategory::GatewayClass,
+        // Task 8.4 added `IngressClass` and `Ingress`, each beside its
+        // Gateway API counterpart. See `apply.rs`'s own "`IngressClass`
+        // and `Ingress` are rows in that table too" for why both were
+        // added at once and why adding only `Ingress` would have been a
+        // regression.
+        ApplyCategory::IngressClass,
         ApplyCategory::Gateway,
         ApplyCategory::ReferenceGrant,
         ApplyCategory::HttpRoute,
+        ApplyCategory::Ingress,
         ApplyCategory::Unknown,
     ];
     for (position, category) in ordered.iter().enumerate() {
@@ -412,13 +419,16 @@ fn the_category_order_is_the_roadmap_table() {
         ("Deployment", ApplyCategory::Workload),
         ("Pod", ApplyCategory::Workload),
         ("GatewayClass", ApplyCategory::GatewayClass),
+        ("IngressClass", ApplyCategory::IngressClass),
         ("Gateway", ApplyCategory::Gateway),
         ("ReferenceGrant", ApplyCategory::ReferenceGrant),
         ("HTTPRoute", ApplyCategory::HttpRoute),
+        ("Ingress", ApplyCategory::Ingress),
         ("Telemetry", ApplyCategory::Unknown),
         // Case-sensitive: a Kubernetes `kind` is, so `httproute` is not
         // a spelling of `HTTPRoute` and must not sort as one.
         ("httproute", ApplyCategory::Unknown),
+        ("ingress", ApplyCategory::Unknown),
     ] {
         assert_eq!(ApplyCategory::for_kind(kind), expected, "kind {kind}");
     }

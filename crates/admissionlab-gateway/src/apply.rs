@@ -102,6 +102,44 @@
 //! the order they were written in (file order first, then position
 //! within the file).
 //!
+//! ## `IngressClass` and `Ingress` are rows in that table too (Task 8.4)
+//!
+//! Task 6.2's table is written in Gateway API vocabulary because Phase 6
+//! only ever applied Gateway API objects. ROADMAP Task 8.4 gave this
+//! module a second kind of caller -- [`crate::ingress`], the runner that
+//! *owns* applying a migration case's legacy `Ingress` side -- and two
+//! rows were added for it, each placed beside its Gateway API
+//! counterpart: [`ApplyCategory::IngressClass`] beside
+//! [`ApplyCategory::GatewayClass`] (both are the cluster-scoped class
+//! object a routing object names by string), and
+//! [`ApplyCategory::Ingress`] beside [`ApplyCategory::HttpRoute`] (both
+//! are the routing object every other category is a prerequisite for).
+//! [`ApplyCategory::rank`] is the full order, and `tests/apply_unit.rs`
+//! pins it.
+//!
+//! **Why add them at all**, when an unrecognized `Ingress` already sorted
+//! into `Unknown` and `Unknown` is already applied last?
+//! `fixtures/migration/ingress-nginx/basic-routing.yaml` relies on
+//! exactly that today, says so in its own header, deliberately leaves the
+//! decision to "the tasks that build the migration runner", and states
+//! the one constraint it has: it "keeps working unchanged as long as the
+//! row sits after `Workload`". The answer is that an `Ingress` landing
+//! after its backends was an *accident of not being recognized* rather
+//! than a decision, and a fixture whose correctness rests on a kind
+//! staying unknown is one vendor CRD away from silently meaning something
+//! else. Naming the row turns the property into a contract; it changes
+//! nothing about where that fixture's `Ingress` is applied.
+//!
+//! **Why the two rows had to be added together.** Adding `Ingress` alone
+//! would have been a regression. An `IngressClass` is also an
+//! unrecognized kind today, so a fixture that declares its own class and
+//! then an `Ingress` applies them in source order and works. Give
+//! `Ingress` a rank while leaving `IngressClass` in `Unknown`, and the
+//! class sorts *after* the `Ingress` that names it. Neither fixture in
+//! this repository declares an `IngressClass` -- the controller's chart
+//! installs one -- so this row exists to avoid creating a hazard that did
+//! not exist before, not to serve a fixture that wants it.
+//!
 //! **This ordering overrides `admissionlab_installer::manifests`'s
 //! rule, deliberately, and the two do not conflict.** That module
 //! preserves the caller's declared `paths` order exactly and explicitly
@@ -242,6 +280,12 @@ pub enum ApplyCategory {
     /// `GatewayClass`, which a `Gateway` names in
     /// `spec.gatewayClassName`.
     GatewayClass,
+    /// `IngressClass`, which an `Ingress` names in
+    /// `spec.ingressClassName` -- the legacy counterpart of
+    /// [`Self::GatewayClass`], and beside it for that reason. See this
+    /// module's "`IngressClass` and `Ingress` are rows in that table
+    /// too".
+    IngressClass,
     /// `Gateway`, which an `HTTPRoute` names in `parentRefs`.
     Gateway,
     /// `ReferenceGrant`, which must exist before a cross-namespace
@@ -250,6 +294,13 @@ pub enum ApplyCategory {
     /// `HTTPRoute`, the last Gateway API object and the one every other
     /// category is a prerequisite for.
     HttpRoute,
+    /// `Ingress`, the legacy counterpart of [`Self::HttpRoute`]: the
+    /// routing object a migration case's baseline side is *about*, and
+    /// the one every other category is a prerequisite for. Applied after
+    /// `HTTPRoute` only because something has to be last among the two
+    /// routing objects; no fixture mixes them, and neither depends on
+    /// the other.
+    Ingress,
     /// Any other kind. Applied after every known category, preserving
     /// source order -- see this module's documentation for why "after
     /// known prerequisites" is read as "last".
@@ -270,10 +321,12 @@ impl ApplyCategory {
             Self::Service => 2,
             Self::Workload => 3,
             Self::GatewayClass => 4,
-            Self::Gateway => 5,
-            Self::ReferenceGrant => 6,
-            Self::HttpRoute => 7,
-            Self::Unknown => 8,
+            Self::IngressClass => 5,
+            Self::Gateway => 6,
+            Self::ReferenceGrant => 7,
+            Self::HttpRoute => 8,
+            Self::Ingress => 9,
+            Self::Unknown => 10,
         }
     }
 
@@ -299,9 +352,11 @@ impl ApplyCategory {
             "Service" => Self::Service,
             "Deployment" | "Pod" => Self::Workload,
             "GatewayClass" => Self::GatewayClass,
+            "IngressClass" => Self::IngressClass,
             "Gateway" => Self::Gateway,
             "ReferenceGrant" => Self::ReferenceGrant,
             "HTTPRoute" => Self::HttpRoute,
+            "Ingress" => Self::Ingress,
             _ => Self::Unknown,
         }
     }

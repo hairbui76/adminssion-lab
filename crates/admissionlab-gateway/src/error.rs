@@ -23,6 +23,17 @@
 //! compare *admission* behavior on Gateway fixtures across sides has the
 //! real answer to compare and does not have to re-apply anything to get
 //! it.
+//!
+//! ROADMAP Task 8.4 is that later task, and it takes this module up on
+//! exactly that promise: [`crate::ingress::run_ingress_case`] catches
+//! [`GatewayError::ApplyRejected`] -- and only that variant -- and turns
+//! it into `admitted: false` plus a [`admissionlab_core::Diagnostic`]
+//! carrying the API server's own words, because for a migration case a
+//! validating webhook's refusal *is* the legacy behavior being recorded
+//! rather than a failure to record one. The line above does not move:
+//! every other caller of [`crate::apply::apply_gateway_manifests`] still
+//! receives that variant as an error, and every other variant is still
+//! an error on the Ingress path too.
 
 use std::path::PathBuf;
 
@@ -503,6 +514,36 @@ pub enum GatewayError {
         /// What could not be done, from this crate's own words or the
         /// underlying library's `Display`.
         reason: String,
+    },
+
+    /// A migration case's baseline manifests applied successfully but
+    /// contained no `networking.k8s.io` `Ingress`.
+    ///
+    /// A configuration error rather than an observation, and the one
+    /// structural precondition [`crate::ingress::run_ingress_case`]
+    /// checks: `MigrationCaseSpec::baseline_ingress_manifests` is the
+    /// half of a pairing that *defines the behavior being migrated away
+    /// from*, and a baseline with no `Ingress` in it describes no such
+    /// behavior. `admissionlab_spec::load_any_supported_lab` cannot
+    /// catch this -- it validates that the list is non-empty, which is a
+    /// property of the document, while this is a property of what those
+    /// files turned out to contain.
+    ///
+    /// Reported instead of silently probing the shared controller
+    /// anyway: an `Ingress` controller answers *every* `Ingress` on the
+    /// cluster through one data plane, so a case with none of its own
+    /// would still get an answer -- from somebody else's object, or from
+    /// the controller's default backend. That answer would be recorded
+    /// as this case's legacy behavior, which is precisely the fabricated
+    /// observation Global Constraint 15 forbids.
+    #[error(
+        "the baseline manifests of migration case {case:?} applied no networking.k8s.io Ingress, \
+         so there is no legacy routing behavior for this case to observe"
+    )]
+    IngressCaseWithoutIngress {
+        /// The [`admissionlab_spec::MigrationCaseSpec::id`] whose
+        /// baseline side was applied.
+        case: String,
     },
 }
 
