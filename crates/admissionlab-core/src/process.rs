@@ -11,6 +11,39 @@
 //! is the one production implementation, built on
 //! `tokio::process::Command`.
 //!
+//! # Two shapes of child, one chokepoint
+//!
+//! [`ProcessRunner::run`] owns a child from spawn to exit: it runs to
+//! completion within a timeout, and the caller gets everything it wrote.
+//! That is the right shape for `kind create cluster`, `helm install`, or
+//! `kubectl apply` — commands that finish.
+//!
+//! [`ProcessSpawner::spawn`] is the shape for a child that *does not*
+//! finish: `kubectl port-forward`, which must stay alive for as long as
+//! traffic is being sent through it (ROADMAP Task 6.7). It returns a
+//! live [`ManagedChild`] the caller reads from, waits on, and explicitly
+//! kills. [`TokioProcessRunner`] implements both traits, on purpose:
+//! this module is *the* place an external process is created, and every
+//! safety property above — no shell, drained pipes, an isolated
+//! environment, redaction — has to hold identically for both shapes. Two
+//! separate implementation types would be two places to get them right.
+//!
+//! **Timeout ownership (Global Constraint 13) differs between the two,
+//! and deliberately.** [`ProcessRunner::run`] honors
+//! [`CommandSpec::timeout`]: the whole command is bounded by it.
+//! [`ProcessSpawner::spawn`] **ignores that field entirely**, because
+//! there is no honest value for it: the correct lifetime of a
+//! port-forward is "until the Gateway probes are done", which is a fact
+//! about the run and not about the process. A fixed timeout here would
+//! either be too short (killing a working forward mid-suite) or so long
+//! as to be decorative. A long-lived child is therefore bounded by the
+//! run's own cleanup — [`ManagedChild::kill`], the caller's guard, and
+//! `kill_on_drop` as a backstop — while every *bounded wait* on it
+//! ([`ManagedChild::next_stdout_line`]) takes its own explicit timeout
+//! argument at the call site, where the caller knows what it is waiting
+//! for. See [`ProcessSpawner::spawn`] for why `CommandSpec` is reused
+//! rather than forked into a near-identical spawn-only type.
+//!
 //! Three properties are load-bearing here and are each covered by tests
 //! in `tests/process.rs`:
 //!
@@ -414,6 +447,35 @@ pub enum ProcessError {
         #[source]
         source: io::Error,
     },
+    /// A bounded wait for a line of output from a *long-lived*
+    /// [`ManagedChild`] elapsed.
+    ///
+    /// Deliberately not [`ProcessError::TimedOut`], whose documentation
+    /// guarantees the child has already been killed and reaped: here the
+    /// child is still running, and deciding what to do about that (kill
+    /// it, wait longer, report it) belongs to the caller that knows what
+    /// it was waiting for. Reusing the other variant would make that
+    /// guarantee false for half its occurrences, which is worse than a
+    /// second variant.
+    ///
+    /// `stdout`/`stderr` are the bounded captures taken so far (see
+    /// [`MAX_CAPTURED_STREAM_BYTES`]), so a caller can say *what the
+    /// child did say* instead of only that it did not say the expected
+    /// thing.
+    #[error("`{context}` produced no further output within {timeout:?} (waited {elapsed:?})")]
+    OutputTimedOut {
+        /// A safe-to-log description of the still-running command.
+        context: Box<CommandContext>,
+        /// The bound that elapsed.
+        timeout: Duration,
+        /// How long was actually waited.
+        elapsed: Duration,
+        /// What the child had written to stdout so far.
+        stdout: Vec<u8>,
+        /// What the child had written to stderr so far.
+        stderr: Vec<u8>,
+    },
+
     /// Some other I/O failure occurred while running or communicating
     /// with the child (for example, a failure reading one of its
     /// pipes).
@@ -594,6 +656,550 @@ impl ProcessRunner for TokioProcessRunner {
             elapsed,
         })
     }
+}
+
+// =========================================================================
+// Long-lived children (ROADMAP Task 6.7)
+// =========================================================================
+
+/// The largest amount of each of a [`ManagedChild`]'s streams this
+/// module keeps in memory, and the largest amount of stdout it will hand
+/// to a caller as lines.
+///
+/// A long-lived child can write forever — `kubectl port-forward` prints
+/// a line per accepted connection — so an unbounded capture would grow
+/// without limit for as long as the forward is useful, which is exactly
+/// the period during which nothing is going to notice. 64 KiB is far
+/// more than the handful of lines any diagnostic in this project reads
+/// and small enough to be irrelevant to a run's memory.
+///
+/// Past the cap, output is still *read* (so the child never blocks on a
+/// full pipe — the deadlock this module's own documentation describes)
+/// and simply discarded. [`ManagedChild::stdout_truncated`] /
+/// [`ManagedChild::stderr_truncated`] report when that has happened, so
+/// a truncated capture is never mistaken for a complete one.
+pub const MAX_CAPTURED_STREAM_BYTES: usize = 64 * 1024;
+
+/// The longest single line [`ManagedChild::next_stdout_line`] will
+/// return. A longer line is truncated to this many bytes; the remainder
+/// is consumed from the pipe and discarded, so a child that never emits
+/// a newline cannot make this process allocate without limit.
+pub const MAX_LINE_BYTES: usize = 8 * 1024;
+
+/// Spawns a child process that outlives the call, for a caller that will
+/// manage its lifetime explicitly.
+///
+/// See this module's "Two shapes of child" section for how this differs
+/// from [`ProcessRunner`], and for why `spec.timeout` is ignored here.
+#[async_trait]
+pub trait ProcessSpawner: Send + Sync {
+    /// Spawns `spec` and returns a live [`ManagedChild`].
+    ///
+    /// `spec.program`, `spec.args`, `spec.cwd` and `spec.env` are honored
+    /// exactly as [`ProcessRunner::run`] honors them — argv-only, no
+    /// shell, stdin `/dev/null`, environment layered onto the inherited
+    /// one. `spec.timeout` is **ignored**; see this module's own
+    /// documentation for why a long-lived child has no honest fixed
+    /// timeout, and [`ManagedChild::next_stdout_line`] for where a bound
+    /// does belong.
+    ///
+    /// `CommandSpec` is reused rather than forked into a spawn-only type
+    /// with no `timeout` field, even though one field is unused: the
+    /// redaction discipline ([`CommandSpec::context`],
+    /// [`CommandSpec::sensitive_env_keys`], the hand-written `Debug`)
+    /// is the whole point of this type, and a parallel type would either
+    /// duplicate that logic or quietly do without it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Spawn`] if the child could not be started
+    /// at all. A child that starts and then exits immediately is *not* an
+    /// error here — it is a successful spawn whose
+    /// [`ManagedChild::wait`] reports a non-zero status, the same line
+    /// [`CommandResult`] draws.
+    async fn spawn(&self, spec: CommandSpec) -> Result<ManagedChild, ProcessError>;
+}
+
+/// One bounded capture of a child's stream.
+#[derive(Debug, Default)]
+struct CapturedStream {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl CapturedStream {
+    /// Appends as much of `chunk` as fits under
+    /// [`MAX_CAPTURED_STREAM_BYTES`], marking the capture truncated if
+    /// anything had to be dropped.
+    fn push(&mut self, chunk: &[u8]) {
+        let room = MAX_CAPTURED_STREAM_BYTES.saturating_sub(self.bytes.len());
+        if room < chunk.len() {
+            self.truncated = true;
+        }
+        self.bytes
+            .extend_from_slice(&chunk[..room.min(chunk.len())]);
+    }
+}
+
+/// A running child process whose lifetime the caller owns.
+///
+/// Obtained from [`ProcessSpawner::spawn`]. The caller reads lines from
+/// its stdout ([`ManagedChild::next_stdout_line`]), inspects what it has
+/// written so far ([`ManagedChild::captured_stderr`]), and — this is the
+/// load-bearing part — **explicitly terminates it**
+/// ([`ManagedChild::kill`]) when it is no longer needed.
+///
+/// # Why termination cannot be left to `Drop`
+///
+/// Killing a process and reaping it is asynchronous, and Rust's `Drop`
+/// is not: a `Drop` implementation cannot `.await` a `Child::kill`, so
+/// it cannot guarantee the process is gone by the time it returns. Three
+/// layers therefore exist, in order of strength:
+///
+/// 1. **[`ManagedChild::kill`], the primary mechanism.** Synchronous
+///    with its own completion: when it resolves `Ok`, the process has
+///    been signalled *and* reaped. A caller that wants "no leaked
+///    process" as a fact rather than a hope must call it.
+/// 2. **`kill_on_drop(true)`, the backstop.** Dropping the inner `Child`
+///    hands it to tokio's orphan reaper, which kills it in the
+///    background. This catches a panic or an early `return` that skipped
+///    step 1 — but only while the tokio runtime is still alive, and only
+///    "eventually".
+/// 3. **This type's own `Drop`, the confession.** It cannot wait, so
+///    instead it signals best-effort (`start_kill`) and emits a
+///    `tracing::warn!` naming the pid and the exact command to run by
+///    hand. That mirrors what
+///    `admissionlab_core::run::preserved_cluster_report` and the
+///    `cluster.delete_failed` diagnostic already do for a cluster that
+///    may have leaked: when Admission Lab cannot guarantee cleanup, it
+///    says so and tells the operator precisely what to type, rather than
+///    staying quiet and hoping.
+#[derive(Debug)]
+pub struct ManagedChild {
+    /// The child's OS process id, so a diagnostic can name it and an
+    /// operator can act on it.
+    pub id: u32,
+    /// A redaction-safe description of what was spawned, for errors and
+    /// for the leak warning.
+    context: Box<CommandContext>,
+    child: tokio::process::Child,
+    /// Complete stdout lines, in order, up to
+    /// [`MAX_CAPTURED_STREAM_BYTES`]. Closed when the child's stdout
+    /// reaches EOF or the cap is hit.
+    stdout_lines: tokio::sync::mpsc::UnboundedReceiver<String>,
+    stdout: std::sync::Arc<std::sync::Mutex<CapturedStream>>,
+    stderr: std::sync::Arc<std::sync::Mutex<CapturedStream>>,
+    /// The two background drain tasks, joined once the child is gone so
+    /// that a caller reading [`ManagedChild::captured_stderr`] after
+    /// [`ManagedChild::wait`]/[`ManagedChild::kill`] sees everything the
+    /// child wrote rather than however much had happened to be read.
+    pumps: Vec<tokio::task::JoinHandle<()>>,
+    /// Set once the child has been killed or waited on, so `Drop` knows
+    /// whether it has anything to warn about.
+    reaped: bool,
+}
+
+/// How long [`ManagedChild::wait`]/[`ManagedChild::kill`] will wait for
+/// the background drain tasks to finish once the child itself is gone.
+///
+/// They normally finish immediately: a dead process's pipes are at EOF.
+/// The bound exists for the one case where they would not — a grandchild
+/// that inherited the pipe and outlived its parent — where hanging
+/// forever waiting for output from a process this code never spawned
+/// would be strictly worse than returning with a capture that says it
+/// was truncated. No tool this project spawns behaves that way today;
+/// the bound is here so that a tool which starts to cannot hang a run.
+const PUMP_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+impl ManagedChild {
+    /// A redaction-safe description of the command this child is running.
+    #[must_use]
+    pub fn context(&self) -> &CommandContext {
+        &self.context
+    }
+
+    /// Waits up to `timeout` for the child's next complete line of
+    /// stdout.
+    ///
+    /// `Ok(Some(line))` is a line, with its trailing newline removed and
+    /// its bytes decoded lossily (a child's output is bytes; a
+    /// diagnostic is text, and dropping a line because one byte was not
+    /// UTF-8 would destroy evidence — the same choice, for the same
+    /// reason, `admissionlab_echo::echo` documents for header values).
+    ///
+    /// `Ok(None)` means there will never be another line: the child
+    /// closed its stdout (in practice, it exited) or it has written more
+    /// than [`MAX_CAPTURED_STREAM_BYTES`]. A caller waiting for a
+    /// specific line should treat this as "it is not coming" and consult
+    /// [`ManagedChild::wait`] for why.
+    ///
+    /// The `timeout` argument is where Global Constraint 13's bound
+    /// lives for a long-lived child: the *process* is unbounded, each
+    /// *wait* on it is not. See this module's own documentation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::OutputTimedOut`] if `timeout` elapses
+    /// first. The child is left running: this function never kills it,
+    /// because whether a silent child should die is the caller's
+    /// decision.
+    pub async fn next_stdout_line(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<Option<String>, ProcessError> {
+        let start = Instant::now();
+        match tokio::time::timeout(timeout, self.stdout_lines.recv()).await {
+            Ok(line) => Ok(line),
+            Err(_elapsed) => Err(ProcessError::OutputTimedOut {
+                context: self.context.clone(),
+                timeout,
+                elapsed: start.elapsed(),
+                stdout: self.captured_stdout(),
+                stderr: self.captured_stderr(),
+            }),
+        }
+    }
+
+    /// Everything the child has written to stdout so far, up to
+    /// [`MAX_CAPTURED_STREAM_BYTES`].
+    #[must_use]
+    pub fn captured_stdout(&self) -> Vec<u8> {
+        Self::snapshot(&self.stdout).0
+    }
+
+    /// Whether [`ManagedChild::captured_stdout`] is missing output the
+    /// child actually produced.
+    #[must_use]
+    pub fn stdout_truncated(&self) -> bool {
+        Self::snapshot(&self.stdout).1
+    }
+
+    /// Everything the child has written to stderr so far, up to
+    /// [`MAX_CAPTURED_STREAM_BYTES`].
+    #[must_use]
+    pub fn captured_stderr(&self) -> Vec<u8> {
+        Self::snapshot(&self.stderr).0
+    }
+
+    /// Whether [`ManagedChild::captured_stderr`] is missing output the
+    /// child actually produced.
+    #[must_use]
+    pub fn stderr_truncated(&self) -> bool {
+        Self::snapshot(&self.stderr).1
+    }
+
+    /// Reads one capture. A poisoned lock is recovered from rather than
+    /// propagated: the only writer is this module's own pump task, which
+    /// holds the lock across nothing that can panic, and losing a
+    /// diagnostic capture is never worth turning into a panic of its own.
+    fn snapshot(stream: &std::sync::Mutex<CapturedStream>) -> (Vec<u8>, bool) {
+        let guard = stream
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (guard.bytes.clone(), guard.truncated)
+    }
+
+    /// Whether the child has already exited, without waiting for it.
+    ///
+    /// `Ok(None)` means it is still running.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Io`] if the status could not be checked.
+    pub fn try_status(&mut self) -> Result<Option<ExitStatus>, ProcessError> {
+        match self.child.try_wait() {
+            Ok(status) => {
+                if status.is_some() {
+                    self.reaped = true;
+                }
+                Ok(status)
+            }
+            Err(source) => Err(ProcessError::Io {
+                context: self.context.clone(),
+                source,
+            }),
+        }
+    }
+
+    /// Waits for the child to exit on its own and returns its status.
+    ///
+    /// Unbounded on purpose — a caller that needs a bound wraps this in
+    /// its own `tokio::time::timeout`, at the call site where the right
+    /// bound is known. Used in practice to collect the status of a child
+    /// that has *already* been observed to exit (its stdout reached EOF),
+    /// where there is nothing to bound.
+    ///
+    /// When this returns, the stream captures are **complete**: the
+    /// background drain tasks have been joined (see
+    /// [`PUMP_DRAIN_TIMEOUT`]), so
+    /// [`ManagedChild::captured_stderr`] is everything the child wrote
+    /// up to the cap rather than however much had been read by chance.
+    /// Without that barrier a diagnostic built from a dead child's
+    /// stderr would be a race, and would usually lose.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::Io`] if the child could not be waited on.
+    pub async fn wait(&mut self) -> Result<ExitStatus, ProcessError> {
+        let status = self.child.wait().await.map_err(|source| ProcessError::Io {
+            context: self.context.clone(),
+            source,
+        })?;
+        self.reaped = true;
+        self.drain_pumps().await;
+        Ok(status)
+    }
+
+    /// Joins both drain tasks, bounded by [`PUMP_DRAIN_TIMEOUT`].
+    ///
+    /// Best-effort by construction: a task that panicked or a bound that
+    /// elapsed leaves the captures as they are, which they already
+    /// report honestly through `*_truncated`. Turning either into an
+    /// error would replace a real exit status (or a real kill failure)
+    /// with a complaint about bookkeeping.
+    async fn drain_pumps(&mut self) {
+        let pumps = std::mem::take(&mut self.pumps);
+        for pump in pumps {
+            if tokio::time::timeout(PUMP_DRAIN_TIMEOUT, pump)
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    }
+
+    /// Kills the child and reaps it.
+    ///
+    /// When this resolves `Ok`, the process is gone — `Child::kill`
+    /// sends the signal *and* awaits the exit, exactly as
+    /// [`ProcessRunner::run`]'s own timeout path relies on. Calling it
+    /// on a child that has already exited succeeds and does nothing.
+    ///
+    /// As with [`ManagedChild::wait`], the stream captures are complete
+    /// once this returns `Ok`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProcessError::KillFailed`] if the child could not be
+    /// killed, which — as that variant documents — means it may still be
+    /// running.
+    pub async fn kill(&mut self) -> Result<(), ProcessError> {
+        let result = self.child.kill().await;
+        // Reaped either way: `kill` on an already-exited child is `Ok`,
+        // and on failure the flag stops `Drop` from adding a second,
+        // redundant warning to an error the caller is already holding.
+        self.reaped = true;
+        if result.is_ok() {
+            self.drain_pumps().await;
+        }
+        result.map_err(|source| ProcessError::KillFailed {
+            context: self.context.clone(),
+            // No timeout was in play; a long-lived child is not bounded
+            // by one (see this module's documentation). Reported as zero
+            // rather than as a fabricated plausible value.
+            timeout: Duration::ZERO,
+            source,
+        })
+    }
+}
+
+impl Drop for ManagedChild {
+    fn drop(&mut self) {
+        if self.reaped {
+            return;
+        }
+        // Best-effort only: `start_kill` sends the signal and returns
+        // immediately, without waiting for the process to actually go
+        // away, because `Drop` cannot await. `kill_on_drop(true)` on the
+        // inner `Child` does the same thing a moment later via tokio's
+        // orphan reaper; this call is the explicit half so the intent is
+        // visible at the point it matters rather than buried in a
+        // builder flag.
+        let _ = self.child.start_kill();
+        tracing::warn!(
+            pid = self.id,
+            command = %self.context,
+            "a managed child process was dropped without an explicit kill(); it has been \
+             signalled best-effort, but termination could not be awaited -- if pid {} is still \
+             running, stop it with: kill {}",
+            self.id,
+            self.id
+        );
+    }
+}
+
+#[async_trait]
+impl ProcessSpawner for TokioProcessRunner {
+    async fn spawn(&self, spec: CommandSpec) -> Result<ManagedChild, ProcessError> {
+        let mut command = TokioCommand::new(&spec.program);
+        command
+            .args(&spec.args)
+            .envs(&spec.env)
+            // Identical to `run`'s configuration, and for identical
+            // reasons — see that function and this module's own
+            // documentation. `spec.timeout` is the one field that is
+            // deliberately not consulted.
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        if let Some(cwd) = &spec.cwd {
+            command.current_dir(cwd);
+        }
+
+        let mut child = command.spawn().map_err(|source| ProcessError::Spawn {
+            context: Box::new(spec.context()),
+            source,
+        })?;
+
+        // A just-spawned child always has an id; `Child::id` only
+        // returns `None` after it has been waited on, which cannot have
+        // happened yet.
+        let id = child.id().ok_or_else(|| ProcessError::Spawn {
+            context: Box::new(spec.context()),
+            source: io::Error::other("the spawned child reported no process id"),
+        })?;
+
+        let stdout_pipe = child
+            .stdout
+            .take()
+            .expect("child was spawned with Stdio::piped() stdout");
+        let stderr_pipe = child
+            .stderr
+            .take()
+            .expect("child was spawned with Stdio::piped() stderr");
+
+        let stdout = std::sync::Arc::new(std::sync::Mutex::new(CapturedStream::default()));
+        let stderr = std::sync::Arc::new(std::sync::Mutex::new(CapturedStream::default()));
+        let (sender, stdout_lines) = tokio::sync::mpsc::unbounded_channel();
+
+        // Both pipes are drained from the moment of spawn, on their own
+        // tasks — the same anti-deadlock rule `run` follows, and more
+        // urgent here: a long-lived child writes for as long as it lives,
+        // so a pipe nobody reads is certain to fill rather than merely
+        // likely to.
+        let pumps = vec![
+            tokio::spawn(pump(
+                stdout_pipe,
+                Some(sender),
+                std::sync::Arc::clone(&stdout),
+            )),
+            tokio::spawn(pump(stderr_pipe, None, std::sync::Arc::clone(&stderr))),
+        ];
+
+        Ok(ManagedChild {
+            id,
+            context: Box::new(spec.context()),
+            child,
+            stdout_lines,
+            stdout,
+            stderr,
+            pumps,
+            reaped: false,
+        })
+    }
+}
+
+/// Drains one of a [`ManagedChild`]'s pipes to EOF, capturing what it
+/// reads (bounded) and, for stdout, forwarding each complete line.
+///
+/// Keeps reading past the capture cap rather than stopping: the point is
+/// to keep the pipe empty so the child never blocks writing into it,
+/// which is a correctness property independent of whether anyone still
+/// wants the bytes.
+async fn pump<R>(
+    pipe: R,
+    mut lines: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    captured: std::sync::Arc<std::sync::Mutex<CapturedStream>>,
+) where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = tokio::io::BufReader::new(pipe);
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        match read_bounded_line(&mut reader, &mut line, &captured).await {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
+        let over_cap = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .truncated;
+        if over_cap {
+            // Past the cap, stop handing lines to the caller too: an
+            // unbounded channel nobody drains is the same unbounded
+            // growth the byte cap exists to prevent.
+            lines = None;
+        }
+        if let Some(sender) = &lines {
+            let text = String::from_utf8_lossy(trim_newline(&line)).into_owned();
+            if sender.send(text).is_err() {
+                // The receiver (the `ManagedChild`) is gone; nothing is
+                // listening, but the pipe must still be drained.
+                lines = None;
+            }
+        }
+    }
+}
+
+/// Reads up to and including the next `\n` from `reader`, appending at
+/// most [`MAX_LINE_BYTES`] of it to `out`, appending every byte it
+/// consumes to `captured` (which applies its own, larger cap), and
+/// returning how many bytes were consumed from the pipe (`0` only at
+/// EOF).
+///
+/// Not `AsyncBufReadExt::read_until`, which is unbounded: a child that
+/// writes a gigabyte with no newline in it would make that function
+/// allocate a gigabyte. This consumes exactly the same bytes — so the
+/// pipe keeps moving — while allocating at most `MAX_LINE_BYTES` for the
+/// line.
+///
+/// The capture is fed here, byte by consumed byte, rather than from the
+/// assembled line: otherwise a stream with no newlines in it at all
+/// would be captured only up to `MAX_LINE_BYTES`, and
+/// [`MAX_CAPTURED_STREAM_BYTES`] would silently mean something different
+/// depending on whether the child happened to emit newlines.
+async fn read_bounded_line<R>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    captured: &std::sync::Mutex<CapturedStream>,
+) -> io::Result<usize>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt as _;
+
+    let mut consumed = 0usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(consumed);
+        }
+        let (take, done) = match available.iter().position(|byte| *byte == b'\n') {
+            Some(index) => (index + 1, true),
+            None => (available.len(), false),
+        };
+        let chunk = &available[..take];
+        captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(chunk);
+        let room = MAX_LINE_BYTES.saturating_sub(out.len());
+        out.extend_from_slice(&chunk[..room.min(take)]);
+        reader.consume(take);
+        consumed += take;
+        if done {
+            return Ok(consumed);
+        }
+    }
+}
+
+/// Strips one trailing `\n`, and a `\r` before it, from `line`.
+fn trim_newline(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
 }
 
 /// Reads `pipe` to EOF and returns everything read.

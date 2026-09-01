@@ -51,8 +51,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use admissionlab_core::{
-    CommandContext, CommandResult, CommandSpec, ProcessError, ProcessRunner, RedactedValue,
-    TokioProcessRunner,
+    CommandContext, CommandResult, CommandSpec, MAX_CAPTURED_STREAM_BYTES, ManagedChild,
+    ProcessError, ProcessRunner, ProcessSpawner, RedactedValue, TokioProcessRunner,
 };
 
 // =====================================================================
@@ -110,6 +110,7 @@ fn run_helper(mode: &str) -> ExitCode {
         "print-env-var" => helper_print_env_var(),
         "sleep-then-exit" => helper_sleep_then_exit(),
         "big-output" => helper_big_output(),
+        "fail-with-stderr" => helper_fail_with_stderr(),
         other => panic!("test bug: unknown helper mode {other:?}"),
     }
 }
@@ -206,6 +207,22 @@ fn helper_print_env_var() -> ExitCode {
     out.flush().expect("flush stdout");
     ExitCode::SUCCESS
 }
+
+/// Writes one line to stderr and exits non-zero immediately, modelling
+/// the way `kubectl port-forward` fails: it never prints the
+/// `Forwarding from ...` line a caller is waiting for on stdout, and the
+/// reason is on stderr. Used to prove that a `ManagedChild` whose stdout
+/// reaches EOF still carries a complete stderr capture.
+fn helper_fail_with_stderr() -> ExitCode {
+    let stderr = io::stderr();
+    let mut err = stderr.lock();
+    writeln!(err, "{HELPER_STDERR_FAILURE_LINE}").expect("write stderr line");
+    err.flush().expect("flush stderr");
+    ExitCode::from(7)
+}
+
+/// The exact line `fail-with-stderr` writes.
+const HELPER_STDERR_FAILURE_LINE: &str = "error: unable to listen on any of the requested ports";
 
 /// Writes `HELPER_STDOUT_LEN_VAR` bytes to stdout (cycling `a`-`z`) and
 /// `HELPER_STDERR_LEN_VAR` bytes to stderr (cycling `A`-`Z`),
@@ -312,6 +329,35 @@ const TESTS: &[(&str, TestFn)] = &[
     (
         "process_error_display_never_contains_a_redacted_raw_value",
         process_error_display_never_contains_a_redacted_raw_value,
+    ),
+    // ---- ProcessSpawner / ManagedChild (Task 6.7) ----
+    (
+        "spawned_argv_reaches_the_child_unmodified",
+        spawned_argv_reaches_the_child_unmodified,
+    ),
+    (
+        "spawn_ignores_the_specs_timeout_and_leaves_the_child_running",
+        spawn_ignores_the_specs_timeout_and_leaves_the_child_running,
+    ),
+    (
+        "a_bounded_line_wait_times_out_without_killing_the_child",
+        a_bounded_line_wait_times_out_without_killing_the_child,
+    ),
+    (
+        "a_child_that_exits_closes_stdout_and_its_stderr_capture_is_complete",
+        a_child_that_exits_closes_stdout_and_its_stderr_capture_is_complete,
+    ),
+    (
+        "stream_captures_are_bounded_and_report_truncation",
+        stream_captures_are_bounded_and_report_truncation,
+    ),
+    (
+        "kill_terminates_the_child_before_it_finishes_its_work",
+        kill_terminates_the_child_before_it_finishes_its_work,
+    ),
+    (
+        "dropping_a_managed_child_still_terminates_the_process",
+        dropping_a_managed_child_still_terminates_the_process,
     ),
 ];
 
@@ -927,3 +973,265 @@ fn process_error_display_never_contains_a_redacted_raw_value(rt: &tokio::runtime
     let debug_rendered = format!("{err:?}");
     assert!(!debug_rendered.contains("leaked-if-buggy"));
 }
+
+// =====================================================================
+// 13. ProcessSpawner / ManagedChild: a child the caller owns (Task 6.7).
+//
+// The shape `kubectl port-forward` needs: a process that does not
+// finish, whose stdout is read line by line while it runs, whose stderr
+// is available when it dies, and which is guaranteed to be gone
+// afterwards. Every test below spawns the same self-re-invocation helper
+// the rest of this file uses, so none of it depends on an external
+// binary.
+// =====================================================================
+
+/// How long a spawned-child test waits for a line it expects to arrive
+/// promptly. Generous: this bound is not what any assertion is about,
+/// and a slow CI machine must not turn a correctness test into a flake.
+const SPAWN_LINE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Spawns `spec` through the production [`ProcessSpawner`].
+fn spawn_spec(rt: &tokio::runtime::Runtime, spec: CommandSpec) -> ManagedChild {
+    let runner = TokioProcessRunner::new();
+    rt.block_on(runner.spawn(spec)).expect("spawn must succeed")
+}
+
+/// A `sleep-then-exit` spec that sleeps `sleep` before exiting `0`.
+/// Its first act is to write and flush a `PID=<pid>` line, so a caller
+/// always has one line to read before the sleep begins.
+fn sleeping_spawn_spec(sleep: Duration) -> CommandSpec {
+    // The `timeout` here is deliberately absurd (1ms): `spawn` must
+    // ignore it, which is exactly what
+    // `spawn_ignores_the_specs_timeout_and_leaves_the_child_running`
+    // asserts.
+    let mut spec = helper_spec("sleep-then-exit", Duration::from_millis(1));
+    spec.env.insert(
+        OsString::from(HELPER_SLEEP_MS_VAR),
+        OsString::from(sleep.as_millis().to_string()),
+    );
+    spec
+}
+
+fn spawned_argv_reaches_the_child_unmodified(rt: &tokio::runtime::Runtime) {
+    // The same no-shell property `argv_round_trips_exactly_...` proves
+    // for `run`, asserted separately for `spawn`: the two share a module
+    // and a set of guarantees, not an implementation, so a regression in
+    // one would not be caught by the other's test.
+    let mut spec = helper_spec("echo-argv", Duration::from_secs(10));
+    spec.args = vec![
+        OsString::from("a b"),
+        OsString::from("$(touch /tmp/pwned)"),
+        OsString::from("*"),
+    ];
+
+    let mut child = spawn_spec(rt, spec);
+    let status = rt.block_on(child.wait()).expect("the child exits");
+    assert!(status.success());
+
+    let stdout = child.captured_stdout();
+    let args: Vec<&[u8]> = stdout
+        .split(|byte| *byte == 0)
+        .filter(|part| !part.is_empty())
+        .collect();
+    assert_eq!(
+        args,
+        vec![
+            b"a b".as_slice(),
+            b"$(touch /tmp/pwned)".as_slice(),
+            b"*".as_slice()
+        ],
+        "each argument must arrive as its own argv element, unexpanded and unsplit"
+    );
+}
+
+fn spawn_ignores_the_specs_timeout_and_leaves_the_child_running(rt: &tokio::runtime::Runtime) {
+    // Global Constraint 13, as this module resolves it: a long-lived
+    // child is bounded by the caller's cleanup, not by
+    // `CommandSpec::timeout`. `run` would have killed this child after
+    // 1ms; `spawn` must not.
+    let mut child = spawn_spec(rt, sleeping_spawn_spec(Duration::from_secs(30)));
+
+    let line = rt
+        .block_on(child.next_stdout_line(SPAWN_LINE_TIMEOUT))
+        .expect("reading the pid line must not fail")
+        .expect("the helper writes a pid line before sleeping");
+    assert!(line.starts_with("PID="), "got {line:?}");
+
+    rt.block_on(async { tokio::time::sleep(Duration::from_millis(250)).await });
+    assert!(
+        child
+            .try_status()
+            .expect("checking the status must not fail")
+            .is_none(),
+        "the child must still be running 250ms after its 1ms `timeout` would have fired"
+    );
+
+    rt.block_on(child.kill()).expect("kill must succeed");
+}
+
+fn a_bounded_line_wait_times_out_without_killing_the_child(rt: &tokio::runtime::Runtime) {
+    let mut child = spawn_spec(rt, sleeping_spawn_spec(Duration::from_secs(30)));
+    let _pid_line = rt
+        .block_on(child.next_stdout_line(SPAWN_LINE_TIMEOUT))
+        .expect("read")
+        .expect("pid line");
+
+    let error = rt
+        .block_on(child.next_stdout_line(Duration::from_millis(100)))
+        .expect_err("the helper writes nothing else until it wakes up");
+    match &error {
+        ProcessError::OutputTimedOut { stdout, .. } => {
+            assert!(
+                String::from_utf8_lossy(stdout).starts_with("PID="),
+                "the timeout must carry what the child did say, got {stdout:?}"
+            );
+        }
+        other => panic!("expected OutputTimedOut, got {other:?}"),
+    }
+
+    assert!(
+        child
+            .try_status()
+            .expect("checking the status must not fail")
+            .is_none(),
+        "a bounded wait that elapses must leave the child alone -- whether a silent child \
+         should die is the caller's decision, not this function's"
+    );
+    rt.block_on(child.kill()).expect("kill must succeed");
+}
+
+fn a_child_that_exits_closes_stdout_and_its_stderr_capture_is_complete(
+    rt: &tokio::runtime::Runtime,
+) {
+    // Exactly the shape `admissionlab_gateway::port_forward` depends on
+    // for a premature exit: stdout reaches EOF instead of producing the
+    // awaited line, and stderr says why.
+    let mut child = spawn_spec(rt, helper_spec("fail-with-stderr", Duration::from_secs(10)));
+
+    let line = rt
+        .block_on(child.next_stdout_line(SPAWN_LINE_TIMEOUT))
+        .expect("reading must not fail");
+    assert_eq!(
+        line, None,
+        "a child that exits without writing to stdout must report EOF, never a fabricated line"
+    );
+
+    let status = rt.block_on(child.wait()).expect("wait must succeed");
+    assert_eq!(status.code(), Some(7));
+    assert_eq!(
+        String::from_utf8_lossy(&child.captured_stderr()).trim_end(),
+        HELPER_STDERR_FAILURE_LINE,
+        "after wait() the stderr capture must be complete, not whatever had been read by chance"
+    );
+    assert!(!child.stderr_truncated());
+}
+
+fn stream_captures_are_bounded_and_report_truncation(rt: &tokio::runtime::Runtime) {
+    // A long-lived child can write forever; the capture cannot grow
+    // forever. Two things are asserted together, because either alone
+    // would be a bug: the capture stops at the cap, and it *says* it
+    // stopped.
+    let over_cap = MAX_CAPTURED_STREAM_BYTES * 3;
+    let mut spec = helper_spec("big-output", Duration::from_secs(30));
+    spec.env.insert(
+        OsString::from(HELPER_STDOUT_LEN_VAR),
+        OsString::from(over_cap.to_string()),
+    );
+    spec.env.insert(
+        OsString::from(HELPER_STDERR_LEN_VAR),
+        OsString::from(over_cap.to_string()),
+    );
+
+    let mut child = spawn_spec(rt, spec);
+    let status = rt.block_on(child.wait()).expect("wait must succeed");
+    assert!(
+        status.success(),
+        "the child must run to completion, not deadlock on a full pipe nobody is draining"
+    );
+
+    for (name, bytes, truncated) in [
+        ("stdout", child.captured_stdout(), child.stdout_truncated()),
+        ("stderr", child.captured_stderr(), child.stderr_truncated()),
+    ] {
+        assert_eq!(
+            bytes.len(),
+            MAX_CAPTURED_STREAM_BYTES,
+            "{name} capture must stop at the cap"
+        );
+        assert!(truncated, "{name} must report that it was truncated");
+    }
+}
+
+fn kill_terminates_the_child_before_it_finishes_its_work(rt: &tokio::runtime::Runtime) {
+    // Proven the same portable way the `run` timeout test proves it: the
+    // helper writes a sentinel file only *after* its sleep, so the file's
+    // absence is evidence the process really died rather than merely
+    // being detached from.
+    let dir = unique_scratch_dir("managed-child-kill");
+    let done_file = dir.join("done");
+
+    let mut spec = sleeping_spawn_spec(Duration::from_secs(3));
+    spec.env.insert(
+        OsString::from(HELPER_DONE_FILE_VAR),
+        OsString::from(done_file.as_os_str()),
+    );
+
+    let mut child = spawn_spec(rt, spec);
+    let _pid_line = rt
+        .block_on(child.next_stdout_line(SPAWN_LINE_TIMEOUT))
+        .expect("read")
+        .expect("pid line -- the child is definitely running by now");
+
+    rt.block_on(child.kill()).expect("kill must succeed");
+    assert!(
+        child
+            .try_status()
+            .expect("status")
+            .is_some_and(|status| !status.success()),
+        "a killed child must report a non-success status"
+    );
+
+    std::thread::sleep(Duration::from_secs(4));
+    assert!(
+        !done_file.exists(),
+        "the child wrote its post-sleep sentinel, so kill() did not actually stop it"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(target_os = "linux")]
+fn dropping_a_managed_child_still_terminates_the_process(rt: &tokio::runtime::Runtime) {
+    // Layer 2 of the three documented on `ManagedChild`: dropping the
+    // handle without an explicit kill() must not leak the process, even
+    // though `Drop` cannot await the termination it starts. This is what
+    // makes the port-forward guard's own Drop a warning rather than a
+    // silent leak.
+    let mut child = spawn_spec(rt, sleeping_spawn_spec(Duration::from_secs(30)));
+    let pid = child.id;
+    let _pid_line = rt
+        .block_on(child.next_stdout_line(SPAWN_LINE_TIMEOUT))
+        .expect("read")
+        .expect("pid line");
+    assert!(
+        proc_dir_exists(pid),
+        "the child must actually be running before it is dropped"
+    );
+
+    drop(child);
+    // The tokio orphan reaper runs on the runtime, so it needs the
+    // runtime to make progress before it can collect the child.
+    rt.block_on(async { tokio::time::sleep(Duration::from_millis(200)).await });
+
+    assert!(
+        !proc_dir_exists(pid),
+        "pid {pid} survived the drop of its ManagedChild: the kill_on_drop backstop is not \
+         working, and a run that panicked mid-suite would leak a port-forward"
+    );
+}
+
+/// Non-Linux fallback: `/proc` is where this project's liveness check
+/// lives (see `proc_dir_exists`), so on any other target the drop
+/// behavior is left unasserted rather than asserted vacuously.
+#[cfg(not(target_os = "linux"))]
+fn dropping_a_managed_child_still_terminates_the_process(_rt: &tokio::runtime::Runtime) {}

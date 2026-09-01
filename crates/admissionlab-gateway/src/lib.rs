@@ -35,6 +35,10 @@
 //!   module before assuming anything about how a Gateway's data plane is
 //!   located: the mapping is vendor metadata, the ambiguity rules are
 //!   deliberate, and the port rule has two decisions in it.
+//! - [`port_forward`] (Task 6.7) opens a `kubectl port-forward` to that
+//!   endpoint and manages its lifetime. Read that module's "Timeout
+//!   ownership" and "Termination" sections before changing anything
+//!   about when the child dies.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -66,6 +70,7 @@ pub mod conditions;
 pub mod endpoint;
 pub mod error;
 pub mod model;
+pub mod port_forward;
 pub mod reconcile;
 
 pub use apply::{
@@ -83,6 +88,11 @@ pub use endpoint::{
     resolve_gateway_endpoint_with_client,
 };
 pub use error::{EndpointLookup, GatewayError};
+pub use port_forward::{
+    KUBECTL_PROGRAM, LOCAL_ADDRESS, PORT_FORWARD_READY_TIMEOUT, PortForwardHandle,
+    PortForwardOutput, await_forwarding_address, parse_forwarding_line, port_forward_command,
+    start_service_port_forward,
+};
 pub use reconcile::{
     DIAGNOSTIC_GATEWAY_CLASS_ABSENT, DIAGNOSTIC_PARENT_ABSENT, DIAGNOSTIC_PARENT_AMBIGUOUS,
     DIAGNOSTIC_STALE_STATUS, DIAGNOSTIC_TIMEOUT, GATEWAY_API_GROUP, GATEWAY_API_VERSION,

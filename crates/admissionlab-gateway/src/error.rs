@@ -351,6 +351,60 @@ pub enum GatewayError {
         /// Every port the `Service` exposes, in declaration order.
         ports: Vec<String>,
     },
+
+    /// A local port-forward to a Gateway's data plane could not be
+    /// started or stopped because no answer could be obtained at all:
+    /// `kubectl` could not be spawned, or a running forward could not be
+    /// killed.
+    ///
+    /// The `Unavailable`/`Failed` split is the same one
+    /// [`GatewayError::ApplyUnavailable`] and
+    /// [`GatewayError::ApplyRejected`] already draw: this variant is
+    /// "the machinery did not work", never "the forward was refused".
+    #[error("could not manage a port-forward to {endpoint} on cluster {cluster:?}: {reason}")]
+    PortForwardUnavailable {
+        /// The cluster's own name, for the reason
+        /// [`GatewayError::ApplyUnavailable::cluster`] gives.
+        cluster: String,
+        /// The endpoint being forwarded to, in
+        /// [`crate::endpoint::GatewayEndpoint`]'s `Display` form.
+        endpoint: String,
+        /// A human-readable explanation, from the underlying failure's
+        /// own `Display`.
+        reason: String,
+    },
+
+    /// A `kubectl port-forward` started but never became usable: it
+    /// exited before announcing a local port, announced nothing within
+    /// the readiness window, or closed its stdout without ever printing
+    /// a line this crate could parse.
+    ///
+    /// Carries `stderr` verbatim (lossily decoded, and bounded by
+    /// `admissionlab_core::MAX_CAPTURED_STREAM_BYTES`) rather than
+    /// summarizing it: `kubectl`'s own message is the actual diagnosis
+    /// — "Service does not have any active Endpoint", "unable to listen
+    /// on any of the requested ports", "the server could not find the
+    /// requested resource" — and rewording it would only ever lose
+    /// information.
+    #[error("port-forward to {endpoint} on cluster {cluster:?} never became usable: {reason}{}",
+        if .stderr.is_empty() {
+            String::new()
+        } else {
+            format!("; kubectl stderr: {}", .stderr.trim_end())
+        }
+    )]
+    PortForwardFailed {
+        /// The cluster's own name.
+        cluster: String,
+        /// The endpoint being forwarded to.
+        endpoint: String,
+        /// What went wrong, in this crate's own words (the child exited,
+        /// the readiness window elapsed, stdout ended).
+        reason: String,
+        /// Everything `kubectl` wrote to stderr, verbatim. Empty when it
+        /// wrote nothing, which is itself worth seeing.
+        stderr: String,
+    },
 }
 
 /// What a Gateway data-plane `Service` lookup was looking for, and

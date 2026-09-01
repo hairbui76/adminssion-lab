@@ -71,7 +71,21 @@ tracing = { workspace = true }
 # to create/delete the baseline and candidate clusters concurrently
 # (Task 1.10) — `tokio::join!` itself, not just `#[tokio::test]`, needs
 # this feature.
-tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "time"] }
+# `sync` is required in production too (Task 6.7): `process.rs`'s
+# `ManagedChild` hands a long-lived child's stdout to its owner one line
+# at a time over a `tokio::sync::mpsc` channel, fed by the same
+# background pump task that keeps the pipe drained. The same v2-resolver
+# reasoning as `rt`/`fs`/`macros` above applies — a dev-dependency-only
+# feature would not reach a plain library build.
+tokio = { workspace = true, features = [
+    "fs",
+    "io-util",
+    "macros",
+    "process",
+    "rt",
+    "sync",
+    "time",
+] }
 uuid = { workspace = true, features = ["v4"] }
 
 # `tool.rs`'s disk-space check needs `statvfs`, which has no safe std

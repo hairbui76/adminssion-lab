@@ -25,7 +25,8 @@ pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue};
 pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};
 pub use process::{
-    CommandContext, CommandResult, CommandSpec, ProcessError, ProcessRunner, TokioProcessRunner,
+    CommandContext, CommandResult, CommandSpec, MAX_CAPTURED_STREAM_BYTES, MAX_LINE_BYTES,
+    ManagedChild, ProcessError, ProcessRunner, ProcessSpawner, TokioProcessRunner,
     env_key_looks_sensitive,
 };
 pub use reproduce::{

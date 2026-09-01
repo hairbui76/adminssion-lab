@@ -103,8 +103,16 @@ serde_json = { workspace = true }
 # `admissionlab-installer`'s own manifest loader.
 serde_norway = { workspace = true }
 thiserror = { workspace = true }
-# `reconcile.rs`'s capped-backoff poll loop sleeps between polls.
+# `reconcile.rs`'s capped-backoff poll loop sleeps between polls, and
+# `port_forward.rs` (Task 6.7) bounds its readiness wait against a
+# `tokio::time::Instant` deadline.
 tokio = { workspace = true, features = ["time"] }
+# `port_forward.rs` warns when a `kubectl port-forward` could not be
+# killed, naming the pid and the exact `kill <pid>` an operator should
+# run. That is a runtime degradation an operator has to see as it
+# happens, not something a report written later can carry -- the same
+# reason `admissionlab-core`'s own `artifact.rs` depends on `tracing`.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # The same `tower_test::mock`-backed `kube::Client` technique

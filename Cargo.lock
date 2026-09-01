@@ -157,6 +157,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tower-test",
+ "tracing",
 ]
 
 [[package]]
