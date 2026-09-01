@@ -130,7 +130,7 @@ inputs:
 
   version:
     description: >-
-      Admission Lab release version to install, for example `1.0.0-rc.1`. The
+      Admission Lab release version to install, for example `1.0.0`. The
       release tarball is downloaded from the action's own repository and
       verified against `sha256`, which is required together with this.
       Leave empty to build the checked-out working tree with

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "admissionlab-admission"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-cluster",
  "admissionlab-core",
@@ -31,7 +31,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-cli"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-admission",
  "admissionlab-cluster",
@@ -61,7 +61,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-cluster"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-core",
  "async-trait",
@@ -77,7 +77,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-core"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-spec",
  "async-trait",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-diff"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-admission",
  "admissionlab-core",
@@ -109,7 +109,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-echo"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "assert_cmd",
  "bytes",
@@ -128,7 +128,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-fixtures"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-core",
  "admissionlab-spec",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-gateway"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-admission",
  "admissionlab-cluster",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-installer"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-core",
  "admissionlab-spec",
@@ -206,7 +206,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-normalize"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-admission",
  "json-patch",
@@ -217,7 +217,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-policy"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-core",
  "admissionlab-diff",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-recipes"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-cluster",
  "admissionlab-core",
@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-report"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-admission",
  "admissionlab-core",
@@ -267,7 +267,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-spec"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "globset",
  "schemars",
@@ -279,7 +279,7 @@ dependencies = [
 
 [[package]]
 name = "admissionlab-test-webhook"
-version = "1.0.0-rc.1"
+version = "1.0.0"
 dependencies = [
  "admissionlab-cluster",
  "admissionlab-core",

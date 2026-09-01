@@ -16,7 +16,7 @@ what may have changed since the previous one.
 
 > **Status: v1 release candidate.** The contracts below are frozen and enforced
 > by tests today (ROADMAP Tasks 9.1 and 9.2). The workspace crates carry
-> `1.0.0-rc.1`, which is what `admissionlab --version` prints. The `v1.0.0` tag
+> `1.0.0`, which is what `admissionlab --version` prints. The `v1.0.0` tag
 > itself has not been cut — the release candidate is what Phase 10 finalizes
 > into `1.0.0`. Nothing in this document is aspirational about the *contracts*;
 > the only thing not yet done is the final tag.
@@ -378,7 +378,7 @@ below may change in any release, including a patch:
 
 - **The Rust crate APIs.** The `crates/` workspace is an implementation, not a
   published library. Nothing is on crates.io, the crate versions
-  (`1.0.0-rc.1` today) track nothing a user reads, and a type may be renamed,
+  (`1.0.0` today) track nothing a user reads, and a type may be renamed,
   merged, or deleted between any two releases. The supported ways to consume
   Admission Lab are the binary, `result.json`, and `run.json`.
 - **Terminal rendering.** Wording, column layout, ordering within a section,

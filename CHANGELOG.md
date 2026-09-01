@@ -20,6 +20,32 @@ Nothing yet.
 
 ---
 
+## [1.0.0] — 2026-09-01
+
+The first stable release: `1.0.0-rc.1` finalized with no code change. The
+acceptance checklist recorded sixteen locally-verified PASS rows, one
+operator-only row, and zero blockers ([`docs/release-checklist.md`](docs/release-checklist.md));
+the single Task 10.3 disposition was a documentation correction.
+
+**Supported Kubernetes minors** (kind v0.33.0 node images, digest-pinned in
+`compatibility/kubernetes.yaml`): **1.37.0, 1.36.4, 1.35.8** — the core
+dogfood suite passes on all three.
+
+**Certified recipe versions** (`compatibility/recipes.yaml`):
+
+- `kyverno` 3.9.0 — Kubernetes 1.35.8 (Kyverno documents 1.33–1.35; a recipe
+  limitation, not a core one)
+- `istio` 1.30.4 — 1.35.8 / 1.36.4 / 1.37.0
+- `istio-gateway` 1.30.4 (Gateway API v1.5.1) — 1.35.8 / 1.36.4 / 1.37.0
+- `nginx-gateway-fabric` 2.6.7 (Gateway API v1.5.1) — 1.35.8 / 1.36.4 / 1.37.0
+- `ingress-nginx-legacy` 4.15.1 (upstream archived; migration testing only) —
+  1.36.4
+
+Everything the release contains is described by the `1.0.0-rc.1` entry below;
+nothing was added between the candidate and this release.
+
+---
+
 ## [1.0.0-rc.1] — 2026-09-01
 
 Everything since `v0.2.0-beta.1`, cut as the **v1 release candidate**. The
@@ -247,7 +273,8 @@ was deliberately kept out of the critical path until this gate passed.
   and a bounded, argv-only external process runner with timeouts, separate
   stream capture, and credential redaction.
 
-[Unreleased]: https://github.com/hairbui76/admission-lab/compare/v1.0.0-rc.1...HEAD
+[Unreleased]: https://github.com/hairbui76/admission-lab/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/hairbui76/admission-lab/compare/v1.0.0-rc.1...v1.0.0
 [1.0.0-rc.1]: https://github.com/hairbui76/admission-lab/compare/v0.2.0-beta.1...v1.0.0-rc.1
 [0.2.0-beta.1]: https://github.com/hairbui76/admission-lab/compare/v0.1.0-alpha.1...v0.2.0-beta.1
 [0.1.0-alpha.1]: https://github.com/hairbui76/admission-lab/releases/tag/v0.1.0-alpha.1

@@ -64,7 +64,7 @@ jobs:
           # from the release's `SHA256SUMS`, which is itself signed with a
           # keyless Sigstore certificate — the release notes carry the
           # `cosign verify-blob` command that checks it.
-          version: "1.0.0-rc.1"
+          version: "1.0.0"
           sha256: "0000000000000000000000000000000000000000000000000000000000000000"
           # Everything below is optional; these are the defaults, written
           # out so the file shows what it is choosing. `artifact-name` is

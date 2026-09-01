@@ -1,7 +1,7 @@
 {
   "schemaVersion": "admissionlab.io/run/v1",
   "runId": "6f1a7c2e-9b34-4d5a-8f0e-11c2b3a4d5e6",
-  "admissionlabVersion": "1.0.0-rc.1",
+  "admissionlabVersion": "1.0.0",
   "status": "completed",
   "stage": "completed",
   "host": {

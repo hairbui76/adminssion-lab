@@ -164,7 +164,7 @@ fn manifest_from_secret_bearing_inputs() -> RunManifest {
     RunManifest {
         schema_version: SCHEMA_VERSION.to_owned(),
         run_id: RunId::parse("2b8f6c1d-4e5a-4b7c-9d0e-3f1a2b3c4d5e").expect("valid run id"),
-        admissionlab_version: "1.0.0-rc.1".to_owned(),
+        admissionlab_version: "1.0.0".to_owned(),
         status: RunStatus::InProgress,
         stage: RunStage::Started,
         host: HostProvenance::detect(),
