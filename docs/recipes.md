@@ -1,9 +1,10 @@
 # Recipes
 
-A **recipe** is curated, checked-in installation metadata for a known
-admission-stack component: a pinned chart, the readiness checks that actually
-prove the component is serving, harmless response-normalization rules, and a
-declaration of which capabilities the component provides.
+A **recipe** is curated, checked-in installation metadata for a known component
+of an admission, Gateway API, or legacy Ingress stack: a pinned chart, the
+readiness checks that actually prove the component is serving, harmless
+response-normalization rules, and a declaration of which capabilities the
+component provides.
 
 Recipes exist to save you from rediscovering that `istio/istiod` installs into
 `istio-system` rather than `istiod`, or that Kyverno's resource-facing webhook
@@ -11,7 +12,7 @@ configurations are created by its controller at runtime and not rendered by its
 chart.
 
 > **Wiring status, stated up front.** Recipes are a fully implemented,
-> validated, tested format, three of whose recipes carry certified Kubernetes
+> validated, tested format, five of whose recipes carry certified Kubernetes
 > rows — but they are **not yet wired into `admissionlab.yaml`**. The
 > `recipe:` field on a component parses and is carried through, and nothing
 > resolves it: an explicit `install:` block is required today whether or not you
@@ -134,17 +135,18 @@ window gets a *different, quietly wrong* result rather than an error.
 
 ## The recipes this project ships
 
-Five, of which two are embedded in the compiled binary; the others ship as
+Eight, of which two are embedded in the compiled binary; the others ship as
 on-disk recipes because they install raw manifests from paths that only exist on
-disk.
+disk, or because they are composed into a stack with one that does.
 
-**"Ships a recipe" and "is certified" are different claims.** Three of the five
+**"Ships a recipe" and "is certified" are different claims.** Five of the eight
 below carry certified Kubernetes rows in
 [`compatibility/recipes.yaml`](../compatibility/recipes.yaml) — `kyverno`,
-`istio` and `istio-gateway`. The other two do not, and that is deliberate rather
-than an omission: `test-webhook` is Admission Lab's own dogfood instrument
-rather than a stack anyone compares, and `gateway-api-crds` installs
-CustomResourceDefinitions and has no behavior of its own to certify against a
+`istio`, `istio-gateway`, `nginx-gateway-fabric` and `ingress-nginx-legacy`. The
+other three do not, and that is deliberate rather than an omission:
+`test-webhook` is Admission Lab's own dogfood instrument rather than a stack
+anyone compares, and the two Gateway API CRD bundles install
+CustomResourceDefinitions and have no behavior of their own to certify against a
 Kubernetes version independently of the implementation that serves them. See
 [`docs/compatibility.md`](compatibility.md) for the certified table and what a
 certification actually asserts.
@@ -156,21 +158,41 @@ certification actually asserts.
 | `test-webhook` | `0.1.0` | **no** | five raw manifests from `recipes/test-webhook/manifests/` | no — loaded as an on-disk override | Admission Lab's own deterministic dogfood webhook. Not built in because a built-in recipe's text is embedded at compile time and has no directory to resolve relative manifest paths against. |
 | `gateway-api-crds` | `1.5.1` (Gateway API) | **no** — certified as half of `istio-gateway`, never alone | the vendored `standard-install.yaml` bundle under `recipes/istio-gateway/gateway-api/` | no — loaded as an on-disk override | Half of the Istio Gateway API stack, composed **first**. Byte-identical to the upstream release artifact, with its SHA-256 re-checked by the recipe's own test. Declares no capability: it installs an API, not an implementation of one. |
 | `istio-gateway` | `1.30.4` | yes — `1.35.8`, `1.36.4`, `1.37.0` | `istio/istiod` from `https://istio-release.storage.googleapis.com/charts`, namespace `istio-system` | no — composed with `gateway-api-crds` above | The other half: the same chart pin as `istio` (machine-checked against it), plus the `gatewayApi` capability and the `gatewayEndpoint` strategy that locates a Gateway's data-plane Service by its well-known `gateway.networking.k8s.io/gateway-name` label. |
+| `gateway-api-crds-nginx` | `1.5.1` (Gateway API) | **no** — certified as half of `nginx-gateway-fabric`, never alone | the vendored bundle under `recipes/nginx-gateway-fabric/gateway-api/` | no — loaded as an on-disk override | The same Gateway API release `gateway-api-crds` pins, under its own recipe name because two recipes may not share one. NGF 2.6.7 and Istio 1.30.4 happen to build against the same bundle; the duplication is deliberate rather than a shared file, so either implementation's pin can move without touching the other's. |
+| `nginx-gateway-fabric` | `2.6.7` (Gateway API `1.5.1`) | yes — `1.35.8`, `1.36.4`, `1.37.0` | `oci://ghcr.io/nginx/charts/nginx-gateway-fabric`, namespace `nginx-gateway` | no — composed with `gateway-api-crds-nginx` above | The **second certified Gateway API implementation**, and this project's first **OCI** chart reference: NGF publishes its chart only to that registry, so no `helm repo add` runs for it. `releaseName` is deliberately unset — the chart names every object after the release, so the default (this recipe's own name) is what makes the `nginx-gateway/nginx-gateway-fabric` readiness gate name a real Deployment. Readiness additionally waits for the `nginx` `GatewayClass` to be `Accepted`, so the controller is proven *serving the API* and not merely running. |
+| `ingress-nginx-legacy` | `4.15.1` (controller v1.15.1) | yes — `1.36.4` only, **migration testing only** | `ingress-nginx/ingress-nginx` from `https://kubernetes.github.io/ingress-nginx`, namespace `ingress-nginx-legacy` | no — loaded as an on-disk override | **The upstream project is retired and its repository archived.** This recipe exists so Admission Lab can test migrations *away* from it, and its presence here is not a recommendation to run it. `4.15.1` is the project's final release, so this is one pin that will never need a bump. It claims the `legacyIngress` capability and deliberately **not** `admission`. See [`recipes/ingress-nginx-legacy/README.md`](../recipes/ingress-nginx-legacy/README.md) for the retirement dates, the upstream's own wording, and Admission Lab's stance. |
 
-`recipes/istio-gateway/` is one **stack of two components**, not one recipe: the
-schema has exactly one `install:` per recipe, so "install the CRDs, then Istio"
-is expressed as an ordered component list, which `install_stack` installs
+Both `recipes/istio-gateway/` and `recipes/nginx-gateway-fabric/` are one
+**stack of two components**, not one recipe: the schema has exactly one
+`install:` per recipe, so "install the CRDs, then the implementation" is
+expressed as an ordered component list, which `install_stack` installs
 sequentially, waiting out each component's readiness before the next begins.
 
 Per-recipe Kubernetes certification lives in `compatibility/recipes.yaml`, not
 in the recipe files — and it is read by the certification tests at test time
-rather than copied, so a recipe and its test cannot silently drift apart. The
-`kyverno` entry is deliberately **narrower** than Admission Lab's own supported
-set, because Kyverno's own documentation for this chart line states support for
-Kubernetes v1.33–v1.35 — so `kyverno` is certified on `1.35.8` and nowhere else,
-deliberately not on Admission Lab's own primary `1.36.4`. Neither `istio` nor
-`istio-gateway` has a vendor constraint to narrow them, and both are certified
-across Admission Lab's entire supported set, each on its own schedule.
+rather than copied, so a recipe and its test cannot silently drift apart.
+
+Two entries are deliberately **narrower** than Admission Lab's own supported
+set, and in opposite directions:
+
+- **`kyverno` is certified on `1.35.8` and nowhere else** — deliberately not on
+  Admission Lab's own primary `1.36.4` — because Kyverno's documentation for
+  this chart line states support for Kubernetes v1.33–v1.35, and certifying past
+  it would claim a window the vendor does not.
+- **`ingress-nginx-legacy` is certified on `1.36.4` only, which is *outside* its
+  own `documentedRange`** of 1.31–1.35 — the only row in the file that is.
+  Global Constraint 10 admits the archived recipe at v1 only if it passes on the
+  primary supported Kubernetes version, and an archived project will never
+  publish a table that includes 1.36, so waiting for one means never shipping
+  the migration recipe. Both halves are recorded rather than reconciled: the
+  vendor's frozen claim stays as written, and the certified row is Admission
+  Lab's own measurement.
+
+`istio`, `istio-gateway`, and `nginx-gateway-fabric` have no vendor constraint
+narrow enough to bite — the first two have no published range at all, and NGF's
+"1.31+" states no maximum, which is recorded as *unknown* rather than read as
+permission — so all three are certified across Admission Lab's entire supported
+set, each on its own schedule.
 
 **Which recipe is certified on which Kubernetes version is a shorter list than
 "the recipes above" and "the versions Admission Lab provisions" —
@@ -200,11 +222,24 @@ capabilities:
   - admission
 ```
 
-Two capabilities mean something today. `admission` says the component
-participates in the admission chain. `gatewayApi` says it implements the Gateway
-API, and is declared by the `istio-gateway` recipe, which pairs it with the
-`gatewayEndpoint` metadata the Gateway engine needs to find a Gateway's data
-plane.
+Three capabilities mean something today:
+
+| Capability | What it claims | Declared by |
+| --- | --- | --- |
+| `admission` | The component participates in the admission chain. | `kyverno`, `istio` |
+| `gatewayApi` | The component implements the Gateway API. Paired with the `gatewayEndpoint` metadata the Gateway engine needs to find a `Gateway`'s data plane — by the well-known `gateway.networking.k8s.io/gateway-name` label, for both certified implementations. | `istio-gateway`, `nginx-gateway-fabric` |
+| `legacyIngress` | The component serves `networking.k8s.io/v1` `Ingress` objects. It exists so a migration suite can capture the *source* side's traffic behavior, and its `gatewayEndpoint` names the controller Service directly by name. | `ingress-nginx-legacy` |
+
+`legacyIngress` is deliberately its own capability rather than a flavor of
+`gatewayApi`: the two describe different APIs with different objects and
+different status vocabularies, and collapsing them would let a migration suite
+ask an Ingress controller a Gateway API question. Note also what
+`ingress-nginx-legacy` does *not* claim — it ships a validating admission
+webhook and still does not declare `admission`, because it is never installed as
+a stack anyone replays an admission fixture corpus through.
+
+Neither Gateway API CRD bundle declares any capability at all: it installs an
+API, not an implementation of one.
 
 A capability is a statement of fact, not an aspiration. The `test-webhook`
 recipe deliberately claimed **no** capability until its webhook actually

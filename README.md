@@ -12,9 +12,11 @@ admitted, and the first place the two stacks diverged was
 evidence comes from real Kubernetes API servers, and nothing touches your
 production cluster.
 
-> **Public Beta.** Admission Lab is pre-1.0. Beta covers **admission**
-> regression *and* Gateway API behavior — reconciliation and real HTTP traffic,
-> compared as separate evidence.
+> **v1 release candidate.** Every v1 contract below is frozen and
+> test-enforced today; the `v1.0.0` tag itself has not been cut yet. Admission
+> Lab covers **admission** regression *and* Gateway API behavior —
+> reconciliation and real HTTP traffic, compared as separate evidence — plus
+> **Ingress-to-Gateway migration** comparison.
 >
 > The document contracts are **frozen at v1** and grow only by **addition**
 > from here: a new optional field, never a rename or a removal. Configuration is
@@ -33,7 +35,10 @@ production cluster.
 >
 > Which Kubernetes × stack combinations this project has actually *proven* is a
 > shorter list than the ones it will happily run —
-> [`docs/compatibility.md`](docs/compatibility.md) draws that line.
+> [`docs/compatibility.md`](docs/compatibility.md) draws that line, and
+> [What is supported](#what-is-supported) below summarizes it.
+> [`docs/versioning.md`](docs/versioning.md) is what a version number promises;
+> [`CHANGELOG.md`](CHANGELOG.md) is what each release changed.
 
 ---
 
@@ -47,7 +52,10 @@ production cluster.
 - [Cleanup](#cleanup)
 - [Server-side dry-run: what it can and cannot see](#server-side-dry-run-what-it-can-and-cannot-see)
 - [Gateway: three layers of evidence](#gateway-three-layers-of-evidence)
+- [Known regressions Admission Lab catches](#known-regressions-admission-lab-catches)
+- [What is supported](#what-is-supported)
 - [Schemas](#schemas)
+- [Versioning](#versioning)
 - [Documentation](#documentation)
 
 ---
@@ -61,15 +69,15 @@ Admission Lab builds with the exact toolchain pinned in
 run `cargo` in the repository.
 
 ```bash
-git clone https://github.com/hairbui76/adminssion-lab.git
-cd adminssion-lab
+git clone https://github.com/hairbui76/admission-lab.git
+cd admission-lab
 cargo install --path crates/admissionlab-cli --locked
 ```
 
 Or without cloning:
 
 ```bash
-cargo install --git https://github.com/hairbui76/adminssion-lab.git admissionlab-cli --locked
+cargo install --git https://github.com/hairbui76/admission-lab.git admissionlab-cli --locked
 ```
 
 Both install a single binary named `admissionlab`.
@@ -77,7 +85,7 @@ Both install a single binary named `admissionlab`.
 ### From the Releases page
 
 Once a version is tagged, the
-[Releases page](https://github.com/hairbui76/adminssion-lab/releases)
+[Releases page](https://github.com/hairbui76/admission-lab/releases)
 carries prebuilt archives for **Linux x86_64, Linux aarch64, macOS Apple
 Silicon, and macOS Intel**, plus a `SHA256SUMS` file and a keyless Sigstore
 signature over it (`SHA256SUMS.sig` / `SHA256SUMS.pem`), and an SPDX
@@ -535,6 +543,174 @@ resolution, the port-forward, and the probe contract.
 
 ---
 
+## Known regressions Admission Lab catches
+
+Three, and **each one is a demo in this repository** that runs end to end
+against real clusters in CI and is asserted on by a test. There are no claims
+here about upstream bugs, no anecdotes, and no "it would also catch" — every
+regression below is reproducible on your own machine with one command, because
+the difference that causes it is a file you can read.
+
+All three share a design rule: **everything that is not the scenario is held
+equal.** Same Kubernetes version, same fixtures, same install order, same
+readiness gates — and, in the first two, the same vendor versions on both sides.
+A demo that also bumped a chart would bury the finding that matters among a
+dozen that do not, and would rot the moment that vendor changed anything. Each
+demo's reproducer is a first-party file in this repository rather than a vendor
+bug, for the same reason: a bug that gets fixed upstream stops demonstrating
+anything, and looks exactly like a broken test when it does.
+
+### 1. A mutating policy silently stops being applied
+
+[`examples/kyverno-istio-upgrade/`](examples/kyverno-istio-upgrade/) —
+`crates/admissionlab-cli/tests/alpha_e2e.rs`
+
+Both sides run the same Kubernetes, the same Kyverno chart, and the same Istio
+chart. The only difference is one first-party `ClusterPolicy`: the baseline
+installs `alpha-audit-init`, which prepends the platform's audit init container
+to every pod in one namespace, and the candidate does not — the exact shape of a
+real platform upgrade in which a policy is retired, renamed, or lost in a
+refactor of a policy repository and nobody notices that something stopped being
+injected. A second, *intended* change rides along: the image pin moves from
+`pause:3.9` to `pause:3.10`, and `expectations.yaml` accounts for it by id.
+
+**What the report shows.** One `init_container_removed` on
+`regression-pod-init-container.yaml`, subject `alpha-audit-init`, graded
+`critical`, unexpected, and the sole reason the run exits `1` — alongside three
+`image_changed` findings that stay in the report at full severity and stop being
+a reason to fail. The first divergence is `observed`, not guessed: Kyverno's
+mutating webhook is invoked at the same position in the same round on both
+sides and answers `mutated: true` with a one-operation patch on the baseline and
+`mutated: false` on the candidate, so the finding names
+`mutate.kyverno.svc-fail` as where the two stacks stopped matching. Bucket
+counts: 6 identical, 3 expected, 1 critical.
+
+### 2. A cross-namespace reference stops being permitted
+
+[`examples/gateway-istio/`](examples/gateway-istio/) —
+`crates/admissionlab-cli/tests/gateway_demo.rs`
+
+Two identical real Istio installs serving the Gateway API, told apart by one
+line of a `ReferenceGrant`: the candidate's grant names `echo-legacy` where the
+baseline's names `echo-b`. That is a grant left pointing at a Service that was
+renamed, or narrowed to the wrong one during a cleanup. The grant is still
+installed and still valid — this is not a missing file or a failed apply — and
+both sides run the same four components in the same order with the same
+readiness gates.
+
+**What the report shows.** The `HTTPRoute` reconciles to
+`ResolvedRefs=False (RefNotPermitted)` on the candidate, which is the reason
+Gateway API itself specifies for this. Because the route is no longer resolving
+its backend, the traffic probe through it is **not sent**, and that is recorded
+as an explicit skip naming the condition that stopped it rather than as a probe
+that returned nothing — probing anyway would have captured the data plane's own
+`500` error page and then compared that invented status against a real one. The
+run exits `1`. Build the echo backend first with
+`./scripts/build-test-images.sh`.
+
+### 3. An Ingress-to-Gateway migration quietly reroutes a host
+
+[`examples/ingress-to-gateway/`](examples/ingress-to-gateway/) —
+`crates/admissionlab-cli/tests/migration_demo.rs`
+
+The only demo whose two sides run *different* stacks, because that is what a
+migration is: the archived community `ingress-nginx` on the baseline, Gateway
+API v1.5.1 plus NGINX Gateway Fabric on the candidate, asked the same two HTTP
+questions. The hand-written `HTTPRoute` accepts both hostnames and sends both to
+the same backend, where the `Ingress` served one from each. **Nothing about that
+looks wrong from the outside**: the route reconciles cleanly, every condition is
+`True`, every probe returns `200`, and no status, condition, or manifest diff
+says anything is amiss.
+
+**What the report shows.** A `backend_changed` finding on probe 1 — *"the
+Ingress reached backend `echo-b` and the Gateway reached `echo-a`"* — graded
+`critical`, which exits `1`. It is stated as an *observed backend identity*
+rather than as a manifest difference, and that is the whole point: this is a
+regression only a real request through a real data plane can see. Beside it, two
+findings that are not failures: the rewrite that was faithfully preserved
+(reported as nothing, which is a claim only because both sides answered), and an
+`nginx.ingress.kubernetes.io/limit-rps` annotation reported as
+`non_portable_feature`, `expected: true`, graded `info`, because Gateway API v1
+has no rate-limit filter and the migration accepted that in writing.
+
+---
+
+## What is supported
+
+Three different claims, and Admission Lab is careful not to let one stand in
+for another. [`docs/compatibility.md`](docs/compatibility.md) is the full
+treatment; this is the summary.
+
+### Core Kubernetes support: three minors, tested
+
+Admission Lab supports **the latest three upstream-supported Kubernetes minor
+versions** at release time. Each is pinned to an exact patch version *and* a
+`kindest/node` digest in
+[`compatibility/kubernetes.yaml`](compatibility/kubernetes.yaml); nothing
+floats. At the time of writing that is **1.35.8, 1.36.4 (primary), and 1.37.0**.
+
+The number three is a Rust constant, not a configuration field, so it cannot be
+edited away in passing. A version outside the set is **refused** when the
+cluster is created — and a *retired* minor stays checked in so the refusal can
+say "no longer supported by Admission Lab" rather than "never heard of it".
+
+### Certified recipes: the exact table, and nothing beyond it
+
+A **certification** means this repository installed that recipe at that version
+on that exact Kubernetes patch version, in a disposable cluster, in a test CI
+runs on a schedule — and then observed the component *doing its job*, not merely
+installing. Eleven rows, and this is all of them:
+
+| Recipe | Version | Kubernetes | Tier |
+| --- | --- | --- | --- |
+| `kyverno` | `3.9.0` | `1.35.8` | `perCommit` |
+| `istio` | `1.30.4` | `1.35.8`, `1.36.4`, `1.37.0` | `nightly`, `perCommit`, `nightly` |
+| `istio-gateway` | `1.30.4` | `1.35.8`, `1.36.4`, `1.37.0` | `weeklyRelease`, `perCommit`, `weeklyRelease` |
+| `nginx-gateway-fabric` | `2.6.7` | `1.35.8`, `1.36.4`, `1.37.0` | `nightly`, `perCommit`, `nightly` |
+| `ingress-nginx-legacy` | `4.15.1` | `1.36.4` | `weeklyRelease` (migration only) |
+
+Transcribed from [`compatibility/recipes.yaml`](compatibility/recipes.yaml),
+which is the authority and carries the rationale for every row. A **tier** is a
+statement about schedule and never about confidence: a `nightly` row is exactly
+as certified as a `perCommit` one.
+
+Two entries where the honest answer is narrower than the convenient one:
+`kyverno` is certified on `1.35.8` and deliberately *not* on Admission Lab's own
+primary `1.36.4`, because Kyverno's documentation for that chart line stops at
+v1.35 and certifying past it would claim a window the vendor does not. And
+`ingress-nginx-legacy` is an **archived** upstream, admitted only so migrations
+*away* from it can be tested; its presence is not a recommendation to run it.
+
+A certification does **not** assert that a combination is bug-free, that the
+vendor supports it, or that your own values and policies behave the same on it.
+
+### User-supplied stacks: first-class, warned about, never refused
+
+**This is the normal case, and it is fully supported.** Your own chart, your own
+webhook, your own manifests, your own next release — on any provisionable
+Kubernetes version. The comparison Admission Lab performs is exactly as real,
+because the evidence comes from the same real API servers either way.
+Certification is a record of what this repository has run, not a permission
+system, and **nothing here declines to run a lab over a certification
+question.**
+
+What you get instead of a refusal is one warning line, before anything is
+provisioned, and the same text as a `compatibility.uncertified_combination`
+diagnostic in `result.json` so an archived report still says which combination
+it was. It warns in exactly one case — you named a component Admission Lab
+*does* certify, but at a version or on a Kubernetes version it does not. A
+component Admission Lab ships no recipe for is **silent**, because warning about
+every one of those would make the warning worthless within a week: the signal
+would be "you are using this tool as designed".
+
+### Not supported
+
+Native Windows (use WSL2 with a Linux Docker daemon), production kubeconfigs
+(the default flow requires none and copies no production secrets), and any
+hosted Admission Lab service (there is none, and there are no paid tiers).
+
+---
+
 ## Schemas
 
 Three versioned document families, all frozen at `v1` and all checked in:
@@ -569,48 +745,56 @@ file beside it is a configuration error.
 
 ---
 
+## Versioning
+
+Four surfaces carry a promise, and the first versions **independently of the
+other three**: the three document schemas above (frozen at `v1`, additive
+only), the CLI's commands and long flags (frozen — a new optional flag with a
+backwards-compatible default is the only change that stays inside the
+contract), and the exit codes (never reassigned, including `130`/`143` for a
+canceled run, which mean "no verdict" and are frozen in the same sense).
+
+The Rust crates under `crates/` carry **no promise**: they are an
+implementation, not a published library. Neither do terminal wording,
+`report.html` markup, the job summary's Markdown, or the run workspace's
+directory layout. Parse `result.json`, which is a schema.
+
+[`docs/versioning.md`](docs/versioning.md) is the full statement — what patch,
+minor, and major each mean for this tool, what is deliberately unpromised, the
+deprecation policy, and the supported release lines.
+[`CHANGELOG.md`](CHANGELOG.md) records what each release actually changed.
+
+---
+
 ## Documentation
 
 | Document | What is in it |
 | --- | --- |
-| [`docs/architecture.md`](docs/architecture.md) | As-built crate map and dependency rules, the run pipeline's stages, the evidence model, audit correlation, why fixture execution is serial, and the Gateway engine end to end (§7) |
-| [`docs/compatibility.md`](docs/compatibility.md) | Certified vs supported vs merely configurable: the certified table, what a certification asserts, the CI tiers, the three-minors rule, and what happens on a combination nobody certified |
-| [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` `v1` reference: every field, every default, path resolution, `gateway`, `policy`, overrides, `expectations.yaml`, and how a `v1beta1` or `v1alpha1` file still loads |
+| [`docs/install.md`](docs/install.md) | Every install path in full: release archives, checksum and Sigstore verification, `PATH`, the macOS quarantine attribute, building from source, the WSL2 route for Windows, and uninstalling |
+| [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` `v1` reference: every field, every default, path resolution, `gateway`, `migration`, `policy`, overrides, `expectations.yaml`, and how a `v1beta1` or `v1alpha1` file still loads |
 | [`docs/fixtures.md`](docs/fixtures.md) | Fixture format, discovery globs, identity and hashing, the setup-outside-the-glob pattern, and the dogfood webhook's annotation vocabulary |
-| [`docs/github-action.md`](docs/github-action.md) | The composite action: pinned/checksummed installation, every input, the artifacts it uploads on a failing run, exit-code behavior, and what the job summary says |
-| [`docs/recipes.md`](docs/recipes.md) | What a recipe is, the pins each built-in recipe carries, the capability model, override directories, and why recipes may never classify regressions |
-| [`docs/schema-migrations.md`](docs/schema-migrations.md) | The three versioned document families, the pre-v1.0 compatibility rule, how a reader must behave on a version it does not know, and the migration note for every version step |
-| [`docs/security.md`](docs/security.md) | Threat model, the trust boundary around third-party charts, exactly what is redacted and what is not, and the audit-policy Secret exclusion |
+| [`docs/recipes.md`](docs/recipes.md) | What a recipe is, the pins each shipped recipe carries, the capability model, override directories, and why recipes may never classify regressions |
+| [`docs/compatibility.md`](docs/compatibility.md) | Certified vs supported vs merely configurable: the certified table, what a certification asserts, the CI tiers, the three-minors rule, and what happens on a combination nobody certified |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Real failure modes and their fixes, keyed to the exit codes above |
+| [`docs/github-action.md`](docs/github-action.md) | The composite action: pinned/checksummed installation, every input, the artifacts it uploads on a failing run, exit-code behavior, and what the job summary says |
+| [`docs/architecture.md`](docs/architecture.md) | As-built crate map and dependency rules, the run pipeline's stages, the evidence model, audit correlation, why fixture execution is serial, and the Gateway engine end to end (§7) |
+| [`docs/security.md`](docs/security.md) | Threat model, the trust boundary around third-party charts, exactly what is redacted and what is not, and the audit-policy Secret exclusion |
+| [`docs/performance.md`](docs/performance.md) | Where a run's wall-clock time actually goes, the measured stage budgets, and how to reproduce them |
+| [`docs/dependencies.md`](docs/dependencies.md) | The supply-chain gate: what `cargo deny` enforces, the update cadence, the emergency security-update process, and the exception protocols |
+| [`docs/versioning.md`](docs/versioning.md) | What a version number promises: the frozen schema identifiers, the CLI and exit-code freeze, what patch/minor/major mean here, what is unpromised, and the deprecation policy |
+| [`docs/schema-migrations.md`](docs/schema-migrations.md) | The three versioned document families, the stable-schema rule and the pre-v1.0 one it replaced, how a reader must behave on a version it does not know, and the migration note for every version step |
 
-The canonical worked example lives in
-[`examples/kyverno-istio-upgrade/`](examples/kyverno-istio-upgrade/) — a
-complete lab configuration with its fixture corpus, both stack definitions, and
-an `expectations.yaml`, reproducing a real admission regression end to end.
-Start there if you would rather read a working lab than a reference.
-
-[`examples/gateway-istio/`](examples/gateway-istio/) is its Gateway
-counterpart: two identical real Istio installs serving the Gateway API, told
-apart by one line of a `ReferenceGrant`. It exits `1` naming the route, the
-condition that changed (`ResolvedRefs`), the reason Gateway API specifies for
-it (`RefNotPermitted`), and the traffic probe that was skipped because of it.
-Build the echo backend first with `./scripts/build-test-images.sh`.
-
-[`examples/ingress-to-gateway/`](examples/ingress-to-gateway/) is the migration
-counterpart, and the only example whose two sides run *different* stacks: the
-archived community `ingress-nginx` on the baseline, NGINX Gateway Fabric on the
-candidate, asked the same two HTTP questions. It demonstrates one behavior
-preserved, one non-portable feature accepted in writing
-(`nginx.ingress.kubernetes.io/limit-rps`, which Gateway API v1 cannot express),
-and one unintended regression — a hand-written `HTTPRoute` that accepts both
-hostnames and sends both to the same backend, where the `Ingress` served one
-from each. It exits `1` naming the *observed* backends rather than a manifest
-difference, which is the whole point: the route reconciles cleanly, every probe
-returns `200`, and no status, condition or manifest diff says anything is
-wrong.
+The three canonical worked examples are described above under
+[Known regressions Admission Lab catches](#known-regressions-admission-lab-catches).
+Start with [`examples/kyverno-istio-upgrade/`](examples/kyverno-istio-upgrade/)
+— a complete lab configuration with its fixture corpus, both stack definitions,
+and an `expectations.yaml` — if you would rather read a working lab than a
+reference. Every file in all three carries a header explaining why it is what it
+is.
 
 `PRODUCT.md` is the product specification, `ROADMAP.md` the implementation
-plan, and `CONTRIBUTING.md` explains how to propose changes and run the
+plan, `CHANGELOG.md` the release history, and `CONTRIBUTING.md` explains how to
+propose changes and run the
 verification suite.
 
 ---

@@ -46,6 +46,68 @@ description) should answer:
 Features that cannot answer these questions should normally stay out of
 scope. If in doubt, open an issue to discuss before writing code.
 
+## Non-negotiable engineering constraints
+
+These are not style preferences. A change that breaks one of them is a bug
+regardless of what else it improves, and most are pinned by a test that will
+fail rather than let it merge.
+
+- **Argv, never a shell string.** External commands are built as argument
+  vectors. A shell command string assembled from user input — a configuration
+  value, a fixture, a recipe field, a cluster response — is never acceptable.
+- **Every external command is bounded.** A timeout, separate stdout and stderr
+  capture, recorded version/provenance, and structured error context. A
+  subprocess must not outlive the run that spawned it.
+- **Reports redact.** Secret data, authorization headers, private keys,
+  configured sensitive paths, and credential-like values are redacted by
+  Admission Lab's own rendering, once, into one value from which the terminal,
+  JSON, and HTML views are all drawn. A new rendering path that bypasses that
+  is a security bug — see [`SECURITY.md`](SECURITY.md).
+- **Missing evidence is never fabricated.** Absent or ambiguous data is
+  represented as unavailable, unknown, or inconclusive. It is never filled in
+  with a plausible value, and a missing signal never becomes a zero.
+- **Server-side dry-run is the authoritative admission mode.** The response
+  object is the final admitted/mutated object. A fixture that cannot safely be
+  evaluated that way must fail explicitly as unsupported rather than silently
+  switch semantics, and there is no in-process simulator anywhere in the result
+  path.
+- **Fixture execution is serial within each cluster.** That is what makes
+  audit-log correlation deterministic. Parallel execution is allowed only after
+  request-level correlation exists and is tested.
+- **Per-webhook latency is an optional observed signal.** Absent or ambiguous
+  metrics never fail a run by themselves.
+- **Recipes may never classify.** Install, readiness, normalization, and
+  capability metadata only. The recipes crate cannot reach
+  `admissionlab-diff` or `admissionlab-policy`, and the schema's allow-list
+  makes a classification-shaped key fail to parse.
+
+## What v1 freezes
+
+[`docs/versioning.md`](docs/versioning.md) is the full statement; the part that
+constrains a pull request is short. Within `v1.x`:
+
+- **Document schemas are additive only.** A new field is optional and absent
+  from the schema's `required` list. No field meaning changes, no required
+  field is removed, and no semantic-change wire string
+  (`newly_denied`, `container_removed`, …) is renamed. Superset tests compare
+  the generated `v1` schema against every frozen predecessor and will fail the
+  build.
+- **The CLI surface is frozen.** No command, positional argument, or long flag
+  is renamed or removed, and none changes whether it takes a value. Adding a
+  new optional flag with a backwards-compatible default is the only change
+  inside the contract. `crates/admissionlab-cli/tests/exit_codes.rs` pins the
+  surface mechanically; rewording a help *description* is free.
+- **Exit codes are never reassigned**, including `130`/`143` for a canceled
+  run.
+
+If your change genuinely requires breaking one of these, say so in the pull
+request before writing it. It is a `v2` conversation, not a review comment.
+
+**Add a `CHANGELOG.md` entry** for anything a user would notice: a new field or
+flag, a new semantic-change kind, a severity change, a certified row, a
+supported Kubernetes minor, a fix to a wrong classification. Keep a Changelog
+categories, under `[Unreleased]`. Internal refactors need no entry.
+
 ## Workspace layout
 
 Admission Lab is a Rust Cargo workspace under `crates/`. Each crate has a
@@ -88,6 +150,29 @@ cargo deny check
 dependencies from unreviewed git or registry sources. New dependencies must
 satisfy that policy or the addition must explain, in the pull request, why
 an exception is warranted.
+
+## Proposing a certified recipe
+
+A **certification** is a claim that this repository installed that recipe at
+that version on that exact Kubernetes patch version and observed the component
+doing its job. Adding a row to `compatibility/recipes.yaml` therefore means
+adding all of:
+
+1. exact version pins — no ranges, no floating tags;
+2. readiness checks that prove the component is *serving*, not merely
+   scheduled;
+3. a certification test that actually installs it and exercises real behavior,
+   registered in `scripts/recipe-matrix.py` (which refuses to build a matrix
+   for a recipe it has no test for);
+4. the CI tier that will run it — a certification nobody schedules is a claim
+   rather than evidence;
+5. the vendor's own documented Kubernetes range at the vendor's own
+   granularity, or an explicit `null` when no statement exists. An absent or
+   unbounded constraint means *unknown*, never *supported*.
+
+And, as always, nothing in the recipe that classifies a difference. See
+[`docs/recipes.md`](docs/recipes.md) and
+[`docs/compatibility.md`](docs/compatibility.md).
 
 ## Commit and pull request expectations
 

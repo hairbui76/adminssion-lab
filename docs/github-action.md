@@ -80,9 +80,12 @@ it.
 
 ## Inputs
 
-Eight, and the set is frozen for Public Beta. They cover exactly four
-concerns: **which lab** to run, **which Admission Lab** to run it with,
-**what to do with the artifacts**, and **whether to keep the clusters**.
+Eight, and the set is frozen for v1: within `v1.x` no input is renamed or
+removed, and adding a new optional one with a backwards-compatible default is
+the only change that stays inside the contract — the same rule the CLI's own
+flags follow ([`docs/versioning.md`](versioning.md#the-cli-surface)). They cover
+exactly four concerns: **which lab** to run, **which Admission Lab** to run it
+with, **what to do with the artifacts**, and **whether to keep the clusters**.
 
 | Input | Required | Default | What it does |
 | --- | --- | --- | --- |

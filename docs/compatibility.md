@@ -15,6 +15,19 @@ compares your own webhook against your own next release is what this tool is
 for. Certification is not a permission system; it is a record of what this
 repository has actually run.
 
+Read as support boundaries, that is three separate promises:
+
+| Boundary | The promise |
+| --- | --- |
+| **Core Kubernetes** | The latest three upstream-supported minors at release time, each pinned to an exact patch and a node-image digest, each exercised by a certified recipe on a schedule. A version outside the set is **refused** at cluster creation. |
+| **Certified recipes** | Exactly the [eleven rows below](#the-certified-table) — no more, and each one proven by a named test on a named schedule. |
+| **User-supplied stacks** | First-class and fully supported. Warned about when Admission Lab certifies that component elsewhere, **never refused**, and never certified. |
+
+[`README.md` § What is supported](../README.md#what-is-supported) is the same
+three boundaries in summary form, and
+[`docs/versioning.md`](versioning.md#what-patch-minor-and-major-mean-here) says
+which kind of release may move each of them.
+
 ---
 
 ## Contents
@@ -320,3 +333,6 @@ than evidence, and both halves of the pipeline are built to say so.
   certification run.
 - [`compatibility/kubernetes.yaml`](../compatibility/kubernetes.yaml) — the
   provisionable versions and their pinned node-image digests.
+- [`docs/versioning.md`](versioning.md) — which kind of release may move the
+  support window, add a certified row, or bump a recipe pin, and what is
+  promised about the schemas and CLI while it does.

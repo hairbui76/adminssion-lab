@@ -66,12 +66,12 @@ where the window is.
 
 Take the archive for your platform, `SHA256SUMS`, and the two signature
 files from the
-[Releases page](https://github.com/hairbui76/adminssion-lab/releases).
+[Releases page](https://github.com/hairbui76/admission-lab/releases).
 
 ```bash
 version=0.1.0
 target=x86_64-unknown-linux-gnu
-base="https://github.com/hairbui76/adminssion-lab/releases/download/v${version}"
+base="https://github.com/hairbui76/admission-lab/releases/download/v${version}"
 
 curl --fail --location --remote-name "${base}/admissionlab-${version}-${target}.tar.gz"
 curl --fail --location --remote-name "${base}/SHA256SUMS"
@@ -109,7 +109,7 @@ repository, at that tag"*.
 cosign verify-blob \
   --certificate SHA256SUMS.pem \
   --signature SHA256SUMS.sig \
-  --certificate-identity 'https://github.com/hairbui76/adminssion-lab/.github/workflows/release.yml@refs/tags/v0.1.0' \
+  --certificate-identity 'https://github.com/hairbui76/admission-lab/.github/workflows/release.yml@refs/tags/v0.1.0' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 ```
@@ -184,15 +184,15 @@ Admission Lab builds with the exact toolchain pinned in
 you run `cargo` in the repository.
 
 ```bash
-git clone https://github.com/hairbui76/adminssion-lab.git
-cd adminssion-lab
+git clone https://github.com/hairbui76/admission-lab.git
+cd admission-lab
 cargo install --path crates/admissionlab-cli --locked
 ```
 
 Or without cloning:
 
 ```bash
-cargo install --git https://github.com/hairbui76/adminssion-lab.git admissionlab-cli --locked
+cargo install --git https://github.com/hairbui76/admission-lab.git admissionlab-cli --locked
 ```
 
 `--locked` is not optional advice. It builds from the `Cargo.lock` this
