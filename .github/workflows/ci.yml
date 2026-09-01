@@ -24,6 +24,15 @@ jobs:
       - name: Cache Cargo registry, git deps, and target directory
         uses: Swatinem/rust-cache@v2.9.2
 
+      # Pinned to an exact cargo-deny version, not a range, and installed
+      # from a pinned action. cargo-deny changes its own lint defaults
+      # between releases, so an unpinned tool would make this gate's
+      # strictness a function of when the job happened to run -- the same
+      # commit could pass on Monday and fail on Friday with no change to
+      # the repository. Bumping this pin is a deliberate act: see
+      # `docs/dependencies.md` ("Updating the pinned tooling"), which also
+      # records why cargo-deny's `advisories` check stands in for
+      # cargo-audit rather than running both.
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2.87.1
         env:
@@ -40,5 +49,23 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
-      - name: Check licenses and dependency bans
-        run: cargo deny check
+      # All four checks named explicitly rather than relying on bare
+      # `cargo deny check` defaulting to "everything": the four names are
+      # the supply-chain policy's actual scope (ROADMAP Task 9.10 step 1),
+      # and spelling them out means a future cargo-deny release that
+      # changes what the default set contains cannot quietly drop one.
+      #
+      #   advisories  RustSec advisory-db, plus yanked and unmaintained
+      #               crates -- this is the cargo-audit equivalent
+      #   bans        duplicate majors of the HTTP/TLS stack (hard fail),
+      #               everything else duplicated (warn)
+      #   licenses    the Apache-2.0-compatible allowlist
+      #   sources     crates.io only; no git dependencies
+      #
+      # `advisories` reaches the network to fetch the advisory database,
+      # so this step is the one that can turn red without any change on
+      # our side. That is intended -- it is how a newly-published
+      # advisory against a pinned dependency reaches us. The response is
+      # in `docs/dependencies.md` ("Emergency security updates").
+      - name: Check advisories, bans, licenses, and sources
+        run: cargo deny check advisories bans licenses sources

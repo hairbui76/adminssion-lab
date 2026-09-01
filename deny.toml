@@ -2,8 +2,77 @@
 #
 # Schema reference: https://embarkstudios.github.io/cargo-deny/index.html
 # Validated against cargo-deny 0.20.2 via `cargo deny check`.
+#
+# This file is the machine-readable half of the supply-chain policy
+# (ROADMAP Task 9.10). The prose half -- update cadence, the emergency
+# security process, and the protocol for adding an exception to any of
+# the sections below -- is `docs/dependencies.md`. Changing a knob here
+# without updating that document leaves the policy self-contradictory.
+#
+# CI runs all four checks explicitly (`.github/workflows/ci.yml`):
+#
+#   cargo deny check advisories bans licenses sources
+#
+# against cargo-deny pinned to 0.20.2. The pin matters: cargo-deny's
+# own releases change lint defaults, so an unpinned tool would make the
+# gate's strictness a function of when the job happened to run.
+
+[graph]
+# Police the widest graph the workspace can build, not the narrowest.
+# `cargo clippy` in CI already runs `--all-features`, so code behind an
+# optional feature is linted; without this, that same code's
+# dependencies would be outside the supply-chain gate, and an optional
+# dependency could carry a denied license or a live advisory and still
+# ship. No workspace crate declares a `[features]` table today, which
+# makes this a no-op right now and the correct default the moment one
+# does.
+all-features = true
+
+[advisories]
+# This section IS the RustSec check. cargo-deny reads the same
+# `RustSec/advisory-db` feed cargo-audit reads, over the same graph, and
+# fails the build on any advisory that matches a crate in `Cargo.lock`.
+# Task 9.10 step 2 asks for "RustSec/cargo-audit equivalent through a
+# pinned CI tool"; a second, separately-pinned cargo-audit binary would
+# query the identical database and report the identical findings, so it
+# is added surface area for no additional coverage. If that ever stops
+# being true -- cargo-audit grows a check cargo-deny lacks -- add it
+# then, pinned the same way, and say so here.
+db-urls = ["https://github.com/RustSec/advisory-db"]
+
+# A yanked version is a supply-chain signal in its own right: the
+# publisher withdrew it, usually for a defect or a compromise. Treat it
+# as a failure rather than a warning. This is the one knob here that can
+# turn a green build red without any change on our side, which is
+# deliberate -- it is exactly the notification we want -- and
+# `docs/dependencies.md` describes the response.
+yanked = "deny"
+
+# Unmaintained crates anywhere in the graph, not just in the workspace's
+# own direct dependencies: an abandoned transitive crate is where an
+# unpatched advisory lands, and we would rather learn about it during a
+# routine update than during an incident.
+unmaintained = "all"
+
+# Advisories deliberately not failing the build. MUST be empty unless
+# every entry carries: the advisory ID, the affected crate and version,
+# why the vulnerable code path is unreachable from Admission Lab (or
+# why the fix is unavailable), the transitive owner that pulls it in,
+# and the issue tracking its removal. An entry with no expiry plan is a
+# permanent hole; see `docs/dependencies.md` for the protocol.
+ignore = []
 
 [licenses]
+# This list is a policy statement -- the set of licenses Admission Lab
+# is willing to accept -- not an inventory of what happens to be in
+# today's graph. cargo-deny warns by default when an allowed license
+# matches nothing (`Zlib` matches nothing right now), which would make
+# the check emit noise every time an unrelated transitive crate comes
+# or goes, and a gate people learn to skim is a gate that stops
+# working. Silence that specific warning; the failure direction -- a
+# license *not* in this list -- is untouched and still hard-fails.
+unused-allowed-license = "allow"
+
 # Permissive licenses compatible with this project's own Apache-2.0
 # license. A dependency whose license is not in this list fails the check;
 # add exceptions here only with a comment explaining why they are safe.
@@ -44,16 +113,142 @@ allow = [
 ]
 
 [bans]
-# Multiple versions of the same crate in the graph are noisy but not
-# inherently unsafe on their own; keep this a warning rather than a hard
-# failure so it doesn't block CI on transitive-dependency churn.
+# The baseline for the graph at large. Multiple versions of the same
+# crate are noisy but not inherently unsafe on their own, and most of
+# them are a transitive dependency's problem rather than ours, so keep
+# this a warning rather than a hard failure. As of this commit the
+# warnings are exactly six: base64, getrandom, pem, r-efi, syn, and
+# windows-sys -- all leaf/proc-macro/platform crates, none of them
+# carrying protocol state across a boundary. (`Cargo.lock` also holds
+# two `bitflags` majors, but the 1.3.2 copy is reachable only through
+# `defmt` on a target this workspace does not build for, so it is not
+# in the graph cargo-deny resolves and is not one of the six.)
 multiple-versions = "warn"
+
+# The HTTP/TLS stack is the exception, and gets a hard failure
+# (ROADMAP Task 9.10 step 3). Duplicating a leaf crate wastes some
+# binary size; duplicating this stack is a correctness and security
+# problem. Two `rustls` majors means two certificate verifiers, two
+# cipher-suite policies, and a patched advisory that only lands on one
+# of them. Two `http`/`http-body` majors means two incompatible
+# `HeaderMap`/`Body` types that cannot be handed across the seam, so
+# whichever crate bridges them re-serializes headers by hand -- which
+# is where header-injection and redaction bugs live. And Admission Lab
+# reads admission responses and Gateway probe results off these types
+# and then *classifies regressions from them*: a divergence introduced
+# by our own transport stack would be reported as a divergence in the
+# user's admission stack.
+#
+# `deny-multiple-versions` overrides the `warn` above for these crates
+# only. Cargo already unifies semver-compatible requirements, so any
+# duplicate that survives into `Cargo.lock` is by construction a
+# *major* (or 0.x-minor, which is semver-major) split -- exactly what
+# step 3 asks to fail on, with no version-range matching needed here.
+#
+# The list is enumerated from `Cargo.lock`, not guessed. Every one of
+# these resolves to exactly one version today:
+#
+#   http 1.5.0        http-body 1.1.0       http-body-util 0.1.5
+#   hyper 1.11.1      hyper-util 0.1.20     hyper-rustls 0.27.9
+#   rustls 0.23.43    tokio-rustls 0.26.4   rustls-pki-types 1.15.1
+#   rustls-webpki 0.103.15
+#
+# so there are no exceptions below, and none of these entries is
+# currently doing anything except standing guard. Adding a crate to
+# this list is cheap; removing one requires the same justification as
+# an exception.
+#
+# EXCEPTION PROTOCOL (Task 9.10 step 3). A duplicate here is a build
+# failure until it is either removed or granted an exception. An
+# exception is a `[[bans.skip]]` entry pinning the *exact* version
+# being tolerated -- never a bare crate name, which would tolerate
+# every future duplicate too -- immediately preceded by a comment
+# naming all four required facts:
+#
+#   1. crate and the exact duplicate versions in play
+#   2. the transitive owner(s) forcing the old version, as reported by
+#      `cargo tree -i <crate>@<version>` -- the crate to chase, by name
+#   3. why the duplication is safe to tolerate in the interim (which
+#      side of the seam each version sits on, and what stops state
+#      crossing between them)
+#   4. the removal issue: a URL, not "TODO"
+#
+# Worked example of the required shape -- this is documentation, not a
+# live exception; nothing in the graph needs it:
+#
+#   # 1. rustls 0.21.12 alongside the graph's rustls 0.23.43.
+#   # 2. Owner: `some-crate` 1.2.3 (`cargo tree -i rustls@0.21.12`),
+#   #    which has not yet released against 0.23.
+#   # 3. Safe in the interim: 0.21 is used only by `some-crate`'s own
+#   #    outbound client, which shares no connection pool, no config,
+#   #    and no certificate store with the 0.23 stack the engine uses.
+#   # 4. Removal: https://github.com/hairbui76/admission-lab/issues/NNN
+#   [[bans.skip]]
+#   crate = "rustls@0.21.12"
+
+[[bans.deny]]
+crate = "http"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "http-body"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "http-body-util"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "hyper"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "hyper-util"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "hyper-rustls"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "rustls"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "rustls-pki-types"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "rustls-webpki"
+deny-multiple-versions = true
+
+[[bans.deny]]
+crate = "tokio-rustls"
+deny-multiple-versions = true
 
 [sources]
 # Reject any dependency pulled from a git repository or crate registry that
 # is not explicitly allow-listed below. Only the crates.io index is allowed
 # and no git sources are allow-listed, so any git dependency is rejected by
 # default until a specific exception is added here with a comment.
+#
+# This is Task 9.10 step 4's enforcement, and the finding it enforces is
+# that there is nothing to enforce yet: `Cargo.lock` contains zero
+# `source = "git+..."` entries -- every one of the 261 packages in the
+# graph resolves to the crates.io registry with a checksum. That is the
+# state a stable release requires, and `allow-git = []` is what keeps it
+# that way rather than leaving it to a reviewer noticing a `git = ` key
+# in a diff.
+#
+# A git dependency is not merely unusual here, it is unreproducible: a
+# branch or tag ref is mutable, so the same `Cargo.lock` can resolve to
+# different code tomorrow, and Admission Lab's entire value proposition
+# is that a run's result is attributable to the stack under test rather
+# than to the tool. If one is ever genuinely unavoidable, the exception
+# must pin an immutable `rev = "<full 40-char sha>"` (never `branch` or
+# `tag`, both of which upstream can move), be allow-listed here with the
+# same four facts the `[bans]` exception protocol requires, and be
+# removed before the next stable release.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
