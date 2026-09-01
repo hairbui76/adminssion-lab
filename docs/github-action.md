@@ -64,9 +64,10 @@ it.
 - **Docker running on the runner**, which GitHub's `ubuntu-*` images
   provide.
 - **`kubectl` and `helm` on `PATH`**, which those images also provide.
-  Pin them with `kubectl-version`/`helm-version` (each with its
-  checksum) if you need exact versions or are on a self-hosted runner
-  that lacks them.
+  The action does not download either and has no input to pin them: on a
+  self-hosted runner, install them yourself. It prints both versions
+  before the run, and `admissionlab test` records what it actually found
+  in the run manifest.
 - **No secrets.** The action needs no token, no registry credentials,
   and no `packages: read`. `contents: read` — what `actions/checkout`
   needs — is enough for the whole workflow.
@@ -79,29 +80,69 @@ it.
 
 ## Inputs
 
+Eight, and the set is frozen for Public Beta. They cover exactly four
+concerns: **which lab** to run, **which Admission Lab** to run it with,
+**what to do with the artifacts**, and **whether to keep the clusters**.
+
 | Input | Required | Default | What it does |
 | --- | --- | --- | --- |
 | `config` | yes | — | Path to the lab configuration (`admissionlab.yaml`), relative to the workspace or absolute. |
 | `version` | no | *(empty)* | Admission Lab release to install, e.g. `0.1.0` (a leading `v` is accepted). Requires `sha256`. Empty selects the from-source mode below. |
 | `sha256` | no | *(empty)* | SHA-256 of that release's `admissionlab-<version>-x86_64-unknown-linux-gnu.tar.gz`. **Required whenever `version` is set.** |
-| `repository` | no | *(the action's own repository)* | `owner/repo` to download the release from. The default is right whenever the action is referenced as `owner/admission-lab/.github/actions/admissionlab@vX`. |
-| `report-dir` | no | `./admissionlab-artifacts` | Where the run's artifacts are written. Created if absent. |
-| `artifact-name` | no | `admissionlab-artifacts` | Name of the uploaded workflow artifact. |
-| `upload-artifacts` | no | `true` | Set `false` to skip the upload step and collect `report-dir` yourself. |
-| `artifact-retention-days` | no | `14` | Retention for the uploaded artifact. |
-| `kind-version` | no | `v0.33.0` | The `kind` version to install — the one this project validated its cluster lifecycle against, and the one `compatibility/kubernetes.yaml`'s node-image digests were captured from. |
-| `kind-sha256` | no | *(checksum of the default version)* | Required if you change `kind-version`: the default checksum is for the default version and nothing else, so a mismatched pair fails the download rather than installing something unverified. |
-| `kubectl-version` | no | *(empty — use the runner's)* | `kubectl` to install, e.g. `v1.36.4`. Requires `kubectl-sha256`. |
-| `kubectl-sha256` | no | *(empty)* | From `https://dl.k8s.io/release/<version>/bin/linux/amd64/kubectl.sha256`. |
-| `helm-version` | no | *(empty — use the runner's)* | `helm` to install, e.g. `v3.19.0`. Requires `helm-sha256`. |
-| `helm-sha256` | no | *(empty)* | From `https://get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum`. |
+| `repository` | no | *(the action's own repository)* | `owner/repo` to download the release from. The default is right whenever the action is referenced as `owner/admission-lab/.github/actions/admissionlab@vX`; set it when you have vendored the action into a repository that does not itself publish Admission Lab releases. |
+| `artifact-name` | no | `admissionlab-artifacts` | Name of the uploaded workflow artifact **and** of the directory under `$GITHUB_WORKSPACE` the reports are written into. Must be a single path segment. |
+| `artifact-retention-days` | no | `14` | Retention for the uploaded artifact, in days. A positive whole number; GitHub enforces your repository's own upper limit. |
+| `upload-artifacts` | no | `true` | Set `false` to skip the upload step and collect the report directory yourself — its absolute path is the `report-dir` output. |
+| `keep-clusters` | no | `false` | Pass `--keep-clusters`, preserving both `kind` clusters. **Refused on GitHub-hosted runners** — see below. |
 
 ### Outputs
 
 | Output | What it is |
 | --- | --- |
 | `exit-code` | `admissionlab test`'s own exit code, as a string. Available even though the action itself fails on a non-zero code, so a workflow can branch on *which* failure without parsing anything. |
-| `report-dir` | Absolute path of the directory the artifacts were written to. |
+| `report-dir` | Absolute path of the directory the artifacts were written to (`$GITHUB_WORKSPACE/<artifact-name>`). Resolved before anything is installed, so it is set even on a run that never reached `admissionlab test`. |
+
+### What is deliberately not an input
+
+The action takes **no input that becomes part of a command line** beyond
+the config path: no extra flags, no `args`, no `env`, no pre- or
+post-script. A wrapper that accepted arbitrary arguments would be a way
+to run something other than the run it reports on.
+
+Four things that used to be inputs, or could plausibly be, are not:
+
+- **`report-dir`.** The report directory is `$GITHUB_WORKSPACE/<artifact-name>`.
+  Two inputs that had to agree — and that a job running the action twice
+  had to remember to vary *together* — are now one. The absolute path is
+  still available, as the `report-dir` output.
+- **The `kind` version and its checksum.** Pinned in the action as a
+  constant. `compatibility/kubernetes.yaml`'s node-image digests were
+  captured from that exact `kind` release, so a caller who changed it
+  would be running node images this project never validated while still
+  getting a report that names those Kubernetes versions. Moving the pin
+  is an Admission Lab release, reviewed alongside the compatibility
+  matrix it belongs to.
+- **`kubectl` and `helm` versions.** Not downloaded and not pinnable; see
+  [Requirements](#requirements).
+- **Anything about the fixtures, the policy, or the verdict.** Those live
+  in your `admissionlab.yaml` and `expectations.yaml`, which are
+  reviewable files in your repository — not in a workflow input a job can
+  set differently on one branch.
+
+### `keep-clusters` on hosted runners
+
+`admissionlab test --keep-clusters` preserves both `kind` clusters so
+that an operator can `kubectl` into them afterwards. On a GitHub-hosted
+runner there is nobody to do that: the runner VM — clusters, Docker
+daemon, disk and all — is destroyed when the job ends, so nothing is
+preserved, and the only observable effect is that a long job runs out of
+disk sooner.
+
+So the action refuses `keep-clusters: true` unless `RUNNER_ENVIRONMENT`
+is `self-hosted`, and it fails *closed*: a runner that does not set that
+variable is treated as hosted. On a hosted runner, the evidence you keep
+is the uploaded artifacts, and reproducing the run locally is what
+`admissionlab reproduce` and the uploaded run manifest are for.
 
 ---
 
@@ -112,11 +153,11 @@ failing run as well as a passing one. Its contents:
 
 | File | When | What it is |
 | --- | --- | --- |
-| `result.json` | the run reached a verdict | The machine-readable result: every fixture, every graded change, both sides' captured admission outcomes, and the environments they ran in. Schema `admissionlab.io/result/v1alpha1` (experimental until Beta). |
+| `result.json` | the run reached a verdict | The machine-readable result: every fixture, every graded change, both sides' captured admission outcomes, and the environments they ran in. Schema `admissionlab.io/result/v1beta1` — frozen and additive-only, checked in as [`schemas/result-v1beta1.json`](../schemas/result-v1beta1.json) and described in [`docs/schema-migrations.md`](schema-migrations.md). |
 | `report.html` | the run reached a verdict | The standalone report page — per-fixture drill-down with the full webhook trace and every patch. No external scripts, no network. |
 | `diagnostics.json` | the run failed at or after installation | The stage that failed, the failure, and every diagnostic collected up to that point. Written *before* cleanup runs. |
 | `github-summary.md` | always, unless the process died before writing anything | The same Markdown the action appended to the job summary. |
-| `run-manifests/<run-id>.json` | a run workspace existed | The run manifest: tool versions, node images, and configuration digests — what `admissionlab reproduce` needs. |
+| `run-manifests/<run-id>.json` | a run workspace existed | The run manifest: tool versions, node images, and configuration digests — what `admissionlab reproduce` needs. Schema `admissionlab.io/run-manifest/v1beta1` ([`schemas/run-manifest-v1beta1.json`](../schemas/run-manifest-v1beta1.json)). |
 
 `result.json` and `diagnostics.json` are mutually exclusive by design. A
 run that never compared both sides has not earned a verdict, and writing
@@ -185,8 +226,8 @@ words:
 >
 > At least one unexpected critical difference. `admissionlab test` exits 1.
 >
-> Run `01K...` — result schema `admissionlab.io/result/v1alpha1`
-> (experimental; stable at Beta).
+> Run `01K...` — result schema `admissionlab.io/result/v1beta1`
+> (frozen; additive changes only).
 >
 > **### Fixtures** — a six-row table: `identical`, `expected`,
 > `warnings`, `critical`, `inconclusive`, and the bold **total**. All
@@ -226,10 +267,10 @@ states an outcome the run did not reach.**
 ## Security
 
 - **Nothing is downloaded unverified.** The Admission Lab release
-  requires `sha256`; `kind` carries a pinned checksum in the action and
-  requires a new one if you change its version; `kubectl` and `helm` are
-  only downloaded when you supply both a version and a checksum. Every
-  download is `curl --fail` followed by `sha256sum --check --strict`.
+  requires `sha256`; `kind` is pinned in the action with the checksum
+  published in that `kind` release, and neither is a caller input.
+  `kubectl` and `helm` are not downloaded at all. Every download is
+  `curl --fail` followed by `sha256sum --check --strict`.
 - **The checksums have a source.** Admission Lab releases publish a
   `SHA256SUMS` file covering every archive, signed with a keyless
   Sigstore certificate bound to the release workflow's GitHub OIDC
@@ -240,9 +281,8 @@ states an outcome the run did not reach.**
 - **`kind` comes from its own release**
   (`github.com/kubernetes-sigs/kind/releases/download/<version>/kind-linux-amd64`),
   checksummed against the value published in that release's
-  `kind-linux-amd64.sha256sum`. `kubectl` comes from `dl.k8s.io` and
-  `helm` from `get.helm.sh`; for both, you supply the checksum, so the
-  action is not trusting the download origin to vouch for itself.
+  `kind-linux-amd64.sha256sum`. It is the only thing the action fetches
+  other than the Admission Lab release itself.
 - **The action needs no secrets** and requests no permissions of its
   own. It reads public downloads and writes the job summary, the report
   directory, and one workflow artifact.
@@ -278,8 +318,36 @@ fails to verify stops the run.
 
 ## Running more than one lab in a job
 
-Use the action twice, with different `config`, `report-dir`, and
-`artifact-name` values. Each invocation is one `admissionlab test`, and
-the *first* non-zero exit ends the job unless the step carries its own
+Use the action twice, with different `config` and `artifact-name`
+values. `artifact-name` is also the report directory, so varying it is
+enough to keep the two runs' artifacts apart — there is no second path
+input to remember. Each invocation is one `admissionlab test`, and the
+*first* non-zero exit ends the job unless the step carries its own
 `continue-on-error` — which is a workflow-level key and works normally
 there, unlike inside a composite action.
+
+---
+
+## How this action is tested
+
+`.github/workflows/integration.yml` runs it on every pull request that
+touches `.github/actions/**`, twice, against two real two-cluster labs:
+
+- **`action`** runs [`examples/admission-basic`](../examples/admission-basic/),
+  which is designed to pass, and asserts that `result.json`,
+  `report.html`, `github-summary.md` and a run manifest all exist.
+- **`action-failure`** runs [`examples/kyverno-istio-upgrade`](../examples/kyverno-istio-upgrade/),
+  which finds a real regression and exits `1`. The step carries
+  `continue-on-error: true` so the job survives it, and the next step
+  asserts that the step's `outcome` was `failure`, that `exit-code` was
+  `1`, that every artifact above exists **anyway**, and that
+  `github-summary.md` carries the `FAIL` verdict rather than a cheerful
+  one. That is the `if: always()` guarantee, observed on the only kind of
+  run that can observe it.
+
+Two things those jobs cannot prove, and that are checked by hand before a
+release rather than claimed here: that the pinned-**release** download
+branch works (it needs a published release to download, and it is built
+so that a checksum mismatch stops the run rather than falling back to
+anything), and that the uploaded artifacts and rendered job summary look
+right *on a real pull request* in a downstream repository.

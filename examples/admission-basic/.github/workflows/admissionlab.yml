@@ -67,9 +67,12 @@ jobs:
           version: "0.1.0"
           sha256: "0000000000000000000000000000000000000000000000000000000000000000"
           # Everything below is optional; these are the defaults, written
-          # out so the file shows what it is choosing.
-          report-dir: ./admissionlab-artifacts
+          # out so the file shows what it is choosing. `artifact-name` is
+          # also the directory under the workspace the reports are
+          # written into, which is why there is no second path input to
+          # keep in step with it.
           artifact-name: admissionlab-artifacts
+          artifact-retention-days: "14"
 
       # Nothing else is needed. The action has already appended the
       # verdict to this job's summary and uploaded `result.json`,

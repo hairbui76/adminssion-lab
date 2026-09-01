@@ -185,11 +185,13 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "Admission Lab \`${TAG}\` — Public Alpha."
+            echo "Admission Lab \`${TAG}\` — Public Beta."
             echo
-            echo "Admission Lab is pre-1.0. The \`admissionlab.io/result/v1alpha1\`"
-            echo "result schema is experimental and may change without a"
-            echo "compatibility guarantee until Public Beta."
+            echo "Admission Lab is pre-1.0. The \`admissionlab.io/result/v1beta1\`"
+            echo "result schema is frozen and grows by addition only; the"
+            echo "configuration is \`admissionlab.io/v1beta1\`, and"
+            echo "\`admissionlab.io/v1alpha1\` configurations still load unchanged."
+            echo "See \`docs/schema-migrations.md\`. Nothing is stable until v1.0."
             echo
             echo "### Artifacts"
             echo

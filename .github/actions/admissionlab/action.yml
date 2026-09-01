@@ -13,7 +13,8 @@
 #
 #   1. install the pinned Admission Lab binary (or build the checked-out
 #      source, for this repository's own CI);
-#   2. install/verify pinned `kind`, `kubectl`, and `helm`;
+#   2. install a pinned `kind` and verify the `kubectl`, `helm` and
+#      Docker the runner already has;
 #   3. run `admissionlab test`;
 #   4. write the job summary from the file the CLI produced;
 #   5. upload the JSON/HTML/run-manifest artifacts.
@@ -45,16 +46,68 @@
 #
 # Nothing is downloaded without a SHA-256 the caller can read in this
 # file or supplied as an input. `version` (the Admission Lab release)
-# requires `sha256` and is refused without it. `kind` is pinned to the
-# version this project validated its cluster lifecycle against, with the
-# checksum published in that `kind` release; changing `kind-version`
-# requires supplying the matching `kind-sha256`. `kubectl` and `helm` are
-# used as the runner image ships them unless a version *and* a checksum
-# are given for either.
+# requires `sha256` and is refused without it. `kind` is pinned *here*,
+# as a constant, to the version this project validated its cluster
+# lifecycle against, with the checksum published in that `kind` release.
+# `kubectl` and `helm` are used exactly as the runner image ships them.
 #
 # The action needs no secrets, no registry credentials, and no token: it
 # reads a public release and a public tool download, and writes only into
 # the workspace and the job summary.
+#
+# # Why there are so few inputs (ROADMAP Task 7.6 steps 1-2)
+#
+# The Public Beta input surface is frozen at four concerns and nothing
+# else: **which lab to run** (`config`), **which Admission Lab to run it
+# with** (`version` + `sha256`, and `repository` for where that release
+# lives), **what to do with the artifacts** (`artifact-name`,
+# `artifact-retention-days`, `upload-artifacts`), and **whether to keep
+# the clusters** (`keep-clusters`, refused on hosted runners -- see
+# below). Each removal below was a decision, not an oversight:
+#
+#   - `report-dir` is gone. The report directory is now
+#     `$GITHUB_WORKSPACE/<artifact-name>`, derived from the artifact
+#     name rather than configured beside it -- two inputs that had to
+#     agree, and that a caller running the action twice in one job had to
+#     remember to vary together, are now one. Nothing is lost: the
+#     `report-dir` *output* still reports the absolute path, which is
+#     what a following step actually needs.
+#   - `kind-version`/`kind-sha256` are gone. The pinned `kind` is a
+#     property of *this Admission Lab release*, not a knob a caller
+#     should turn: `compatibility/kubernetes.yaml`'s node-image digests
+#     were captured from this exact `kind` release, so a caller who
+#     changed it would be running node images this project never
+#     validated -- while still getting a report that claims those
+#     versions. Upgrading `kind` is an Admission Lab release, reviewed
+#     with the compatibility matrix it belongs to.
+#   - `kubectl-version`/`kubectl-sha256` and `helm-version`/
+#     `helm-sha256` are gone. GitHub's `ubuntu-*` images ship both, this
+#     action targets those runners, and neither tool's version is
+#     something the action decides anything from -- `admissionlab test`
+#     records what it found in the run manifest either way. A runner
+#     without them fails below with a message naming what to install
+#     rather than growing four inputs to work around it.
+#
+# There is deliberately **no input that becomes part of a command line**
+# beyond the config path: no extra flags, no `args`, no `env`, no
+# pre/post script. A wrapper that accepted arbitrary arguments would be a
+# way to run something other than the run it reports on.
+#
+# # keep-clusters, and why it is refused on hosted runners
+#
+# `admissionlab test --keep-clusters` preserves both `kind` clusters so
+# an operator can `kubectl` into them afterwards. On a GitHub-hosted
+# runner that is a foot-gun with no upside: the runner VM -- clusters,
+# Docker daemon, disk and all -- is destroyed the moment the job ends, so
+# nothing is preserved for anyone to look at, and the only observable
+# effect is that a long job runs out of disk sooner. The evidence a
+# hosted run can actually keep is the uploaded artifacts.
+#
+# So `keep-clusters: true` is accepted only when `RUNNER_ENVIRONMENT` is
+# `self-hosted`, where a preserved cluster genuinely outlives the job.
+# The check fails *closed*: a runner that does not set `RUNNER_ENVIRONMENT`
+# at all is treated as hosted, because guessing "probably self-hosted"
+# is how a foot-gun gets re-enabled by accident.
 #
 # # Platform
 #
@@ -106,77 +159,42 @@ inputs:
     required: false
     default: ""
 
-  report-dir:
-    description: >-
-      Directory the run's artifacts are written into. Created if absent.
-    required: false
-    default: ./admissionlab-artifacts
-
   artifact-name:
-    description: Name of the uploaded workflow artifact.
+    description: >-
+      Name of the uploaded workflow artifact, and the name of the
+      directory under `$GITHUB_WORKSPACE` the run's artifacts are written
+      into. Must be a single path segment: no `/`, no `\`, and not `.` or
+      `..`. Vary it (and nothing else) when a job runs this action more
+      than once.
     required: false
     default: admissionlab-artifacts
+
+  artifact-retention-days:
+    description: >-
+      How long the uploaded artifact is kept, in days. Must be a positive
+      whole number no greater than the retention limit the repository or
+      organization sets, which GitHub enforces.
+    required: false
+    default: "14"
 
   upload-artifacts:
     description: >-
       Set to `false` to skip the upload step, for a workflow that
-      collects the report directory itself.
+      collects the report directory itself (its absolute path is the
+      `report-dir` output).
     required: false
     default: "true"
 
-  artifact-retention-days:
-    description: How long the uploaded artifact is kept.
-    required: false
-    default: "14"
-
-  kind-version:
+  keep-clusters:
     description: >-
-      `kind` version to install, as a `v`-prefixed tag. The default is
-      the version this project validated its cluster lifecycle against
-      and the one `compatibility/kubernetes.yaml`'s node-image digests
-      were captured from. Changing it requires `kind-sha256`.
+      Set to `true` to pass `--keep-clusters`, preserving both `kind`
+      clusters after the run. **Refused on GitHub-hosted runners**, where
+      the whole VM is discarded when the job ends, so nothing is
+      preserved and the only effect is disk pressure; accepted only when
+      `RUNNER_ENVIRONMENT` is `self-hosted`. A runner that does not set
+      that variable is treated as hosted.
     required: false
-    default: v0.33.0
-
-  kind-sha256:
-    description: >-
-      SHA-256 of `kind-linux-amd64` for `kind-version`, as published in
-      that release's own `kind-linux-amd64.sha256sum`. The default is the
-      checksum for the default version and nothing else.
-    required: false
-    default: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
-
-  kubectl-version:
-    description: >-
-      `kubectl` version to install, as a `v`-prefixed tag (for example
-      `v1.36.4`). Empty (the default) uses the `kubectl` the runner image
-      already ships, whose version this action prints. Requires
-      `kubectl-sha256` when set.
-    required: false
-    default: ""
-
-  kubectl-sha256:
-    description: >-
-      SHA-256 of `kubectl` for `kubectl-version` (linux/amd64), as
-      published at `dl.k8s.io/release/<version>/bin/linux/amd64/kubectl.sha256`.
-    required: false
-    default: ""
-
-  helm-version:
-    description: >-
-      `helm` version to install, as a `v`-prefixed tag (for example
-      `v3.19.0`). Empty (the default) uses the `helm` the runner image
-      already ships, whose version this action prints. Requires
-      `helm-sha256` when set.
-    required: false
-    default: ""
-
-  helm-sha256:
-    description: >-
-      SHA-256 of `helm-<version>-linux-amd64.tar.gz`, as published at
-      `get.helm.sh/helm-<version>-linux-amd64.tar.gz.sha256sum`.
-    required: false
-    default: ""
+    default: "false"
 
 outputs:
   exit-code:
@@ -188,8 +206,12 @@ outputs:
       wants to branch on *which* failure can, without parsing anything.
     value: ${{ steps.run.outputs.exit-code }}
   report-dir:
-    description: Absolute path of the directory the artifacts were written to.
-    value: ${{ steps.run.outputs.report-dir }}
+    description: >-
+      Absolute path of the directory the artifacts were written to
+      (`$GITHUB_WORKSPACE/<artifact-name>`). Resolved before anything is
+      installed, so it is available even on a run that never reached
+      `admissionlab test`.
+    value: ${{ steps.paths.outputs.report-dir }}
 
 runs:
   using: composite
@@ -204,6 +226,69 @@ runs:
           echo "::error::the Admission Lab action supports Linux x86_64 runners only (this is ${os}/${arch}); see the action's own header for why"
           exit 1
         fi
+
+    # Every input that is not a URL or a checksum is checked here, before
+    # anything is downloaded, installed, or created -- so a typo costs
+    # seconds rather than a two-cluster lab. It is also where
+    # `report-dir` comes from: deriving it from `artifact-name` in one
+    # early step means every later step (including the `if: always()`
+    # ones, which run after a failure) has the path, and the action's
+    # `report-dir` output is populated even for a run that never reached
+    # `admissionlab test`.
+    - name: Resolve the report directory and check the run options
+      id: paths
+      shell: bash
+      env:
+        ARTIFACT_NAME: ${{ inputs.artifact-name }}
+        RETENTION_DAYS: ${{ inputs.artifact-retention-days }}
+        KEEP_CLUSTERS: ${{ inputs.keep-clusters }}
+      run: |
+        set -euo pipefail
+
+        # A single path segment, because it is both a directory name
+        # under the workspace and an `actions/upload-artifact` name --
+        # and because a name containing `/` or `..` would put the report
+        # directory somewhere the caller did not ask for.
+        case "${ARTIFACT_NAME}" in
+          "" | "." | "..")
+            echo "::error::'artifact-name' must be a non-empty name, not '${ARTIFACT_NAME}'"
+            exit 1
+            ;;
+          */* | *\\*)
+            echo "::error::'artifact-name' must be a single path segment (no '/' or '\\'), got '${ARTIFACT_NAME}'"
+            exit 1
+            ;;
+        esac
+
+        case "${RETENTION_DAYS}" in
+          "" | *[!0-9]* | 0)
+            echo "::error::'artifact-retention-days' must be a positive whole number of days, got '${RETENTION_DAYS}'"
+            exit 1
+            ;;
+        esac
+
+        # See this file's "keep-clusters, and why it is refused on hosted
+        # runners". Fails closed: an unset RUNNER_ENVIRONMENT is treated
+        # as hosted.
+        case "${KEEP_CLUSTERS}" in
+          false) ;;
+          true)
+            if [ "${RUNNER_ENVIRONMENT:-github-hosted}" != "self-hosted" ]; then
+              echo "::error::'keep-clusters: true' is refused on a GitHub-hosted runner (RUNNER_ENVIRONMENT=${RUNNER_ENVIRONMENT:-unset}): the runner VM and every cluster on it are destroyed when the job ends, so nothing would be preserved. The uploaded artifacts are the evidence a hosted run keeps."
+              exit 1
+            fi
+            echo "keeping both clusters after the run (self-hosted runner)"
+            ;;
+          *)
+            echo "::error::'keep-clusters' must be 'true' or 'false', got '${KEEP_CLUSTERS}'"
+            exit 1
+            ;;
+        esac
+
+        report_dir="${GITHUB_WORKSPACE}/${ARTIFACT_NAME}"
+        mkdir -p "${report_dir}"
+        echo "report-dir=${report_dir}" >> "${GITHUB_OUTPUT}"
+        echo "report directory: ${report_dir}"
 
     # Responsibility 1. Exactly one of the two branches runs, and which
     # one is decided by whether `version` was given -- there is no
@@ -260,12 +345,15 @@ runs:
     - name: Install and verify kind, kubectl, and helm
       shell: bash
       env:
-        KIND_VERSION: ${{ inputs.kind-version }}
-        KIND_SHA256: ${{ inputs.kind-sha256 }}
-        KUBECTL_VERSION: ${{ inputs.kubectl-version }}
-        KUBECTL_SHA256: ${{ inputs.kubectl-sha256 }}
-        HELM_VERSION: ${{ inputs.helm-version }}
-        HELM_SHA256: ${{ inputs.helm-sha256 }}
+        # Constants, not inputs (ROADMAP Task 7.6 step 1; see this file's
+        # "Why there are so few inputs"). This `kind` release is the one
+        # `compatibility/kubernetes.yaml`'s node-image digests were
+        # captured from, so moving it is an Admission Lab release rather
+        # than a caller's decision. The checksum is the one published in
+        # that release's own `kind-linux-amd64.sha256sum`, and the two
+        # move together.
+        KIND_VERSION: v0.33.0
+        KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
       run: |
         set -euo pipefail
         bin="${HOME}/.admissionlab/tools"
@@ -288,36 +376,13 @@ runs:
           chmod +x "${bin}/kind"
         fi
 
-        # kubectl and helm: pinned only if the caller asked for a pin.
-        # A version without a checksum is refused rather than downloaded,
-        # exactly as the release binary is.
-        if [ -n "${KUBECTL_VERSION}" ]; then
-          if [ -z "${KUBECTL_SHA256}" ]; then
-            echo "::error::the 'kubectl-version' input was given without 'kubectl-sha256'"
-            exit 1
-          fi
-          url="https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          echo "downloading ${url}"
-          curl --fail --silent --show-error --location --output "${bin}/kubectl" "${url}"
-          echo "${KUBECTL_SHA256}  ${bin}/kubectl" | sha256sum --check --strict -
-          chmod +x "${bin}/kubectl"
-        fi
-
-        if [ -n "${HELM_VERSION}" ]; then
-          if [ -z "${HELM_SHA256}" ]; then
-            echo "::error::the 'helm-version' input was given without 'helm-sha256'"
-            exit 1
-          fi
-          archive="helm-${HELM_VERSION}-linux-amd64.tar.gz"
-          url="https://get.helm.sh/${archive}"
-          staging="$(mktemp -d)"
-          echo "downloading ${url}"
-          curl --fail --silent --show-error --location --output "${staging}/${archive}" "${url}"
-          echo "${HELM_SHA256}  ${staging}/${archive}" | sha256sum --check --strict -
-          tar --extract --gzip --file "${staging}/${archive}" --directory "${staging}"
-          install -m 0755 "${staging}/linux-amd64/helm" "${bin}/helm"
-        fi
-
+        # kubectl and helm are used exactly as the runner image ships
+        # them. Neither is downloaded and neither is pinnable: this
+        # action targets GitHub's `ubuntu-*` images, which provide both,
+        # and `admissionlab test` records the versions it actually found
+        # in the run manifest either way. A runner without them is named
+        # below rather than worked around with four more inputs.
+        #
         # What the run will actually use, printed once so a failing run's
         # log answers "which versions was this?" without a rerun. A tool
         # that is missing entirely is named here rather than discovered
@@ -329,7 +394,7 @@ runs:
           command -v "${tool}" >/dev/null 2>&1 || missing="${missing} ${tool}"
         done
         if [ -n "${missing}" ]; then
-          echo "::error::this runner has no:${missing}. GitHub's ubuntu-* images ship kubectl, helm, and Docker; on a self-hosted runner install them, or pin 'kubectl-version'/'helm-version' with their checksums."
+          echo "::error::this runner has no:${missing}. GitHub's ubuntu-* images ship kubectl, helm, and Docker; install them on a self-hosted runner. This action does not download them, so it cannot substitute for a missing one."
           exit 1
         fi
         kind version
@@ -346,12 +411,11 @@ runs:
       shell: bash
       env:
         CONFIG: ${{ inputs.config }}
-        REPORT_DIR: ${{ inputs.report-dir }}
+        REPORT_DIR: ${{ steps.paths.outputs.report-dir }}
+        KEEP_CLUSTERS: ${{ inputs.keep-clusters }}
       run: |
         set -euo pipefail
-        mkdir -p "${REPORT_DIR}"
-        report_dir="$(cd "${REPORT_DIR}" && pwd)"
-        echo "report-dir=${report_dir}" >> "${GITHUB_OUTPUT}"
+        report_dir="${REPORT_DIR}"
 
         # Where `admissionlab test` puts each run's workspace, and so
         # where its run manifest lands. It is not configurable yet (the
@@ -363,10 +427,22 @@ runs:
         run_root="${run_root%/}/admissionlab-runs"
         echo "run-root=${run_root}" >> "${GITHUB_OUTPUT}"
 
+        # An argv array, never a command string: the config path is the
+        # only caller-supplied word on this command line, and it is one
+        # element rather than something a shell re-splits (Global
+        # Constraint 12). `keep-clusters` was already validated -- and,
+        # on a hosted runner, already refused -- by the `paths` step.
+        args=(
+          "${CONFIG}"
+          --report-dir "${report_dir}"
+          --github-summary "${report_dir}/github-summary.md"
+        )
+        if [ "${KEEP_CLUSTERS}" = "true" ]; then
+          args+=(--keep-clusters)
+        fi
+
         status=0
-        admissionlab test "${CONFIG}" \
-          --report-dir "${report_dir}" \
-          --github-summary "${report_dir}/github-summary.md" || status=$?
+        admissionlab test "${args[@]}" || status=$?
         echo "exit-code=${status}" >> "${GITHUB_OUTPUT}"
         echo "admissionlab test exited ${status}"
 
@@ -378,7 +454,7 @@ runs:
       if: always()
       shell: bash
       env:
-        REPORT_DIR: ${{ steps.run.outputs.report-dir }}
+        REPORT_DIR: ${{ steps.paths.outputs.report-dir }}
         RUN_ROOT: ${{ steps.run.outputs.run-root }}
       run: |
         set -euo pipefail
@@ -405,7 +481,7 @@ runs:
       if: always()
       shell: bash
       env:
-        REPORT_DIR: ${{ steps.run.outputs.report-dir }}
+        REPORT_DIR: ${{ steps.paths.outputs.report-dir }}
       run: |
         set -euo pipefail
         summary="${REPORT_DIR:-}/github-summary.md"
@@ -425,12 +501,22 @@ runs:
     # `result.json` on a policy failure, `diagnostics.json` on an
     # infrastructure one, and the HTML report and run manifest with
     # either.
+    #
+    # The `report-dir != ''` conjunct is not decoration: `path:` is the
+    # one place a *skipped earlier step* could turn into a failure of
+    # this step, and this step failing would skip the final one -- a
+    # composite step with no `if:` does not run after a failure -- so the
+    # action's outcome would stop being Admission Lab's exit code. The
+    # only way the path is empty is the platform check rejecting the
+    # runner, which has already failed the action on its own terms.
     - name: Upload the report artifacts
-      if: always() && inputs.upload-artifacts == 'true'
+      if: >-
+        always() && inputs.upload-artifacts == 'true'
+        && steps.paths.outputs.report-dir != ''
       uses: actions/upload-artifact@v4.6.2
       with:
         name: ${{ inputs.artifact-name }}
-        path: ${{ inputs.report-dir }}
+        path: ${{ steps.paths.outputs.report-dir }}
         # `warn`, not `error`: this step must never be the thing that
         # fails the action, or a run that died before writing anything
         # would report an upload problem instead of its own failure.

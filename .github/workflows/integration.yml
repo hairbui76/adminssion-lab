@@ -15,7 +15,8 @@ on:
       - "examples/**"
       - "testdata/**"
       # Task 5.4: the composite action and this workflow itself, so a
-      # change to either is tested by the `action` job below rather than
+      # change to either is tested by the `action` and `action-failure`
+      # jobs below -- a passing lab and a failing one -- rather than
       # discovered by the first downstream repository to use it.
       - ".github/actions/**"
       - ".github/workflows/integration.yml"
@@ -356,7 +357,10 @@ jobs:
         uses: ./.github/actions/admissionlab
         with:
           config: examples/admission-basic/admissionlab.yaml
-          report-dir: ./admissionlab-artifacts
+          # Also names the report directory under the workspace, as of
+          # Task 7.6: `report-dir` is no longer an input, so the two can
+          # no longer disagree. The absolute path comes back out as the
+          # `report-dir` output, which the next step reads.
           artifact-name: admissionlab-basic-artifacts
 
       - name: Assert the action produced every artifact
@@ -370,9 +374,17 @@ jobs:
         # here would be the second engine the exit gate forbids. The
         # verdict is already checked -- by the action's final step, which
         # made this job's own conclusion Admission Lab's exit code.
+        env:
+          REPORT_DIR: ${{ steps.lab.outputs.report-dir }}
         run: |
           set -euo pipefail
-          dir="./admissionlab-artifacts"
+          # The output, with the action's own documented derivation
+          # (`$GITHUB_WORKSPACE/<artifact-name>`) as the fallback: a
+          # composite action that failed early may not have published its
+          # outputs, and this step runs `if: always()` precisely so it can
+          # look at that case.
+          dir="${REPORT_DIR:-${GITHUB_WORKSPACE}/admissionlab-basic-artifacts}"
+          echo "checking ${dir}"
           missing=""
           for artifact in result.json report.html github-summary.md; do
             [ -s "${dir}/${artifact}" ] || missing="${missing} ${artifact}"
@@ -406,6 +418,148 @@ jobs:
           leaked="$(printf '%s\n' "$clusters" | grep '^adlab-' || true)"
           if [ -n "$leaked" ]; then
             echo "::error::leaked adlab-* cluster(s) after the composite action job:"
+            echo "$leaked"
+            echo "$leaked" | xargs -r -n1 kind delete cluster --name
+            exit 1
+          fi
+          echo "no adlab-* cluster left behind"
+
+  action-failure:
+    # ROADMAP Task 7.6 step 4: "verify exit 1 marks the job failed while
+    # artifacts still upload using `if: always()`". The `action` job above
+    # runs a lab that is designed to *pass*, so it can only ever observe
+    # half of that sentence. This job observes the other half, which is
+    # the half the artifacts exist for.
+    #
+    # The lab is `examples/kyverno-istio-upgrade`, this repository's
+    # canonical demonstration of a real regression: it installs Kyverno
+    # 3.9.0 + Istio 1.30.4 on the baseline side and the candidate versions
+    # on the other, finds unexpected critical differences, and exits 1.
+    # Nothing about it is rigged for this job -- it is the same file
+    # `alpha_e2e` drives and the same one the README walks through -- which
+    # is what makes it evidence rather than a mock.
+    #
+    # `continue-on-error` at the *workflow* step level is what lets the
+    # assertions run after the action fails. It is a workflow key, not a
+    # composite-action one (see the action's own header for why the action
+    # cannot use it internally), so it works normally here: the step's
+    # `outcome` records `failure` while its `conclusion` becomes `success`
+    # and the job continues. Asserting on `outcome` is therefore a direct
+    # assertion that a downstream repository's job WOULD have failed.
+    #
+    # What this job still cannot prove, and what remains an operator item
+    # before the Beta ships: that the artifacts are *retrievable from the
+    # GitHub API* on a failed job, and that the job summary renders on a
+    # real pull request. Both need a real run of a real pull request; this
+    # job proves the action's own behavior -- exit code, files on disk,
+    # summary content -- which is everything the action itself decides.
+    name: GitHub composite action, failing lab (examples/kyverno-istio-upgrade)
+    runs-on: ubuntu-latest
+    # Larger than the `action` job's 30: this lab installs a real Kyverno
+    # and a real Istio on each of two clusters, and `alpha_e2e` -- the
+    # same lab, driven through the same binary -- is measured at 89.7 s
+    # per run on the reference machine with a warm image cache, dominated
+    # by container image pulls that a cold hosted runner does not have.
+    # 45 minutes leaves room for that plus one `cargo build --release`.
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          # Its own entry rather than sharing `composite-action`: two jobs
+          # writing one key means only the first one's save is kept, so
+          # sharing would silently halve the cache's value for both.
+          key: composite-action-failure
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Run the Admission Lab action against a failing lab
+        id: lab
+        continue-on-error: true
+        uses: ./.github/actions/admissionlab
+        with:
+          config: examples/kyverno-istio-upgrade/admissionlab.yaml
+          artifact-name: admissionlab-failing-artifacts
+
+      - name: Assert the failing lab failed the step and still uploaded its evidence
+        # Not `if: always()`: this step IS the assertion, and a job in
+        # which it did not run has proven nothing.
+        env:
+          OUTCOME: ${{ steps.lab.outcome }}
+          EXIT_CODE: ${{ steps.lab.outputs.exit-code }}
+          REPORT_DIR: ${{ steps.lab.outputs.report-dir }}
+        run: |
+          set -euo pipefail
+
+          # Half one: the step failed. Without `continue-on-error` above,
+          # this is the moment the job would have ended -- which is
+          # exactly the downstream behavior being asserted.
+          if [ "${OUTCOME}" != "failure" ]; then
+            echo "::error::the action's step outcome was '${OUTCOME}', not 'failure'; a failing lab must fail the job"
+            exit 1
+          fi
+
+          # And it failed for the documented reason. `1` is the policy
+          # verdict; 2-6 would mean the lab never reached one, which is a
+          # different (and, here, broken) thing. This reads the action's
+          # own output, not `result.json`: what the run MEANT is the
+          # binary's business, and a workflow that re-derived a verdict
+          # here would be the second engine the Phase 5 exit gate forbids.
+          if [ "${EXIT_CODE}" != "1" ]; then
+            echo "::error::expected exit code 1 (policy failure) from examples/kyverno-istio-upgrade, got '${EXIT_CODE}'"
+            exit 1
+          fi
+
+          # Half two: the artifacts exist anyway. This is what
+          # `if: always()` on the action's summary/collect/upload steps
+          # buys, and the only way to observe it is on a run that failed.
+          dir="${REPORT_DIR:-${GITHUB_WORKSPACE}/admissionlab-failing-artifacts}"
+          echo "checking ${dir}"
+          missing=""
+          for artifact in result.json report.html github-summary.md; do
+            [ -s "${dir}/${artifact}" ] || missing="${missing} ${artifact}"
+          done
+          manifests="$(find "${dir}/run-manifests" -name '*.json' -type f 2>/dev/null | wc -l)"
+          [ "${manifests}" -ge 1 ] || missing="${missing} run-manifests/<run-id>.json"
+          if [ -n "${missing}" ]; then
+            echo "::error::a failing run did not produce:${missing} -- the artifacts a reviewer needs are missing from exactly the case they exist for"
+            find "${dir}" -type f 2>/dev/null | sort
+            exit 1
+          fi
+          find "${dir}" -type f | sort
+
+          # The summary the action appended to $GITHUB_STEP_SUMMARY is
+          # this file, rendered by the binary. A failing run's summary
+          # must actually say so -- an artifact that exists but claims
+          # PASS would be worse than a missing one.
+          if ! grep -qF 'Admission Lab: FAIL' "${dir}/github-summary.md"; then
+            echo "::error::github-summary.md does not carry the FAIL verdict:"
+            cat "${dir}/github-summary.md"
+            exit 1
+          fi
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        # PRODUCT.md §33's "no leaked cluster after normal failure paths"
+        # -- and this job is the one that actually exercises a failure
+        # path end to end, so the guard matters more here than anywhere
+        # else in this file.
+        run: |
+          set -euo pipefail
+          clusters=""
+          status=0
+          clusters="$(kind get clusters 2>&1)" || status=$?
+          if [ "$status" -ne 0 ]; then
+            echo "::error::kind get clusters failed (exit $status): $clusters"
+            exit 1
+          fi
+          leaked="$(printf '%s\n' "$clusters" | grep '^adlab-' || true)"
+          if [ -n "$leaked" ]; then
+            echo "::error::leaked adlab-* cluster(s) after the failing-lab action job:"
             echo "$leaked"
             echo "$leaked" | xargs -r -n1 kind delete cluster --name
             exit 1
