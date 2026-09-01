@@ -1,0 +1,122 @@
+# DENY FIXTURE (ROADMAP Task 8.2 Step 4). Applying this file is
+# EXPECTED TO FAIL: the pinned `ingress-nginx` release's validating
+# admission webhook rejects the `Ingress` below, and the rejection --
+# with the webhook's own message -- is the evidence this fixture exists
+# to produce. A run in which `kubectl apply -f` of this file SUCCEEDS is
+# a failure, not a pass.
+#
+# It is the migration pack's counterpart to `fixtures/kyverno/smoke/`'s
+# `12-validate-denied-pod.yaml`, and is asserted the same way
+# (`crates/admissionlab-recipes/tests/ingress_nginx_legacy.rs`): the API
+# server must reject it, and the rejection must be attributable to this
+# webhook by name rather than to "some error happened".
+#
+# # The deny input, and why this one
+#
+# The path `/etc/nginx`. Not an arbitrary invalid string -- it is one of
+# the literals the controller's own "deep inspector" refuses outright:
+#
+#     invalidEtcDir = regexp.MustCompile(
+#       "/etc/(passwd|shadow|group|nginx|ingress-controller)")
+#
+# (`internal/ingress/inspector/rules.go` at tag `controller-v1.15.1`).
+# Measured against a real cluster running exactly the release
+# `recipes/ingress-nginx-legacy/recipe.yaml` pins, the API server
+# answers:
+#
+#     Error from server (BadRequest): error when creating "...":
+#     admission webhook "validate.nginx.ingress.kubernetes.io" denied
+#     the request: invalid object: invalid rule in ingress
+#     admissionlab-ingress-nginx-deny/echo-ingress-denied: invalid http
+#     path: invalid value found: /etc/nginx
+#
+# Three candidate deny inputs were tried on that cluster before this one
+# was chosen, and the two rejected ones are recorded here because "we
+# tried the obvious thing and it did not work" is the part of a finding
+# that is expensive to rediscover:
+#
+#   - **An invalid regex path** (`/foo(` with
+#     `nginx.ingress.kubernetes.io/use-regex: "true"`) was **ADMITTED**,
+#     exit code 0. This release runs no regex-compile validation in the
+#     admission path, and `pathType: ImplementationSpecific` -- which a
+#     `use-regex` path needs -- is explicitly skipped by the path-type
+#     validator. A fixture built on it would have asserted nothing.
+#   - **A `configuration-snippet` annotation** (denied by default, since
+#     `controller.allowSnippetAnnotations` is `false` in the pinned
+#     chart) *was* rejected, with
+#     `nginx.ingress.kubernetes.io/configuration-snippet annotation
+#     cannot be used. Snippet directives are disabled by the Ingress
+#     administrator`. It is nonetheless the weaker choice, for a reason
+#     visible only in the controller's source: `CheckIngress` filters on
+#     the ingress class BEFORE it reaches the annotation loop, and an
+#     `Ingress` whose class the controller's own informer has not yet
+#     seen is `return nil` -- **silently admitted**. Right after an
+#     install, that is a real race, and the failure mode it produces is
+#     the worst kind: a deny test that passes by admitting.
+#
+# The deep-inspector check runs *first*, before that class filter, which
+# is exactly why it was chosen. Verified on the same cluster: the
+# `Ingress` below is denied identically WITH and WITHOUT
+# `ingressClassName: nginx`, so no informer state can make this fixture
+# quietly stop testing anything.
+#
+# A fourth candidate -- an `Ingress` that fails `nginx -t` template
+# rendering -- is not available at all in this release: `testTemplate`
+# is commented out in `CheckIngress` to mitigate CVE-2025-1974.
+#
+# # Apply order
+#
+# Two documents, `Namespace` then `Ingress`, in that order, applied by
+# plain `kubectl apply -f` (not by
+# `admissionlab_gateway::apply::apply_gateway_manifests`) because what
+# this fixture needs preserved is the API server's own rejection text,
+# and `kubectl`'s stderr is where that text arrives verbatim. `kubectl`
+# applies a multi-document file in document order, so the `Namespace`
+# exists before the `Ingress` is attempted -- and the `Namespace` is
+# therefore left behind by a run of this fixture, which is correct: the
+# cluster is disposable, and a namespace that outlives a denied object
+# is what actually happened.
+#
+# The namespace is this fixture's own, deliberately not shared with
+# `basic-routing.yaml`: a denied object must not be able to disturb, or
+# be blamed for, the routing fixture's traffic assertion.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-ingress-nginx-deny
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+# The object the webhook must reject. Identical in shape to
+# `basic-routing.yaml`'s `Ingress` -- one host, one `Prefix` path, one
+# backend, the same class -- with exactly one difference: the path. That
+# is deliberate, so a diff of the two files shows the deny input and
+# nothing else.
+#
+# No backend workload is declared in this namespace, and none is needed:
+# the request never reaches a stage that resolves `backendRefs`. The
+# `Service` named below does not exist, and the rejection is not about
+# it.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-ingress-denied
+  namespace: admissionlab-ingress-nginx-deny
+spec:
+  # Written out even though this release's deep inspector denies the
+  # object with or without it (measured -- see this file's header). A
+  # fixture that omitted it would be testing a code path no real
+  # migration workload takes.
+  ingressClassName: nginx
+  rules:
+    - host: denied.ingress.admissionlab.test
+      http:
+        paths:
+          # THE DENY INPUT. See this file's header.
+          - path: /etc/nginx
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-a
+                port:
+                  number: 80

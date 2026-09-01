@@ -281,3 +281,75 @@ recipes:
           tier: perCommit
         - version: "1.37.0"
           tier: weeklyRelease
+  # Task 8.2. THE UPSTREAM PROJECT IS RETIRED AND ITS REPOSITORY IS
+  # ARCHIVED -- `recipes/ingress-nginx-legacy/README.md` carries the
+  # dates, the upstream's own wording, and Admission Lab's stance. This
+  # entry certifies it for MIGRATION COMPATIBILITY TESTING ONLY (ROADMAP
+  # Task 8.2 Step 2: "install only for migration compatibility tests,
+  # not as the product's strategic ingress recommendation"), and its
+  # presence here is not a recommendation to run it.
+  #
+  # `version` is the CHART version, as it is for every other entry.
+  # Chart 4.15.1 / controller appVersion 1.15.1 is the project's FINAL
+  # release, cut 2026-03-19, four days before the repository was
+  # archived -- so this is one pin that will never need a bump, and the
+  # append-don't-mutate rule in this file's header will never be
+  # exercised for it.
+  - name: ingress-nginx-legacy
+    version: "4.15.1"
+    kubernetes:
+      # Upstream's own supported-versions table for controller v1.15.1
+      # lists Kubernetes 1.31-1.35 (`Chart.yaml`'s
+      # `kubeVersion: '>=1.21.0-0'` is an open lower bound with no upper
+      # bound, which this file's header explains is Helm's install-time
+      # gate and not a compatibility statement). Recorded at the vendor's
+      # own granularity, unchanged, even though the vendor can no longer
+      # revise it.
+      documentedRange:
+        min: "1.31"
+        max: "1.35"
+      # DELIBERATELY OUTSIDE `documentedRange`, and the only entry in
+      # this file that is.
+      #
+      # Global Constraint 10 admits this recipe at v1 only "when that
+      # archived release passes the primary supported Kubernetes
+      # integration job", and Admission Lab's Tier-1 primary is 1.36.4.
+      # Certifying it anywhere else would not satisfy the constraint that
+      # lets it ship at all. The usual reason to respect a narrower
+      # vendor window -- that the vendor may widen it later -- cannot
+      # apply here: an archived project will never publish a table that
+      # includes 1.36, so waiting for one means never shipping the
+      # migration recipe.
+      #
+      # What makes that honest rather than a fudge is that both halves
+      # are stated: `documentedRange` above still says exactly what the
+      # vendor claimed, and the row below is Admission Lab's own
+      # measurement.
+      # `crates/admissionlab-recipes/tests/ingress_nginx_legacy.rs`
+      # installs chart 4.15.1 at its default values on a real 1.36.4
+      # `kind` cluster, routes real HTTP traffic through a real
+      # `Ingress` to the echo backend, and then proves the validating
+      # admission webhook rejects
+      # `fixtures/migration/ingress-nginx/webhook-deny.yaml`. That test
+      # also asserts this very row certifies 1.36.4, so the constraint
+      # cannot be satisfied on paper only.
+      #
+      # weeklyRelease (Tier 3), and only one version, per ROADMAP Task
+      # 8.9, which places the legacy stack in a migration-specific Tier 3
+      # rather than in the general recipe matrix. Two consequences worth
+      # being explicit about, since a tier is a scheduling claim and this
+      # file's header insists tiers never imply confidence:
+      #
+      #   - No `perCommit` row. A retired upstream cannot regress; what
+      #     can regress is Admission Lab's own handling of it, and a
+      #     weekly job catches that at a cost proportional to how often
+      #     the migration code changes.
+      #   - No `nightly` row and no second/third Kubernetes version.
+      #     Nightly Tier 2 already covers all three supported minors
+      #     through the `istio` and `kyverno` entries above, so adding
+      #     minors here would buy coverage nothing needs -- and every one
+      #     of them would be further outside a vendor window that is now
+      #     frozen forever.
+      certified:
+        - version: "1.36.4"
+          tier: weeklyRelease

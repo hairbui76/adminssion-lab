@@ -84,14 +84,24 @@ fn checked_in_supported() -> Vec<SupportedKubernetes> {
 /// less pinned than one that happens to be embedded.
 fn checked_in_recipes() -> Vec<Recipe> {
     let mut recipes = load_builtin_recipes().expect("the built-in recipes must load");
-    let gateway_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../recipes/istio-gateway")
-        .canonicalize()
-        .expect("recipes/istio-gateway must exist in this checkout");
-    recipes.extend(
-        admissionlab_recipes::load_recipe_overrides(&gateway_dir)
-            .expect("recipes/istio-gateway must load"),
-    );
+    // `ingress-nginx-legacy` (Task 8.2) is the second directory-loaded
+    // recipe, and unlike `istio-gateway` it *could* have been a built-in
+    // (it installs purely via Helm). It deliberately is not: the
+    // built-in set is what a binary offers without being pointed
+    // anywhere, and an archived upstream whose own maintainers say not
+    // to deploy it does not belong there. See
+    // `tests/ingress_nginx_legacy.rs`'s `load_legacy_recipe`.
+    for directory in ["recipes/istio-gateway", "recipes/ingress-nginx-legacy"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(directory)
+            .canonicalize()
+            .unwrap_or_else(|error| panic!("{directory} must exist in this checkout: {error}"));
+        recipes.extend(
+            admissionlab_recipes::load_recipe_overrides(&path)
+                .unwrap_or_else(|error| panic!("{directory} must load: {error}")),
+        );
+    }
     recipes
 }
 
@@ -198,17 +208,22 @@ fn exactly_three_kubernetes_minors_are_supported_and_no_exception_is_declared() 
 /// row; this asserts the file still says what those comments explain.
 #[test]
 fn the_certified_combinations_are_exactly_the_reviewed_ones() {
+    // The version each recipe pins. `istio` and `istio-gateway` share
+    // one, deliberately -- see `compatibility/recipes.yaml`'s
+    // `istio-gateway` entry.
+    let pinned_version = |recipe: &str| {
+        match recipe {
+            "kyverno" => "3.9.0",
+            "istio" | "istio-gateway" => "1.30.4",
+            "ingress-nginx-legacy" => "4.15.1",
+            other => panic!("this test has no pinned version for recipe {other:?}"),
+        }
+        .to_owned()
+    };
     let combination = |kubernetes: &str, recipe: &str, tier| CertifiedCombination {
         kubernetes: kubernetes.to_owned(),
         recipe: recipe.to_owned(),
-        // Both certified recipes pin the same upstream chart version;
-        // see `compatibility/recipes.yaml`'s `istio-gateway` entry.
-        recipe_version: if recipe == "kyverno" {
-            "3.9.0"
-        } else {
-            "1.30.4"
-        }
-        .to_owned(),
+        recipe_version: pinned_version(recipe),
         tier,
     };
     assert_eq!(
@@ -221,6 +236,14 @@ fn the_certified_combinations_are_exactly_the_reviewed_ones() {
             combination("1.35.8", "istio-gateway", CertificationTier::WeeklyRelease),
             combination("1.36.4", "istio-gateway", CertificationTier::PerCommit),
             combination("1.37.0", "istio-gateway", CertificationTier::WeeklyRelease),
+            // Task 8.2. One row, Tier 3, on the Tier-1 primary
+            // Kubernetes version only -- see that entry's own comment
+            // for why a retired upstream gets exactly one weekly row.
+            combination(
+                "1.36.4",
+                "ingress-nginx-legacy",
+                CertificationTier::WeeklyRelease
+            ),
         ]
     );
 }

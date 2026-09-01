@@ -75,7 +75,7 @@ use admissionlab_spec::{
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::capability::{parse_capability, resolve_gateway_endpoint};
+use crate::capability::{capability_spelling, parse_capability, resolve_gateway_endpoint};
 
 // ---------------------------------------------------------------------
 // Resolved shape: what every loader in this crate produces
@@ -111,21 +111,43 @@ pub struct Recipe {
     /// Which admission-related capabilities this recipe's component
     /// provides.
     pub capabilities: BTreeSet<Capability>,
-    /// How to find the `Service` fronting a `Gateway`'s data plane, when
-    /// this recipe's component provides one (ROADMAP Task 6.6).
+    /// How to find the `Service` fronting this recipe's data plane, when
+    /// its component provides one (ROADMAP Task 6.6).
     ///
-    /// `None` for every recipe that does not declare
-    /// [`Capability::GatewayApi`] — and [`resolve_recipe`] rejects the
-    /// two inconsistent combinations outright rather than letting either
-    /// pass silently: a `gatewayEndpoint:` without that capability
-    /// (metadata for a data plane the recipe does not claim to provide),
-    /// and the capability without a `gatewayEndpoint:` (a recipe
-    /// `admissionlab-gateway` could reconcile routes for but never send
-    /// a single request through). The second is the load-bearing one:
-    /// silently accepting it would turn a missing recipe field into
-    /// "this Gateway serves no traffic", which is a fabricated
-    /// observation rather than a configuration error (Global Constraint
-    /// 15).
+    /// `None` for every recipe that declares no *traffic-serving*
+    /// capability — and [`resolve_recipe`] rejects the two inconsistent
+    /// combinations outright rather than letting either pass silently: a
+    /// `gatewayEndpoint:` without such a capability (metadata for a data
+    /// plane the recipe does not claim to provide), and such a
+    /// capability without a `gatewayEndpoint:` (a recipe whose objects
+    /// Admission Lab could observe but never send a single request
+    /// through). The second is the load-bearing one: silently accepting
+    /// it would turn a missing recipe field into "this stack serves no
+    /// traffic", which is a fabricated observation rather than a
+    /// configuration error (Global Constraint 15).
+    ///
+    /// # Which capabilities are "traffic-serving"
+    ///
+    /// Exactly the set this module's own `TRAFFIC_SERVING_CAPABILITIES`
+    /// constant names, and that constant is the whole definition — there
+    /// is no second list anywhere. Task 6.6 wrote this rule over
+    /// [`Capability::GatewayApi`] alone, which was exactly right while
+    /// that was the only capability whose recipes were probed over HTTP.
+    /// Task 8.2 added [`Capability::LegacyIngress`]
+    /// (`recipes/ingress-nginx-legacy/`), which is the same *kind* of
+    /// thing — one `Service` fronting a data plane that fixtures send
+    /// real requests through — arrived at by a different API. Widening
+    /// the rule to a named set is the smaller change of the two
+    /// available: the alternative, letting a `legacyIngress` recipe
+    /// carry an endpoint by exempting it from the pairing check, would
+    /// have made the *absent* endpoint legal too, which is the
+    /// fabricated-observation case above.
+    ///
+    /// The field keeps the name `gatewayEndpoint` even though an
+    /// `Ingress` controller is not a Gateway: the same YAML shape is
+    /// `admissionlab.yaml`'s own `gateway.gatewayEndpoint:` block
+    /// (Task 6.11) and is resolved by one shared validator, so renaming
+    /// it here is a schema break in two files for a cosmetic gain.
     ///
     /// Install metadata, not classification — see
     /// [`GatewayEndpointStrategy`]'s own documentation, which is where
@@ -461,6 +483,41 @@ pub(crate) enum RawNormalizeRule {
 // Resolution: RawRecipe -> Recipe
 // ---------------------------------------------------------------------
 
+/// The capabilities whose recipes front a data plane Admission Lab sends
+/// real HTTP requests through, and which therefore must declare a
+/// `gatewayEndpoint:` (see [`Recipe::gateway_endpoint`] for the full
+/// argument, including why a *missing* endpoint is the load-bearing half
+/// of the rule).
+///
+/// Deliberately an explicit, short list rather than "every capability
+/// except [`Capability::Admission`]". A capability added later is not
+/// automatically traffic-serving, and the failure mode of guessing wrong
+/// in that direction is silent: a new capability would inherit a
+/// requirement its recipes cannot satisfy, or — worse, if the default
+/// went the other way — would quietly stop requiring an endpoint it
+/// needs. Adding a variant to [`Capability`] should make an author come
+/// here and decide.
+const TRAFFIC_SERVING_CAPABILITIES: &[Capability] =
+    &[Capability::GatewayApi, Capability::LegacyIngress];
+
+/// [`TRAFFIC_SERVING_CAPABILITIES`] rendered as the quoted, comma-joined
+/// wire spellings a recipe author actually writes (`"gatewayApi",
+/// "legacyIngress"`), for the two validation messages that must name
+/// them.
+///
+/// Built from [`crate::capability::capability_spelling`] rather than
+/// from string literals repeated here: the spelling of a capability has
+/// exactly one home (`capability.rs`'s `KNOWN` table), and an error
+/// message that told an author to write a spelling the parser does not
+/// accept would be worse than no message at all.
+fn traffic_serving_spellings() -> String {
+    TRAFFIC_SERVING_CAPABILITIES
+        .iter()
+        .map(|capability| format!("{:?}", capability_spelling(*capability)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Validates `raw` and resolves it into a [`Recipe`].
 ///
 /// `source_label` identifies which document `raw` came from for every
@@ -484,8 +541,9 @@ pub(crate) enum RawNormalizeRule {
 /// empty, if a `capabilities` entry is not a recognized spelling (see
 /// [`crate::capability::parse_capability`]), if a `gatewayEndpoint`
 /// block fails [`crate::capability::resolve_gateway_endpoint`]'s
-/// validation, or if `gatewayEndpoint` and the `"gatewayApi"` capability
-/// are not both present or both absent (see [`Recipe::gateway_endpoint`]).
+/// validation, or if `gatewayEndpoint` and a traffic-serving capability
+/// ([`TRAFFIC_SERVING_CAPABILITIES`]) are not both present or both
+/// absent (see [`Recipe::gateway_endpoint`]).
 pub(crate) fn resolve_recipe(
     source_label: &str,
     raw: RawRecipe,
@@ -538,26 +596,34 @@ pub(crate) fn resolve_recipe(
         .transpose()?;
 
     // The two halves must agree -- see `Recipe::gateway_endpoint` for
-    // why neither mismatch is allowed to pass quietly.
-    match (
-        capabilities.contains(&Capability::GatewayApi),
-        gateway_endpoint.is_some(),
-    ) {
+    // why neither mismatch is allowed to pass quietly, and
+    // `TRAFFIC_SERVING_CAPABILITIES` for which capabilities this rule is
+    // stated over.
+    let serves_traffic = TRAFFIC_SERVING_CAPABILITIES
+        .iter()
+        .any(|capability| capabilities.contains(capability));
+    match (serves_traffic, gateway_endpoint.is_some()) {
         (true, false) => {
             return Err(RecipeError::validation(
                 source_label,
                 "gatewayEndpoint",
-                "is required by a recipe declaring the \"gatewayApi\" capability -- without it \
-                 Admission Lab can observe a route's status but has no way to find the Service \
-                 to send a request through",
+                format_args!(
+                    "is required by a recipe declaring any of {} -- without it Admission Lab can \
+                     observe an object's status but has no way to find the Service to send a \
+                     request through",
+                    traffic_serving_spellings()
+                ),
             ));
         }
         (false, true) => {
             return Err(RecipeError::validation(
                 source_label,
                 "gatewayEndpoint",
-                "is only meaningful for a recipe declaring the \"gatewayApi\" capability; add \
-                 \"gatewayApi\" to capabilities, or remove this block",
+                format_args!(
+                    "is only meaningful for a recipe declaring one of {}; add one of them to \
+                     capabilities, or remove this block",
+                    traffic_serving_spellings()
+                ),
             ));
         }
         (true, true) | (false, false) => {}

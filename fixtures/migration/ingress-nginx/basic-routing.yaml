@@ -1,0 +1,208 @@
+# Legacy `Ingress` routing fixture (ROADMAP Task 8.2 Step 2a): one
+# `Namespace`, one echo backend, and one `networking.k8s.io/v1` `Ingress`
+# that routes a host + path prefix to it.
+#
+# This is the *migration* side of Admission Lab's Ingress-to-Gateway
+# work. Its counterpart is `fixtures/gateway/istio/same-namespace.yaml`
+# (and, at v1, the NGINX Gateway Fabric pack beside it): the same
+# request -- one `Host`, one path, one backend that answers with its own
+# identity -- expressed once as an `Ingress` and once as a `Gateway` +
+# `HTTPRoute`, so a later task can compare what the two stacks actually
+# do with it rather than what their documentation says they do. Nothing
+# in this file is a recommendation to run `ingress-nginx`; see
+# `recipes/ingress-nginx-legacy/README.md` for the upstream project's
+# retirement status and for why Admission Lab installs it at all.
+#
+# # Apply order: this file relies on `Ingress` being an UNKNOWN kind
+#
+# `admissionlab_gateway::apply::apply_gateway_manifests` sorts every
+# document into a fixed category order before applying any of them
+# (`Namespace` -> `Configuration` -> `Service` -> `Workload` ->
+# `GatewayClass` -> `Gateway` -> `ReferenceGrant` -> `HTTPRoute` ->
+# `Unknown`). `Ingress` is in none of those named categories, so
+# `ApplyCategory::for_kind` places it in `Unknown`, which that module
+# defines as "applied after every known category, preserving source
+# order".
+#
+# That is exactly the position this fixture needs -- the `Ingress` is
+# the object every other document here is a prerequisite for -- so this
+# file is deliberately written in the order it will be applied in
+# (`Namespace`, `Service`, `Deployment`, `Ingress`) and depends on
+# nothing more than "unknown kinds go last". It does NOT ask for
+# `Ingress` to be given a category of its own: whether the apply-order
+# table should name `Ingress` explicitly is a question about
+# `admissionlab-gateway`'s own model, owned by the tasks that build the
+# migration runner, and a fixture is the wrong place to force that
+# decision. If that table ever does gain an `Ingress` row, this file
+# keeps working unchanged as long as the row sits after `Workload`.
+#
+# # Self-contained, including a copy of the echo backend
+#
+# `fixtures/gateway/backends/echo-a.yaml` is the source of truth for
+# what an echo backend *is*, and it deliberately declares no namespace
+# (see its own header). The `Service`/`Deployment` below are a copy of
+# that file's two objects with `metadata.namespace` added and NOTHING
+# else changed -- the same trade
+# `fixtures/gateway/istio/same-namespace.yaml` documents at length, made
+# the same way and for the same reason (an apply engine that applies
+# each document to the namespace the document itself names cannot be
+# handed a namespace-less shared file).
+#
+# The duplication is machine-checked, not trusted to reviewers:
+# `crates/admissionlab-recipes/tests/ingress_nginx_legacy.rs`'s
+# `fixture_backend_matches_the_shared_echo_backend_definition` parses
+# `fixtures/gateway/backends/echo-a.yaml` and the copy below and fails
+# if they have drifted apart in any field other than
+# `metadata.namespace`.
+#
+# # `ingressClassName: nginx`, written out rather than inherited
+#
+# The pinned chart installs `IngressClass/nginx` (controller
+# `k8s.io/ingress-nginx`) and leaves `controller.watchIngressWithoutClass`
+# at its default `false`, so an `Ingress` that names no class is ignored
+# by this controller entirely -- silently, with no event and no status.
+# Naming the class is therefore not boilerplate here; it is the
+# difference between a fixture that routes and a fixture that times out
+# with an empty `status.loadBalancer`. The class name is the chart's own
+# default (`controller.ingressClassResource.name`), and is asserted
+# against the recipe's pin by the test above.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-ingress-nginx-basic
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Service, with
+# --- metadata.namespace added. See this file's header ("Self-contained").
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: admissionlab-ingress-nginx-basic
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Deployment, with
+# --- metadata.namespace added. See this file's header ("Self-contained").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: admissionlab-ingress-nginx-basic
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-a
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The object under test. Deliberately the plainest possible `Ingress`:
+# one host, one `Prefix` path, one backend, one named class, and NOT ONE
+# `nginx.ingress.kubernetes.io/*` annotation.
+#
+# The annotation-free shape is the point. Admission Lab's migration
+# comparison asks what an `Ingress` and an equivalent `HTTPRoute` do
+# with the *same* request, and every vendor annotation added here would
+# be a behavior with no Gateway API counterpart -- a difference the
+# comparison could only ever report as "these two stacks are not the
+# same", which is true and useless. Vendor-specific behavior belongs in
+# an implementation-specific pack, exactly as
+# `fixtures/gateway/istio/` is kept separate from the portable Gateway
+# contracts.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-ingress
+  namespace: admissionlab-ingress-nginx-basic
+spec:
+  # See this file's header. Not optional with this chart's defaults.
+  ingressClassName: nginx
+  rules:
+    # `.test` is reserved by RFC 6761 for exactly this: a name
+    # guaranteed never to resolve in the real DNS. The probe sends it as
+    # a `Host` header over a `kubectl port-forward` to 127.0.0.1, so
+    # nothing ever resolves it -- but a copy of this fixture that
+    # escaped into an environment with real DNS still could not reach a
+    # real service. The same convention, and the same suffix, the
+    # Gateway fixtures use.
+    - host: basic.ingress.admissionlab.test
+      http:
+        paths:
+          # `Prefix` rather than `ImplementationSpecific`: the latter
+          # hands path semantics to the controller, which is precisely
+          # the thing a migration comparison must not leave undefined.
+          # `Prefix` is the `Ingress` spec's own portable match type and
+          # the closest counterpart to the Gateway fixtures'
+          # `path.type: PathPrefix`.
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-a
+                port:
+                  number: 80

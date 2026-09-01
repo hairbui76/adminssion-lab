@@ -78,6 +78,30 @@ pub(crate) fn parse_capability(raw: &str) -> Result<Capability, String> {
         })
 }
 
+/// The wire spelling of one [`Capability`] — the inverse of
+/// [`parse_capability`], and the only place other than [`KNOWN`] that
+/// names these strings.
+///
+/// Written as an exhaustive `match` rather than a lookup through
+/// [`KNOWN`] so that adding a [`Capability`] variant is a compile error
+/// here (there is no spelling to guess and nothing sensible to return
+/// for an unknown one), and so this function cannot fail. The two must
+/// still agree, which is not left to a comment:
+/// [`round_trips_every_capability_through_its_spelling`] below parses
+/// every variant's spelling back and fails if any of them stopped
+/// matching [`KNOWN`].
+///
+/// Used by [`crate::model::traffic_serving_spellings`] to build the two
+/// `gatewayEndpoint` pairing errors, which must tell a recipe author a
+/// spelling the parser actually accepts.
+pub(crate) const fn capability_spelling(capability: Capability) -> &'static str {
+    match capability {
+        Capability::Admission => "admission",
+        Capability::GatewayApi => "gatewayApi",
+        Capability::LegacyIngress => "legacyIngress",
+    }
+}
+
 /// The well-known label a Gateway API implementation applies to the
 /// infrastructure it generates for one `Gateway`, carrying that
 /// `Gateway`'s own name.
@@ -146,6 +170,25 @@ mod tests {
         assert!(err.contains("\"admission\""));
         assert!(err.contains("\"gatewayApi\""));
         assert!(err.contains("\"legacyIngress\""));
+    }
+
+    /// [`capability_spelling`] and [`KNOWN`] name the same strings.
+    /// Neither can drift without this failing, which is what lets
+    /// `capability_spelling` be a hand-written `match` rather than a
+    /// fallible lookup.
+    #[test]
+    fn round_trips_every_capability_through_its_spelling() {
+        for (spelling, capability) in KNOWN {
+            assert_eq!(
+                capability_spelling(*capability),
+                *spelling,
+                "capability_spelling disagrees with KNOWN for {capability:?}"
+            );
+            assert_eq!(
+                parse_capability(capability_spelling(*capability)),
+                Ok(*capability)
+            );
+        }
     }
 
     #[test]

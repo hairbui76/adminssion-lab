@@ -1,0 +1,185 @@
+# LEGACY / ARCHIVED UPSTREAM. This recipe installs the community
+# `ingress-nginx` controller, whose upstream project
+# (github.com/kubernetes/ingress-nginx) is RETIRED and whose repository
+# is ARCHIVED and read-only. It exists so Admission Lab can test
+# migrations AWAY from it. It is not a recommendation to deploy it, and
+# nothing in Admission Lab installs it unless a lab file names it.
+# `README.md` in this same directory carries the retirement dates, the
+# upstream's own words, and the full provenance for every pin below;
+# this file only restates what it must.
+#
+# # What "legacy" is, machine-readably
+#
+# Two things a program can read, and deliberately no new schema field:
+#
+#   - `capabilities: [legacyIngress]` -- `admissionlab_spec::Capability
+#     ::LegacyIngress` ("provides legacy `Ingress` surface"). This is
+#     what a consumer branches on to decide which fixtures a component
+#     is exercised against, and it is already part of the type system.
+#   - The recipe's own `name`, which ends in `-legacy`. The capability
+#     says "this serves the `Ingress` API", which a *maintained*
+#     `Ingress` controller would also say; the name is what says "this
+#     particular upstream is archived".
+#
+# A dedicated `legacy: true` field was considered and not added. Nothing
+# would consume it: the fixture-selection decision is already made from
+# the capability, and a field no code reads is a claim rather than a
+# mechanism (PRODUCT.md §14's own standard for recipe metadata).
+# `crates/admissionlab-recipes/tests/ingress_nginx_legacy.rs` asserts
+# both markers, so neither can be dropped in passing.
+#
+# # No `normalizeRules:` -- checked, not skipped
+#
+# The nondeterminism this controller adds to a comparison lives in HTTP
+# response headers, not in the objects Admission Lab compares:
+# `x-request-id` (a fresh 32-hex value per request), plus the
+# `x-forwarded-*`/`x-real-ip`/`x-scheme` set it injects. All of them
+# were observed on a live probe through this recipe's own endpoint, and
+# all of them are already the responsibility of
+# `admissionlab_gateway::probe`, which normalizes probe responses for
+# every implementation rather than for one vendor. Read back after
+# reconciliation, `fixtures/migration/ingress-nginx/basic-routing.yaml`'s
+# own objects carry no controller-authored annotation, label or `spec`
+# field. A normalize rule deletes evidence (PRODUCT.md §14), so an
+# unnecessary one silently narrows what a comparison can ever detect.
+name: ingress-nginx-legacy
+# The CHART version, matching every other recipe in this repository
+# (`recipes/kyverno` pins a chart version, not an appVersion). Chart
+# 4.15.1 carries controller appVersion 1.15.1; the two are released as a
+# pair and README.md records both, along with the image digests the
+# chart itself pins.
+#
+# 4.15.1 is the FINAL release of this project -- cut 2026-03-19, four
+# days before the repository was archived -- not merely the newest at
+# the time of writing. There will not be a 4.15.2 to bump to.
+version: "4.15.1"
+install:
+  type: helm
+  # `<repo_name>/<chart_name>`, helm's own required argv form for
+  # installing from a named repository.
+  chart: ingress-nginx/ingress-nginx
+  # Still served, and confirmed 200 while writing this recipe. Upstream
+  # states plainly that "existing project artifacts such as Helm charts
+  # and container images will remain available" after retirement.
+  #
+  # Deliberately NOT the OCI mirror at
+  # `registry.k8s.io/ingress-nginx/charts/ingress-nginx`, which does
+  # carry this chart -- its tags are `v`-prefixed (`v4.15.1`), so
+  # `--version 4.15.1` against it is a 404 rather than an install. See
+  # README.md.
+  repo: https://kubernetes.github.io/ingress-nginx
+  version: "4.15.1"
+  # REQUIRED, and the same trap `recipes/istio-gateway/recipe.yaml`
+  # documents: `admissionlab_installer::helm` runs `helm repo add
+  # <repoName> <repo>` and then installs the literal `chart` string
+  # above, so the alias registered must be the one `chart`'s own
+  # `<repo>/<chart>` prefix names. `repoName` defaults to the RECIPE's
+  # name -- `ingress-nginx-legacy` -- which is not what `chart` says.
+  repoName: ingress-nginx
+  # Equal to the recipe-name default `resolve_helm` would produce;
+  # written out so a reader can see where this lands without tracing a
+  # default. It is also half of every object name below: the Helm
+  # release name defaults to the recipe name too, and this chart's
+  # `fullname` helper collapses `<release>-<chart>` to just the release
+  # when the release name already contains the chart name -- which
+  # `ingress-nginx-legacy` does. Hence `ingress-nginx-legacy-controller`
+  # rather than `ingress-nginx-legacy-ingress-nginx-controller`.
+  # Verified by `helm template`, not by reading the helper.
+  namespace: ingress-nginx-legacy
+# Installed entirely at the chart's DEFAULT values -- a finding, not a
+# limitation worked around.
+#
+# This crate's recipe schema has no `setValues`/`valuesFiles` (see
+# `RawHelmInstall`'s own documentation, which defers adding them to
+# "whichever later task first implements a recipe that actually needs a
+# values override"). This task looked for that need and did not find
+# one: measured on a real `kind` cluster at Kubernetes 1.36.4, the
+# unmodified chart installs, schedules, and serves traffic.
+#
+#   - `controller.service.type` defaults to `LoadBalancer`, and on
+#     `kind` its `EXTERNAL-IP` stays `<pending>` forever. That is
+#     irrelevant here: `kubectl port-forward` targets a Service's
+#     ClusterIP endpoints and does not care about the Service type at
+#     all, and Admission Lab's probe model is a port-forward
+#     (`admissionlab_gateway::port_forward`). A real HTTP 200 came back
+#     from the echo backend through exactly this Service.
+#   - The famous `kind` deployment notes (`nodeSelector:
+#     ingress-ready=true`, tolerations, `hostPort`) come from upstream's
+#     separate `deploy/static/provider/kind/deploy.yaml` manifest, NOT
+#     from this chart. The chart's own `controller.nodeSelector` is
+#     `{kubernetes.io/os: linux}` and `controller.hostPort.enabled` is
+#     `false`, both of which a single-node `kind` cluster satisfies as
+#     it is.
+#   - `controller.admissionWebhooks.enabled` and its `patch` (certgen)
+#     Jobs are already `true` by default, which is what makes the
+#     readiness gate below and
+#     `fixtures/migration/ingress-nginx/webhook-deny.yaml` possible.
+#   - `controller.allowSnippetAnnotations: false` and
+#     `controller.watchIngressWithoutClass: false` are both defaults
+#     this recipe relies on and neither needs setting. The second is why
+#     `basic-routing.yaml` must name `ingressClassName: nginx`.
+readiness:
+  # 1. The controller itself. Measured on `kind` at Kubernetes 1.36.4:
+  #    `helm upgrade --install` returned after 22.5 s, and this
+  #    Deployment reported `Available=True` 7.6 s later.
+  - type: deploymentAvailable
+    namespace: ingress-nginx-legacy
+    name: ingress-nginx-legacy-controller
+  # 2. The validating admission webhook is registered. The chart creates
+  #    this object at install time and two Helm hook Jobs
+  #    (`...-admission-create`, pre-install; `...-admission-patch`,
+  #    post-install) generate the serving certificate and inject the
+  #    `caBundle`. Helm waits for a hook Job to complete before the
+  #    install returns, so by the time this gate is evaluated the
+  #    injection has already happened -- measured: at the moment gate 1
+  #    passed, this object existed carrying a 756-byte `caBundle`.
+  #
+  #    Gating on it is not decoration. Its `failurePolicy` is `Fail`, so
+  #    a run that applied `webhook-deny.yaml` before the CA bundle
+  #    landed would still see the API server reject it -- for a TLS
+  #    error, not for the reason that fixture is testing. This check is
+  #    what keeps a passing deny assertion attributable.
+  - type: webhookConfigurationPresent
+    name: ingress-nginx-legacy-admission
+capabilities:
+  # See this file's header for what this marks and what it does not.
+  # Note what is NOT here: `gatewayApi` (this controller serves
+  # `networking.k8s.io/v1` `Ingress`, and nothing installs the Gateway
+  # API CRDs) and `admission` -- even though the recipe demonstrably
+  # does serve a validating webhook. `admission` is a claim that a
+  # recipe has been certified against Admission Lab's admission fixture
+  # corpus (`fixtures/core/`, `fixtures/kyverno/`), which this one has
+  # not been and is not intended to be: its webhook validates
+  # `Ingress` objects only. The deny fixture proves the webhook works;
+  # it does not make this a general admission stack.
+  - legacyIngress
+# How Admission Lab finds this controller's data plane.
+#
+# `serviceByName` with a literal namespace and a literal name -- and
+# NO `{gatewayName}`/`{gatewayNamespace}` placeholder anywhere, which is
+# the structural difference between an `Ingress` controller and a
+# Gateway API implementation, not an omission:
+#
+#   - Istio provisions one data-plane `Service` PER `Gateway`, in the
+#     Gateway's own namespace, so `recipes/istio-gateway/recipe.yaml`
+#     must template its strategy on the Gateway being resolved.
+#   - An `Ingress` controller is a single shared data plane. Every
+#     `Ingress` on the cluster, in every namespace, is served by this
+#     one `Service` in the controller's own namespace. There is no
+#     per-object Service to name, so nothing to substitute.
+#
+# Both values were read off a live cluster (`helm template` agrees):
+# `Service/ingress-nginx-legacy-controller` in namespace
+# `ingress-nginx-legacy`, exposing `http`/80 and `https`/443.
+gatewayEndpoint:
+  type: serviceByName
+  namespace: ingress-nginx-legacy
+  name: ingress-nginx-legacy-controller
+  # REQUIRED here, not optional-and-omitted: the Service exposes two
+  # ports (`http` 80 and `https` 443), so with neither `portName` nor
+  # `port` set `admissionlab_gateway::endpoint` has two candidates and
+  # must report the port as unresolvable rather than pick one. `http`
+  # by name rather than a literal `80` so a values override that moved
+  # the port number still resolves -- the NUMBER is configuration, the
+  # NAME is the chart's.
+  portName: http

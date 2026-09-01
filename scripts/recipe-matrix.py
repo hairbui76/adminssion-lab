@@ -95,6 +95,10 @@ TESTS = {
     "kyverno": ("admissionlab-recipes", "kyverno_recipe"),
     "istio": ("admissionlab-recipes", "istio_recipe"),
     "istio-gateway": ("admissionlab-recipes", "istio_gateway_recipe"),
+    # Task 8.2. A retired upstream, certified at Tier 3 only -- so this
+    # row is selected by `--tier weeklyRelease` and by nothing more
+    # frequent.
+    "ingress-nginx-legacy": ("admissionlab-recipes", "ingress_nginx_legacy"),
 }
 
 
