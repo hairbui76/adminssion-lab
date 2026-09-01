@@ -149,6 +149,7 @@ dependencies = [
  "async-trait",
  "http",
  "http-body-util",
+ "k8s-openapi",
  "kube",
  "serde",
  "serde_json",

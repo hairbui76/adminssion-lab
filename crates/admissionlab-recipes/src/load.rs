@@ -290,6 +290,7 @@ mod tests {
             readiness: Vec::new(),
             normalize_rules: Vec::new(),
             capabilities: BTreeSet::new(),
+            gateway_endpoint: None,
         }
     }
 

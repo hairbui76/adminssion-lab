@@ -69,12 +69,13 @@ use std::path::{Component, Path, PathBuf};
 
 use admissionlab_spec::component::HelmInstallSpec;
 use admissionlab_spec::{
-    Capability, InstallMethod, ManifestInstallSpec, ReadinessCheck, RecipeNormalizeRule,
+    Capability, GatewayEndpointStrategy, InstallMethod, ManifestInstallSpec, ReadinessCheck,
+    RecipeNormalizeRule,
 };
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::capability::parse_capability;
+use crate::capability::{parse_capability, resolve_gateway_endpoint};
 
 // ---------------------------------------------------------------------
 // Resolved shape: what every loader in this crate produces
@@ -110,6 +111,27 @@ pub struct Recipe {
     /// Which admission-related capabilities this recipe's component
     /// provides.
     pub capabilities: BTreeSet<Capability>,
+    /// How to find the `Service` fronting a `Gateway`'s data plane, when
+    /// this recipe's component provides one (ROADMAP Task 6.6).
+    ///
+    /// `None` for every recipe that does not declare
+    /// [`Capability::GatewayApi`] — and [`resolve_recipe`] rejects the
+    /// two inconsistent combinations outright rather than letting either
+    /// pass silently: a `gatewayEndpoint:` without that capability
+    /// (metadata for a data plane the recipe does not claim to provide),
+    /// and the capability without a `gatewayEndpoint:` (a recipe
+    /// `admissionlab-gateway` could reconcile routes for but never send
+    /// a single request through). The second is the load-bearing one:
+    /// silently accepting it would turn a missing recipe field into
+    /// "this Gateway serves no traffic", which is a fabricated
+    /// observation rather than a configuration error (Global Constraint
+    /// 15).
+    ///
+    /// Install metadata, not classification — see
+    /// [`GatewayEndpointStrategy`]'s own documentation, which is where
+    /// that argument and the upstream provenance for the well-known
+    /// gateway-name label both live.
+    pub gateway_endpoint: Option<GatewayEndpointStrategy>,
 }
 
 // ---------------------------------------------------------------------
@@ -237,6 +259,66 @@ pub(crate) struct RawRecipe {
     pub normalize_rules: Vec<RawNormalizeRule>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub gateway_endpoint: Option<RawGatewayEndpoint>,
+}
+
+/// The raw shape of [`RawRecipe::gateway_endpoint`] (ROADMAP Task 6.6),
+/// exactly as a recipe author writes it:
+///
+/// ```yaml
+/// capabilities:
+///   - gatewayApi
+/// gatewayEndpoint:
+///   type: serviceBySelector
+///   namespace: "{gatewayNamespace}"
+///   selector:
+///     gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+///   portName: http
+/// ```
+///
+/// An internally tagged enum, matching [`RawInstallMethod`] and
+/// [`RawReadinessCheck`] — see the first of those for why external
+/// tagging cannot represent a natural `type:` key under `serde_norway`.
+/// `deny_unknown_fields` at this level too, so `port:` written under a
+/// `serviceBySelector` block that also names `portName:` is at least a
+/// *recognized* pair (validated for agreement against the live Service
+/// by `admissionlab_gateway::endpoint`), while an invented key such as
+/// `severity:` is a parse error exactly as it is everywhere else in this
+/// schema.
+///
+/// The two ports are both optional and neither is defaulted here: what
+/// they mean is a question about a `Service` that does not exist yet at
+/// recipe-load time (which ports does it expose? is there exactly one?),
+/// so it is answered where the `Service` is actually read —
+/// `admissionlab_gateway::endpoint`, whose module documentation states
+/// the full rule. Validating them here would mean guessing.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub(crate) enum RawGatewayEndpoint {
+    /// Find the data-plane `Service` by label selector.
+    ServiceBySelector {
+        namespace: String,
+        selector: BTreeMap<String, String>,
+        #[serde(default)]
+        port_name: Option<String>,
+        #[serde(default)]
+        port: Option<u16>,
+    },
+    /// Find the data-plane `Service` by an exact name.
+    ServiceByName {
+        namespace: String,
+        name: String,
+        #[serde(default)]
+        port_name: Option<String>,
+        #[serde(default)]
+        port: Option<u16>,
+    },
 }
 
 /// The raw shape of [`RawRecipe::install`].
@@ -424,8 +506,11 @@ pub(crate) enum RawNormalizeRule {
 /// is empty, contains a relative path while `base_dir` is `None`, or
 /// contains a relative path that resolves outside `base_dir`'s own
 /// directory tree, if any readiness check or normalize rule field is
-/// empty, or if a `capabilities` entry is not a recognized spelling (see
-/// [`crate::capability::parse_capability`]).
+/// empty, if a `capabilities` entry is not a recognized spelling (see
+/// [`crate::capability::parse_capability`]), if a `gatewayEndpoint`
+/// block fails [`crate::capability::resolve_gateway_endpoint`]'s
+/// validation, or if `gatewayEndpoint` and the `"gatewayApi"` capability
+/// are not both present or both absent (see [`Recipe::gateway_endpoint`]).
 pub(crate) fn resolve_recipe(
     source_label: &str,
     raw: RawRecipe,
@@ -464,6 +549,45 @@ pub(crate) fn resolve_recipe(
         })
         .collect::<Result<BTreeSet<Capability>, _>>()?;
 
+    let gateway_endpoint = raw
+        .gateway_endpoint
+        .map(|raw_endpoint| {
+            resolve_gateway_endpoint(raw_endpoint).map_err(|(locator, message)| {
+                RecipeError::validation(
+                    source_label,
+                    format_args!("gatewayEndpoint.{locator}"),
+                    message,
+                )
+            })
+        })
+        .transpose()?;
+
+    // The two halves must agree -- see `Recipe::gateway_endpoint` for
+    // why neither mismatch is allowed to pass quietly.
+    match (
+        capabilities.contains(&Capability::GatewayApi),
+        gateway_endpoint.is_some(),
+    ) {
+        (true, false) => {
+            return Err(RecipeError::validation(
+                source_label,
+                "gatewayEndpoint",
+                "is required by a recipe declaring the \"gatewayApi\" capability -- without it \
+                 Admission Lab can observe a route's status but has no way to find the Service \
+                 to send a request through",
+            ));
+        }
+        (false, true) => {
+            return Err(RecipeError::validation(
+                source_label,
+                "gatewayEndpoint",
+                "is only meaningful for a recipe declaring the \"gatewayApi\" capability; add \
+                 \"gatewayApi\" to capabilities, or remove this block",
+            ));
+        }
+        (true, true) | (false, false) => {}
+    }
+
     Ok(Recipe {
         name,
         version,
@@ -471,6 +595,7 @@ pub(crate) fn resolve_recipe(
         readiness,
         normalize_rules,
         capabilities,
+        gateway_endpoint,
     })
 }
 
@@ -1201,6 +1326,7 @@ mod tests {
             readiness: Vec::new(),
             normalize_rules: Vec::new(),
             capabilities: Vec::new(),
+            gateway_endpoint: None,
         }
     }
 

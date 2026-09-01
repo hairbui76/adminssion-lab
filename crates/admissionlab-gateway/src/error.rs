@@ -261,4 +261,140 @@ pub enum GatewayError {
         /// `"Gateway gateway-lab/lab-gateway"`).
         object: String,
     },
+
+    /// A [`crate::endpoint::GatewayEndpointStrategy`] could not be
+    /// turned into a concrete lookup: one of its substitutable fields
+    /// contains a placeholder
+    /// [`admissionlab_spec::substitute_gateway_placeholders`] does not
+    /// recognize.
+    ///
+    /// Unreachable for a strategy that came from a recipe --
+    /// `admissionlab-recipes` performs exactly this check at recipe-load
+    /// time, through the same function, so a typo fails there with the
+    /// recipe's own file named. This variant covers a strategy built
+    /// programmatically, and exists so that path fails loudly too
+    /// instead of silently searching for a `Service` labelled with a
+    /// literal `"{gateway}"`.
+    #[error("cannot resolve the data-plane endpoint for Gateway {gateway}: {reason}")]
+    EndpointStrategyInvalid {
+        /// The Gateway the strategy was being resolved for, in
+        /// [`crate::GatewayIdentity`]'s `Display` form.
+        gateway: String,
+        /// What about the strategy could not be resolved.
+        reason: String,
+    },
+
+    /// No `Service` matched a Gateway's endpoint strategy.
+    ///
+    /// Distinct from [`GatewayError::ObjectAbsent`], which is about an
+    /// object a *contract* named directly: this is about an object
+    /// nothing named, which a recipe's strategy said how to *find*.
+    /// Which of the two failed is the difference between "the fixture
+    /// names a Gateway that was never applied" and "the implementation
+    /// never provisioned this Gateway's data plane", and they have
+    /// different fixes.
+    #[error("no Service {lookup}{}", describe_considered(.considered.as_deref()))]
+    EndpointNotFound {
+        /// What was looked for, and where.
+        lookup: Box<EndpointLookup>,
+        /// Every `Service` that was actually considered, in name order.
+        ///
+        /// `None` means no enumeration took place at all (a lookup by
+        /// exact name asks the API server for one object rather than
+        /// listing the namespace), which is deliberately *not* the same
+        /// value as `Some(vec![])` ("the namespace was listed and holds
+        /// no Service") -- Global Constraint 15's distinction between
+        /// unknown and empty, in the one place a reader would otherwise
+        /// have to guess which happened.
+        considered: Option<Vec<String>>,
+    },
+
+    /// More than one `Service` matched a Gateway's endpoint strategy
+    /// equally well.
+    ///
+    /// Never resolved by picking the first, the alphabetically smallest,
+    /// or the most recently created: which `Service` fronts a Gateway
+    /// determines what every probe in Task 6.8 measures, so breaking the
+    /// tie would silently attribute one data plane's behavior to
+    /// another. The same rule, for the same reason,
+    /// `admissionlab_admission::CorrelationError::Ambiguous` follows for
+    /// audit events.
+    #[error(
+        "{} Services {lookup} ({}); Admission Lab does not break such a tie -- narrow the \
+         recipe's selector",
+        .candidates.len(), .candidates.join(", ")
+    )]
+    EndpointAmbiguous {
+        /// What was looked for, and where.
+        lookup: Box<EndpointLookup>,
+        /// Every equally valid `Service` name, in name order.
+        candidates: Vec<String>,
+    },
+
+    /// A `Service` was found, but which of its ports to forward could
+    /// not be determined.
+    ///
+    /// Carries every port the `Service` actually exposes, rendered as
+    /// `name=port` (or just `port` for an unnamed one), so the fix is
+    /// visible without a second `kubectl get svc`.
+    #[error(
+        "cannot choose a port on Service {service} on cluster {cluster:?}: {reason} (exposed: {})",
+        if .ports.is_empty() { "none".to_owned() } else { .ports.join(", ") }
+    )]
+    EndpointPortUnresolved {
+        /// The cluster's own name.
+        cluster: String,
+        /// The `Service`, as `namespace/name`.
+        service: String,
+        /// Why no single port could be chosen.
+        reason: String,
+        /// Every port the `Service` exposes, in declaration order.
+        ports: Vec<String>,
+    },
+}
+
+/// What a Gateway data-plane `Service` lookup was looking for, and
+/// where.
+///
+/// Shared by [`GatewayError::EndpointNotFound`] and
+/// [`GatewayError::EndpointAmbiguous`] -- the two outcomes of the same
+/// search -- so the two can never describe the same lookup differently,
+/// and boxed in both so neither variant dominates
+/// [`GatewayError`]'s size (the same reason
+/// `admissionlab_admission::CorrelationError` boxes its own `ObjectKey`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointLookup {
+    /// The cluster's own name, for the reason
+    /// [`GatewayError::ApplyUnavailable::cluster`] gives.
+    pub cluster: String,
+    /// The Gateway whose data plane was being located, in
+    /// [`crate::GatewayIdentity`]'s `Display` form.
+    pub gateway: String,
+    /// The namespace that was searched, after placeholder substitution.
+    pub namespace: String,
+    /// How the search was expressed, already substituted -- for example
+    /// `matches the selector gateway.networking.k8s.io/gateway-name=lab-gateway`,
+    /// or `is named "lab-gateway-istio"`.
+    pub criteria: String,
+}
+
+impl std::fmt::Display for EndpointLookup {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "in namespace {:?} on cluster {:?} {} for Gateway {}",
+            self.namespace, self.cluster, self.criteria, self.gateway
+        )
+    }
+}
+
+/// Renders [`GatewayError::EndpointNotFound::considered`] as a trailing
+/// clause, keeping "not enumerated" and "enumerated, and empty" visibly
+/// different in the message itself rather than only in the data.
+fn describe_considered(considered: Option<&[String]>) -> String {
+    match considered {
+        None => String::new(),
+        Some([]) => " (the namespace holds no Services at all)".to_owned(),
+        Some(names) => format!(" (considered: {})", names.join(", ")),
+    }
 }

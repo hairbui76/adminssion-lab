@@ -29,6 +29,12 @@
 //!   documentation carries the roadmap's convergence rule verbatim,
 //!   clause by clause, and explains why a timeout is evidence rather
 //!   than a verdict.
+//! - [`endpoint`] (Task 6.6) turns a recipe-declared
+//!   [`GatewayEndpointStrategy`] into the one concrete
+//!   namespace/Service/port a port-forward and a probe need. Read that
+//!   module before assuming anything about how a Gateway's data plane is
+//!   located: the mapping is vendor metadata, the ambiguity rules are
+//!   deliberate, and the port rule has two decisions in it.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -57,6 +63,7 @@
 
 pub mod apply;
 pub mod conditions;
+pub mod endpoint;
 pub mod error;
 pub mod model;
 pub mod reconcile;
@@ -71,7 +78,11 @@ pub use conditions::{
     ParentLookup, RouteEvidence, RouteParentStatus, gateway_class_evidence, gateway_evidence,
     observed_conditions, route_evidence,
 };
-pub use error::GatewayError;
+pub use endpoint::{
+    GatewayEndpoint, GatewayEndpointResolver, GatewayEndpointStrategy, KubeGatewayEndpointResolver,
+    resolve_gateway_endpoint_with_client,
+};
+pub use error::{EndpointLookup, GatewayError};
 pub use reconcile::{
     DIAGNOSTIC_GATEWAY_CLASS_ABSENT, DIAGNOSTIC_PARENT_ABSENT, DIAGNOSTIC_PARENT_AMBIGUOUS,
     DIAGNOSTIC_STALE_STATUS, DIAGNOSTIC_TIMEOUT, GATEWAY_API_GROUP, GATEWAY_API_VERSION,

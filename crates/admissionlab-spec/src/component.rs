@@ -232,6 +232,188 @@ pub enum Capability {
     LegacyIngress,
 }
 
+/// How to find the `Service` that fronts a Gateway's data plane, so a
+/// local port-forward can be opened to it (ROADMAP Task 6.6).
+///
+/// # Why this lives here rather than in `admissionlab-gateway`
+///
+/// ROADMAP Task 6.6's file list names
+/// `crates/admissionlab-gateway/src/endpoint.rs` as this type's home,
+/// and that module is where its *resolution* lives. The type itself is
+/// defined here for exactly the reason Controller Ruling R30 gives for
+/// [`Capability`]: the value is produced by `admissionlab-recipes` (a
+/// recipe declares it, next to the [`Capability::GatewayApi`] it
+/// declares alongside it) and consumed by `admissionlab-gateway`, and
+/// those two crates do not depend on one another. The only home that
+/// both can name without inventing a new dependency edge — or forking
+/// the type into two copies that have to be kept in step by hand — is
+/// this leaf crate, which both already depend on.
+/// `admissionlab_gateway::endpoint` re-exports it, exactly as
+/// `admissionlab_gateway::model` re-exports [`crate::GatewaySuiteSpec`]
+/// for the same reason.
+///
+/// # This is install metadata, never classification
+///
+/// PRODUCT.md §14 / Global Constraint 6: a recipe may supply
+/// install/readiness/normalization/capability metadata, and never
+/// regression-classification logic. "Which `Service` fronts this
+/// Gateway" is squarely the former — it is the same kind of fact as
+/// "which namespace does this chart install into". Nothing here says
+/// what an observed difference *means*, and nothing here has a
+/// severity, a `failOn`, or an expectation attached; it only says where
+/// to send a request. See [`crate::GatewaySuiteSpec`]'s "Traffic
+/// expectations are not regression policy" section for the same line
+/// drawn on the user-facing side of Phase 6.
+///
+/// # Placeholders, and why they are unavoidable
+///
+/// One recipe serves every `Gateway` in a lab, but the `Service` that
+/// fronts a Gateway is per-Gateway: Istio's Gateway API controller
+/// provisions a `Deployment` and a `Service` named
+/// `<Gateway name>-<GatewayClass name>` **in the Gateway's own
+/// namespace**, labelled `gateway.networking.k8s.io/gateway-name:
+/// <Gateway name>` (Istio's "Kubernetes Gateway API" task, "Automated
+/// Deployment"; the label is the well-known one upstream Gateway API
+/// documents under "Gateway infrastructure labels and annotations").
+/// Both the namespace and the identifying label value therefore vary
+/// with the Gateway, so a recipe that could only write literals could
+/// serve exactly one Gateway.
+///
+/// The answer is a **closed, two-token** substitution vocabulary —
+/// [`GATEWAY_NAME_PLACEHOLDER`] and [`GATEWAY_NAMESPACE_PLACEHOLDER`] —
+/// applied by [`substitute_gateway_placeholders`], not a template
+/// language. There are no conditionals, no defaults, no nesting and no
+/// user-extensible variables: a recipe can say "the Gateway's name" and
+/// "the Gateway's namespace" and nothing else. An unrecognized `{...}`
+/// token is a loud error at recipe-load time, never a literal left in
+/// place — a selector value of `"{gateway}"` would silently match no
+/// `Service` at all and read as "this Gateway has no data plane", which
+/// is Global Constraint 15's fabrication failure wearing a typo's
+/// clothes.
+///
+/// Braces need no escape hatch, and deliberately have none: `{` and `}`
+/// are not legal characters in a Kubernetes namespace name, object
+/// name, label key, or label value (RFC 1123 label / the label-value
+/// charset), so a brace in one of these fields is *always* a
+/// placeholder delimiter and never data.
+///
+/// # Prefer the selector to the name
+///
+/// [`GatewayEndpointStrategy::ServiceByName`] can express Istio's
+/// generated name as `"{gatewayName}-istio"`, but that hard-codes the
+/// `GatewayClass` name into the recipe and silently breaks for any
+/// Gateway using a differently named class. The label above is
+/// upstream-documented, class-independent, and applied by Istio to
+/// exactly the objects it generated for one Gateway, so
+/// [`GatewayEndpointStrategy::ServiceBySelector`] is the form a recipe
+/// should normally use. `ServiceByName` exists for the case a selector
+/// cannot express: a hand-deployed, pre-existing data-plane `Service`
+/// that carries no such label at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GatewayEndpointStrategy {
+    /// Find the `Service` by label selector — the form recipes should
+    /// normally use (see this type's documentation).
+    ServiceBySelector {
+        /// The namespace to search. Usually
+        /// [`GATEWAY_NAMESPACE_PLACEHOLDER`], since a Gateway's
+        /// generated `Service` lives in the Gateway's own namespace.
+        namespace: String,
+        /// Label requirements every candidate `Service` must satisfy.
+        /// Equality only — this is a map, so it can express nothing
+        /// else — and *every* pair must match. Keys are literal (a
+        /// label key names the vocabulary, not the instance); only
+        /// values are substituted.
+        selector: BTreeMap<String, String>,
+        /// Which of the matched `Service`'s ports to use, by
+        /// `spec.ports[].name`.
+        port_name: Option<String>,
+        /// Which of the matched `Service`'s ports to use, by
+        /// `spec.ports[].port`.
+        port: Option<u16>,
+    },
+    /// Find the `Service` by an exact name.
+    ServiceByName {
+        /// The `Service`'s namespace.
+        namespace: String,
+        /// The `Service`'s name.
+        name: String,
+        /// See [`GatewayEndpointStrategy::ServiceBySelector::port_name`].
+        port_name: Option<String>,
+        /// See [`GatewayEndpointStrategy::ServiceBySelector::port`].
+        port: Option<u16>,
+    },
+}
+
+/// The placeholder that stands for a `Gateway`'s own name in a
+/// [`GatewayEndpointStrategy`]. See that type's documentation.
+pub const GATEWAY_NAME_PLACEHOLDER: &str = "{gatewayName}";
+
+/// The placeholder that stands for a `Gateway`'s own namespace in a
+/// [`GatewayEndpointStrategy`]. See that type's documentation.
+pub const GATEWAY_NAMESPACE_PLACEHOLDER: &str = "{gatewayNamespace}";
+
+/// Every placeholder [`substitute_gateway_placeholders`] recognizes, in
+/// the order error messages list them.
+pub const GATEWAY_PLACEHOLDERS: [&str; 2] =
+    [GATEWAY_NAME_PLACEHOLDER, GATEWAY_NAMESPACE_PLACEHOLDER];
+
+/// Replaces every [`GATEWAY_PLACEHOLDERS`] token in `template` with the
+/// named `Gateway`'s own namespace/name.
+///
+/// See [`GatewayEndpointStrategy`]'s documentation for why this
+/// vocabulary is closed, why an unknown token is an error rather than a
+/// literal, and why there is no escape sequence for a brace.
+///
+/// # Errors
+///
+/// Returns a human-readable message when `template` contains a `{` with
+/// no matching `}`, a `}` that closes nothing, or a `{...}` token that
+/// is not one of [`GATEWAY_PLACEHOLDERS`].
+pub fn substitute_gateway_placeholders(
+    template: &str,
+    gateway_namespace: &str,
+    gateway_name: &str,
+) -> Result<String, String> {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    loop {
+        let Some(open) = rest.find(['{', '}']) else {
+            out.push_str(rest);
+            return Ok(out);
+        };
+        if rest.as_bytes()[open] == b'}' {
+            return Err(format!(
+                "{template:?} contains a `}}` that closes no placeholder; `{{` and `}}` are not \
+                 legal characters in a Kubernetes name or label value, so they are always \
+                 placeholder delimiters here"
+            ));
+        }
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open..];
+        let Some(close) = after_open.find('}') else {
+            return Err(format!(
+                "{template:?} contains an unterminated placeholder: a `{{` with no matching `}}`"
+            ));
+        };
+        let token = &after_open[..=close];
+        match token {
+            GATEWAY_NAME_PLACEHOLDER => out.push_str(gateway_name),
+            GATEWAY_NAMESPACE_PLACEHOLDER => out.push_str(gateway_namespace),
+            unknown => {
+                return Err(format!(
+                    "{template:?} contains unknown placeholder {unknown:?}; expected one of {}",
+                    GATEWAY_PLACEHOLDERS
+                        .iter()
+                        .map(|placeholder| format!("{placeholder:?}"))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+        rest = &after_open[close + 1..];
+    }
+}
+
 /// Converts one [`ComponentSpec`] into a [`ResolvedComponent`], resolving
 /// every relative path inside its `install` block against `config_dir`
 /// (see `resolve.rs`'s module documentation and
@@ -427,4 +609,90 @@ fn resolve_manifests(
             .map(|path| resolve_relative(config_dir, path))
             .collect(),
     })
+}
+
+// ---------------------------------------------------------------------
+// Tests: the Gateway endpoint placeholder vocabulary (Task 6.6).
+//
+// Unit tests here, rather than in `tests/`, because this is the one
+// place the substitution rule is defined -- `admissionlab-recipes`
+// validates a recipe's placeholders through it and
+// `admissionlab-gateway` applies it at resolve time, so both crates'
+// behavior follows from exactly these cases.
+// ---------------------------------------------------------------------
+#[cfg(test)]
+mod gateway_placeholder_tests {
+    use super::{GATEWAY_PLACEHOLDERS, substitute_gateway_placeholders};
+
+    fn substitute(template: &str) -> Result<String, String> {
+        substitute_gateway_placeholders(template, "gateway-lab", "lab-gateway")
+    }
+
+    #[test]
+    fn a_template_with_no_placeholder_is_returned_unchanged() {
+        assert_eq!(substitute("istio-system"), Ok("istio-system".to_owned()));
+        assert_eq!(substitute(""), Ok(String::new()));
+    }
+
+    #[test]
+    fn both_placeholders_substitute_the_gateways_own_identity() {
+        assert_eq!(
+            substitute("{gatewayNamespace}"),
+            Ok("gateway-lab".to_owned())
+        );
+        assert_eq!(substitute("{gatewayName}"), Ok("lab-gateway".to_owned()));
+    }
+
+    /// The Istio-shaped case: a placeholder embedded in a larger literal
+    /// (`<Gateway name>-<GatewayClass name>`), and more than one
+    /// placeholder in one template.
+    #[test]
+    fn a_placeholder_substitutes_in_place_within_surrounding_literal_text() {
+        assert_eq!(
+            substitute("{gatewayName}-istio"),
+            Ok("lab-gateway-istio".to_owned())
+        );
+        assert_eq!(
+            substitute("{gatewayNamespace}/{gatewayName}"),
+            Ok("gateway-lab/lab-gateway".to_owned())
+        );
+    }
+
+    #[test]
+    fn an_unknown_placeholder_is_an_error_naming_it_and_the_known_set() {
+        // The exact typo the strict rule exists for: `{gateway}` left
+        // literal would produce a selector matching no Service at all,
+        // reported as "this Gateway has no data plane".
+        let error = substitute("{gateway}").expect_err("{gateway} is not a known placeholder");
+        assert!(error.contains("\"{gateway}\""), "got: {error}");
+        for known in GATEWAY_PLACEHOLDERS {
+            assert!(
+                error.contains(known),
+                "error must name {known}, got: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn unbalanced_braces_are_rejected_rather_than_left_literal() {
+        assert!(
+            substitute("{gatewayName").is_err(),
+            "an unterminated placeholder must not be passed through"
+        );
+        assert!(
+            substitute("gatewayName}").is_err(),
+            "a `}}` closing nothing must not be passed through"
+        );
+    }
+
+    /// A substituted value is inserted verbatim: nothing re-scans it for
+    /// placeholders, so a (impossible, but not this function's business)
+    /// brace inside an identity cannot start a second substitution pass.
+    #[test]
+    fn substitution_is_not_recursive() {
+        assert_eq!(
+            substitute_gateway_placeholders("{gatewayName}", "ns", "{gatewayNamespace}"),
+            Ok("{gatewayNamespace}".to_owned())
+        );
+    }
 }

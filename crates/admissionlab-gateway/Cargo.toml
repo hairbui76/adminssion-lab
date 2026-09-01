@@ -78,6 +78,22 @@ admissionlab-admission = { workspace = true }
 # trait-with-an-offline-implementation shape every other seam in this
 # workspace uses.
 async-trait = { workspace = true }
+# `endpoint.rs` (Task 6.6) reads `Service.spec.ports` to turn a
+# recipe-declared port *name* into a concrete port number. Unlike every
+# Gateway API object this crate handles -- which is a CRD, has no
+# generated Rust type, and is therefore read as a `DynamicObject` plus
+# `serde_json::Value` (see `conditions.rs`) -- `v1/Service` is a core
+# Kubernetes type `k8s-openapi` already generates, so hand-parsing its
+# JSON here would be reimplementing a schema this workspace already
+# links against. The same reasoning, and the same crate/version, as
+# `admissionlab-installer`'s own typed `Deployment`/`DaemonSet`/`Job`
+# readiness reads. Already in the resolved graph (`kube`'s `client`
+# feature depends on it), so this promotes a transitive dependency to a
+# direct one rather than adding a new crate -- and it is what makes a
+# standalone `cargo build -p admissionlab-gateway` pick a `v1_*`
+# Kubernetes feature explicitly rather than tripping `k8s-openapi`'s
+# build-script panic (see the root `Cargo.toml`'s own comment).
+k8s-openapi = { workspace = true }
 kube = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

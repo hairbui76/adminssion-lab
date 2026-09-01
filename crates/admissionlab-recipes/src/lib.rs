@@ -58,8 +58,11 @@
 //! What this crate *does* define: the raw YAML schema a recipe author
 //! writes and the strict validation that turns it into a [`Recipe`]
 //! ([`model`]), the string vocabulary a recipe's `capabilities:` list
-//! uses — recipe-specific *logic*, not the [`Capability`] enum itself —
-//! ([`capability`]), and how a [`Recipe`] is actually obtained
+//! uses together with the validation of the `gatewayEndpoint:` block
+//! that accompanies `gatewayApi` (ROADMAP Task 6.6) — recipe-specific
+//! *logic*, not the [`Capability`]/[`GatewayEndpointStrategy`] types
+//! themselves — (the private `capability` module), and how a [`Recipe`]
+//! is actually obtained
 //! ([`load`]): the built-in set embedded into the binary at compile
 //! time, and an optional, explicitly-opted-into local override
 //! directory. See [`load`]'s module documentation for both design
@@ -78,8 +81,10 @@ pub mod model;
 
 pub use admissionlab_spec::component::HelmInstallSpec;
 pub use admissionlab_spec::{
-    Capability, InstallMethod, ManifestInstallSpec, ReadinessCheck, RecipeNormalizeRule,
+    Capability, GatewayEndpointStrategy, InstallMethod, ManifestInstallSpec, ReadinessCheck,
+    RecipeNormalizeRule,
 };
+pub use capability::GATEWAY_NAME_LABEL;
 pub use compat::{
     DocumentedKubernetesRange, KubernetesCompatibility, RecipeCompatibilityEntry,
     RecipeCompatibilityError, RecipeCompatibilityMatrix, load_recipe_compatibility,

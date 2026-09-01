@@ -55,8 +55,9 @@ pub mod schema;
 mod validate;
 
 pub use component::{
-    Capability, InstallMethod, ManifestInstallSpec, ReadinessCheck, RecipeNormalizeRule,
-    ResolvedComponent,
+    Capability, GATEWAY_NAME_PLACEHOLDER, GATEWAY_NAMESPACE_PLACEHOLDER, GATEWAY_PLACEHOLDERS,
+    GatewayEndpointStrategy, InstallMethod, ManifestInstallSpec, ReadinessCheck,
+    RecipeNormalizeRule, ResolvedComponent, substitute_gateway_placeholders,
 };
 pub use error::SpecError;
 pub use load::load_lab;
