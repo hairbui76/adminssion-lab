@@ -424,6 +424,7 @@ programming need durable objects — which is one reason Gateway support is
 
 | Document | What is in it |
 | --- | --- |
+| [`docs/architecture.md`](docs/architecture.md) | As-built crate map and dependency rules, the run pipeline's stages, the evidence model, audit correlation, and why fixture execution is serial |
 | [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` v1alpha1 reference: every field, every default, path resolution, `policy`, overrides, and `expectations.yaml` |
 | [`docs/fixtures.md`](docs/fixtures.md) | Fixture format, discovery globs, identity and hashing, the setup-outside-the-glob pattern, and the dogfood webhook's annotation vocabulary |
 | [`docs/github-action.md`](docs/github-action.md) | The composite action: pinned/checksummed installation, every input, the artifacts it uploads on a failing run, exit-code behavior, and what the job summary says |
