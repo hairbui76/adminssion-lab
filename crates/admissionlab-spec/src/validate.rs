@@ -1,4 +1,4 @@
-//! Semantic validation rules applied while resolving a [`crate::LabSpec`].
+//! Semantic validation rules applied while resolving a lab document.
 //!
 //! Every function here is a small, independently testable predicate over
 //! already-parsed data; [`crate::resolve_lab`] (in `resolve.rs`) is what
@@ -520,21 +520,37 @@ fn gateway_probe_status(locator: &str, status: u16, path: &Path) -> Result<(), S
     ))
 }
 
-/// Rejects a [`crate::LabSpec`] whose `apiVersion`/`kind` do not match the
-/// only values [`crate::load_lab`] accepts.
+/// Rejects a [`crate::V1Alpha1Lab`] whose `apiVersion`/`kind` do not
+/// match the only values [`crate::load_lab`] accepts.
 pub(crate) fn api_version_and_kind(
     api_version: &str,
     kind: &str,
     path: &Path,
 ) -> Result<(), SpecError> {
-    if api_version != crate::model::API_VERSION {
+    document_header(crate::v1alpha1::API_VERSION, api_version, kind, path)
+}
+
+/// Rejects a lab document whose `apiVersion` is not `expected` or whose
+/// `kind` is not [`crate::model::KIND`].
+///
+/// Parameterized on the expected `apiVersion` rather than duplicated per
+/// version: the *rule* ("these two header fields must match the model
+/// that was chosen to parse this document") is the same for every
+/// version, and only the constant differs. [`crate::load_lab`] passes
+/// the Alpha version; [`crate::load_any_supported_lab`] passes whichever
+/// version it dispatched on, which is what makes the check a real
+/// confirmation of its own dispatch rather than a restatement of it.
+pub(crate) fn document_header(
+    expected_api_version: &str,
+    api_version: &str,
+    kind: &str,
+    path: &Path,
+) -> Result<(), SpecError> {
+    if api_version != expected_api_version {
         return Err(SpecError::validation(
             path,
             "apiVersion",
-            format_args!(
-                "must be {:?}, found {api_version:?}",
-                crate::model::API_VERSION
-            ),
+            format_args!("must be {expected_api_version:?}, found {api_version:?}"),
         ));
     }
     if kind != crate::model::KIND {

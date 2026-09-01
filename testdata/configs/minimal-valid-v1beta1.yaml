@@ -1,0 +1,17 @@
+# The `admissionlab.io/v1beta1` twin of `minimal-valid.yaml`: the same
+# lab, written in the version a user should be writing today.
+#
+# Nothing here is renamed. That is the point of keeping both files: the
+# smallest valid document is *identical* in the two versions apart from
+# one line, because the Beta promotion was a freeze rather than a
+# redesign. `tests/migrate_alpha_beta.rs` loads this file and its Alpha
+# twin and asserts the two resolve to the same lab.
+apiVersion: admissionlab.io/v1beta1
+kind: Lab
+baseline:
+  kubernetes: "1.29.4"
+candidate:
+  kubernetes: "1.29.4"
+fixtures:
+  include:
+    - "fixtures/**/*.yaml"

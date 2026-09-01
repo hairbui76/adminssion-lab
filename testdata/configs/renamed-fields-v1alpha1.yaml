@@ -1,0 +1,124 @@
+# Half of a hand-written migration twin: this file and
+# `renamed-fields-v1beta1.yaml` describe the *same lab* in the two
+# supported versions, and every field ROADMAP Task 7.1 renamed appears in
+# both, spelled its own way.
+#
+# `tests/migrate_alpha_beta.rs` loads both and asserts the resolved labs
+# are equal, which is the only assertion that can catch a migration that
+# compiles, parses, and quietly moves a value to the wrong place.
+#
+# Deliberately maximal rather than minimal: every optional section is
+# populated, because a migration bug hides in the field nobody wrote a
+# test config for.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+baseline:
+  kubernetes: "1.33.4"
+  # Renamed? No. `images` keeps its Alpha spelling in v1beta1 — see
+  # `migrate.rs`'s "Reviewed and deliberately kept" for why. It is here
+  # because a migration twin that omitted a field would not prove that
+  # field survives the migration.
+  images:
+    - admissionlab-echo:dev
+  components:
+    - name: istiod
+      recipe: istio-gateway
+      version: "1.28.0"
+      install:
+        type: helm
+        chart: istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        repoName: istio
+        releaseName: istiod
+        version: "1.28.0"
+        namespace: istio-system
+        valuesFiles:
+          - values/istiod-baseline.yaml
+        setValues:
+          pilot.env.ENABLE_NATIVE_SIDECARS: "true"
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+    - name: crds
+      version: "1.28.0"
+      install:
+        type: manifests
+        paths:
+          - stacks/baseline/crds.yaml
+      readiness:
+        - type: customResourceCondition
+          apiVersion: kyverno.io/v1
+          kind: ClusterPolicy
+          namespace: default
+          name: require-labels
+          conditionType: Ready
+          status: "True"
+candidate:
+  kubernetes: "1.33.4"
+  images:
+    - admissionlab-echo:dev
+  components:
+    - name: istiod
+      version: "1.29.0"
+      install:
+        type: helm
+        chart: istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        version: "1.29.0"
+        namespace: istio-system
+      readiness:
+        - type: webhookConfigurationPresent
+          name: istio-sidecar-injector
+fixtures:
+  include:
+    - "fixtures/admission/**/*.yaml"
+expectationsFile: expectations.yaml
+policy:
+  failOn:
+    - newly_denied
+    - container_removed
+  overrides:
+    - kind: image_changed
+      fixtures: "nightly-*"
+      subject: istio-proxy
+      path: /spec/containers/0/image
+      severity: info
+  latency:
+    # RENAMED in v1beta1: `absoluteIncreaseMillis`. The value is
+    # milliseconds in both versions; only the key changed, so that the
+    # unit is visible without opening the documentation.
+    absoluteIncrease: 250
+    relativeMultiplier: 1.5
+gateway:
+  manifests:
+    - fixtures/gateway/namespace.yaml
+    - fixtures/gateway/routes.yaml
+  # RENAMED in v1beta1: `reconciliationTimeoutMillis`. Same reason, same
+  # value, same milliseconds.
+  reconciliationTimeout: 90000
+  gatewayEndpoint:
+    type: serviceBySelector
+    namespace: "{gatewayNamespace}"
+    selector:
+      gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+    portName: http
+  readiness:
+    - type: daemonSetReady
+      namespace: gateway-lab
+      name: echo-a
+  routes:
+    - id: echo-a-root
+      gatewayNamespace: gateway-lab
+      gatewayName: lab-gateway
+      routeNamespace: gateway-lab
+      routeName: echo-a
+      listenerName: http
+      probes:
+        - host: a.lab.example
+          path: /
+          method: GET
+          headers:
+            x-lab-probe: reconciliation
+          expectedStatus: 200
+          expectedBackend: echo-a

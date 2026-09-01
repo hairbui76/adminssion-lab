@@ -1,5 +1,15 @@
-//! Turning a freshly loaded [`crate::LabSpec`] into a validated,
-//! path-resolved [`ResolvedLab`].
+//! Turning a freshly loaded lab document into a validated, path-resolved
+//! [`ResolvedLab`].
+//!
+//! # One resolver, every version
+//!
+//! [`resolve_beta_lab`] is the only implementation. A `v1beta1` document
+//! reaches it directly from [`crate::load_any_supported_lab`]; a
+//! `v1alpha1` document reaches it through
+//! [`crate::migrate_v1alpha1_to_v1beta1`] first, whether it arrived via
+//! that same loader or via [`resolve_lab`]'s [`LoadedLab`]. Nothing here
+//! branches on a version, and [`ResolvedLab`] records none — see its own
+//! "Version-independent by construction".
 //!
 //! # Path resolution: always relative to the configuration file, never the
 //! current working directory
@@ -33,20 +43,27 @@ use globset::Glob;
 
 use crate::component::{self, ResolvedComponent};
 use crate::error::SpecError;
+use crate::migrate::migrate_v1alpha1_to_v1beta1;
 use crate::model::{
-    EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec, LabSpec, MigrationSuiteSpec,
-    PolicySpec,
+    EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec, MigrationSuiteSpec, PolicySpec,
 };
+use crate::v1alpha1::V1Alpha1Lab;
+use crate::v1beta1::V1Beta1Lab;
 use crate::validate;
 
-/// A [`LabSpec`] freshly parsed from a configuration file, paired with the
-/// path it was loaded from.
+/// A [`V1Alpha1Lab`] freshly parsed from a configuration file, paired
+/// with the path it was loaded from.
 ///
 /// `raw` is exactly what [`crate::load_lab`] parsed: relative paths inside
 /// it have **not** been resolved against the configuration file's
 /// directory yet. [`resolve_lab`] is what performs that resolution (see
 /// this module's documentation) and validation, producing a
 /// [`ResolvedLab`].
+///
+/// This is the *Alpha* document, because [`crate::load_lab`] is the Alpha
+/// loader — there is deliberately no `LoadedLab` for a `v1beta1`
+/// document, since [`crate::load_any_supported_lab`] resolves in one
+/// step and nothing needs an unresolved Beta document to hold on to.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoadedLab {
     /// The path [`crate::load_lab`] was called with, exactly as given —
@@ -55,18 +72,33 @@ pub struct LoadedLab {
     pub source_path: PathBuf,
     /// The parsed configuration, with every path exactly as the user
     /// wrote it.
-    pub raw: LabSpec,
+    pub raw: V1Alpha1Lab,
 }
 
-/// A [`LabSpec`] that has been validated and had every relative path
-/// resolved against its configuration file's own directory.
+/// A lab configuration that has been validated and had every relative
+/// path resolved against its configuration file's own directory.
+///
+/// # Version-independent by construction
+///
+/// This type carries no `apiVersion` and no version marker of any kind,
+/// and that is a design commitment rather than an omission. Every
+/// supported document version is migrated to [`V1Beta1Lab`] *before*
+/// resolution (see [`crate::load_any_supported_lab`] and `migrate.rs`),
+/// so there is exactly one resolver, one resolved shape, and one thing
+/// for the whole workspace above this crate to consume. Adding a version
+/// adds a parse arm and a migration; it does not add a branch to this
+/// module, a variant to this struct, or a single `match` anywhere in
+/// `admissionlab-core`, `-cli`, or the report. The fields typed
+/// [`PolicySpec`] and [`GatewaySuiteSpec`] are the *current* version's
+/// types for exactly that reason: "current" is the only version that
+/// reaches this far.
 ///
 /// `policy` is carried through unchanged from [`LoadedLab::raw`]: none of
 /// [`crate::PolicySpec`]'s fields are filesystem paths (its `path` field
 /// on [`crate::PolicyOverrideSpec`] names a location *within* a compared
 /// object, not on disk), so there is nothing for this step to resolve.
 ///
-/// `migration` is always `None` today: [`LabSpec`] has no YAML section
+/// `migration` is always `None` today: [`V1Beta1Lab`] has no YAML section
 /// feeding it yet. See [`crate::MigrationSuiteSpec`] for why the field
 /// exists regardless. `gateway` is real as of ROADMAP Task 6.1 and is
 /// `Some` exactly when the document has a `gateway:` section.
@@ -152,6 +184,30 @@ pub struct ResolvedFixtureSelection {
 /// is not a syntactically valid glob.
 pub fn resolve_lab(loaded: LoadedLab) -> Result<ResolvedLab, SpecError> {
     let LoadedLab { source_path, raw } = loaded;
+    // One resolver, not one per version: the Alpha document is promoted
+    // to the current model first and then follows the identical path a
+    // natively-Beta document does. See `ResolvedLab`'s
+    // "Version-independent by construction".
+    let beta = migrate_v1alpha1_to_v1beta1(raw)
+        .map_err(|error| SpecError::validation(&source_path, "apiVersion", error))?;
+    resolve_beta_lab(source_path, beta)
+}
+
+/// Validates and resolves a current-version document — the single
+/// implementation both [`resolve_lab`] and
+/// [`crate::load_any_supported_lab`] funnel into.
+///
+/// `pub(crate)` rather than public: a caller outside this crate should
+/// not have to know which version it holds, and
+/// [`crate::load_any_supported_lab`] exists precisely so it never does.
+///
+/// # Errors
+///
+/// See [`resolve_lab`], whose documented failures are all raised here.
+pub(crate) fn resolve_beta_lab(
+    source_path: PathBuf,
+    raw: V1Beta1Lab,
+) -> Result<ResolvedLab, SpecError> {
     let config_dir = config_directory(&source_path);
 
     let baseline = resolve_environment("baseline", &raw.baseline, &config_dir, &source_path)?;

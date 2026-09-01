@@ -1,12 +1,27 @@
-//! JSON Schema generation for the `v1alpha1` [`crate::LabSpec`] model.
+//! JSON Schema generation for the lab configuration model, one function
+//! per supported `apiVersion`.
+//!
+//! Both schemas are checked in and both are regenerate-and-compare
+//! verified by `tests/schema.rs`:
+//!
+//! | function | checked-in file |
+//! |---|---|
+//! | [`v1beta1_json_schema`] | `schemas/admissionlab-v1beta1.json` |
+//! | [`v1alpha1_json_schema`] | `schemas/admissionlab-v1alpha1.json` |
+//!
+//! The Alpha schema stays checked in for as long as the Alpha model is
+//! read (ROADMAP Task 7.1 Step 2), and its comparison test is what makes
+//! [`crate::v1alpha1`]'s freeze enforceable rather than merely stated:
+//! any change to that model — or to a shared type in [`crate::model`]
+//! that it references — fails that test.
 //!
 //! # Determinism
 //!
-//! [`v1alpha1_json_schema`] must produce byte-for-byte identical output on
-//! every run — `tests/schema.rs` compares it against the checked-in
-//! `schemas/admissionlab-v1alpha1.json` and would otherwise flap. Two
-//! properties of this crate's dependency configuration make that true
-//! without any extra sorting step on this crate's part:
+//! Each generator must produce byte-for-byte identical output on every
+//! run — `tests/schema.rs` compares them against the checked-in files and
+//! would otherwise flap. Two properties of this crate's dependency
+//! configuration make that true without any extra sorting step on this
+//! crate's part:
 //!
 //! - `schemars::Schema`'s [`serde::Serialize`] implementation does not
 //!   serialize its underlying JSON value as-is: it explicitly reorders a
@@ -23,28 +38,52 @@
 //!   `SchemaGenerator` internals.
 //!
 //! Together, that means [`serde_json::to_string_pretty`] on the value
-//! this module produces is already canonical: every key at every nesting
-//! level is ordered the same way on every run, on every machine. Enabling
-//! `preserve_order` anywhere in this workspace in the future would break
-//! that guarantee and should be treated as a determinism regression.
+//! these functions produce is already canonical: every key at every
+//! nesting level is ordered the same way on every run, on every machine.
+//! Enabling `preserve_order` anywhere in this workspace in the future
+//! would break that guarantee and should be treated as a determinism
+//! regression.
 
 use schemars::Schema;
 
-use crate::model::LabSpec;
+use crate::v1alpha1::LabSpec;
+use crate::v1beta1::V1Beta1Lab;
 
-/// Generates the JSON Schema for the `v1alpha1` `admissionlab.yaml`
-/// configuration format, derived directly from [`LabSpec`] and the types
-/// it references.
+/// Generates the JSON Schema for the current `admissionlab.io/v1beta1`
+/// `admissionlab.yaml` configuration format, derived directly from
+/// [`V1Beta1Lab`] and the types it references.
+///
+/// This is the schema an editor should be pointed at for a lab file
+/// written today. It is generated from the same `#[derive(JsonSchema)]`
+/// and `#[serde(rename_all = "camelCase")]`/`#[serde(rename = "...")]`
+/// attributes that govern parsing, so it always shows the exact keys the
+/// loader accepts — including the two Beta renames
+/// (`absoluteIncreaseMillis`, `reconciliationTimeoutMillis`), which are
+/// therefore impossible to document wrongly here.
+///
+/// See this module's documentation for why generating this twice always
+/// produces byte-for-byte identical output.
+#[must_use]
+pub fn v1beta1_json_schema() -> Schema {
+    schemars::schema_for!(V1Beta1Lab)
+}
+
+/// Generates the JSON Schema for the frozen `admissionlab.io/v1alpha1`
+/// `admissionlab.yaml` configuration format, derived directly from
+/// [`LabSpec`] and the types it references.
+///
+/// Still generated, still checked in, and still compared byte-for-byte:
+/// Public Alpha configurations remain readable through at least v1.0, so
+/// an editor validating one needs its schema — and, more importantly,
+/// that comparison is the mechanism that keeps the Alpha model frozen
+/// (see this module's documentation).
 ///
 /// The returned [`Schema`] uses `camelCase` property names
 /// (`apiVersion`, `expectationsFile`, `failOn`, and so on) because it is
 /// generated from the same `#[derive(JsonSchema)]` and
-/// `#[serde(rename_all = "camelCase")]` attributes that govern parsing in
-/// [`crate::load_lab`] — the schema can never drift from the spelling
-/// users actually type.
-///
-/// See this module's documentation for why generating this twice always
-/// produces byte-for-byte identical output.
+/// `#[serde(rename_all = "camelCase")]` attributes that governed parsing
+/// in [`crate::load_lab`] — the schema can never drift from the spelling
+/// users actually typed.
 #[must_use]
 pub fn v1alpha1_json_schema() -> Schema {
     schemars::schema_for!(LabSpec)

@@ -1,5 +1,5 @@
-//! Failure modes for loading, parsing, resolving, and validating a
-//! [`crate::LabSpec`].
+//! Failure modes for loading, parsing, migrating, resolving, and
+//! validating a lab configuration, in any supported `apiVersion`.
 //!
 //! Every variant that originates from a specific file carries that file's
 //! path, so a message never leaves the reader guessing which
@@ -16,8 +16,15 @@ use std::path::{Path, PathBuf};
 
 use thiserror::Error;
 
-/// Something went wrong loading, parsing, resolving, or validating a
-/// [`crate::LabSpec`].
+/// Something went wrong loading, parsing, migrating, resolving, or
+/// validating a lab configuration.
+///
+/// A [`crate::MigrationError`] — the one failure
+/// [`crate::migrate_v1alpha1_to_v1beta1`] can produce — arrives here as
+/// [`SpecError::Validation`] rather than as a variant of its own,
+/// because that is exactly what it is: a document whose `apiVersion` or
+/// `kind` does not match the model being applied to it, reported with
+/// the same dotted locator every other document-level rejection uses.
 #[derive(Debug, Error)]
 pub enum SpecError {
     /// The configuration file could not be read.
@@ -30,8 +37,8 @@ pub enum SpecError {
         source: io::Error,
     },
 
-    /// The configuration file's contents are not a valid `LabSpec`
-    /// document.
+    /// The configuration file's contents are not a valid lab document
+    /// in the version it declares.
     ///
     /// `source`'s own [`Display`](std::fmt::Display) implementation
     /// already includes the line, column, and — for a value nested inside
