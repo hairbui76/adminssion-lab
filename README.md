@@ -783,6 +783,7 @@ deprecation policy, and the supported release lines.
 | [`docs/dependencies.md`](docs/dependencies.md) | The supply-chain gate: what `cargo deny` enforces, the update cadence, the emergency security-update process, and the exception protocols |
 | [`docs/versioning.md`](docs/versioning.md) | What a version number promises: the frozen schema identifiers, the CLI and exit-code freeze, what patch/minor/major mean here, what is unpromised, and the deprecation policy |
 | [`docs/schema-migrations.md`](docs/schema-migrations.md) | The three versioned document families, the stable-schema rule and the pre-v1.0 one it replaced, how a reader must behave on a version it does not know, and the migration note for every version step |
+| [`docs/release-checklist.md`](docs/release-checklist.md) | The manual acceptance pass a release candidate is judged against, the release blockers, and the rows only an operator with CI runners can sign off |
 
 The three canonical worked examples are described above under
 [Known regressions Admission Lab catches](#known-regressions-admission-lab-catches).

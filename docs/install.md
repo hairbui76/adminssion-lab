@@ -69,7 +69,7 @@ files from the
 [Releases page](https://github.com/hairbui76/admission-lab/releases).
 
 ```bash
-version=0.1.0
+version=1.0.0-rc.1
 target=x86_64-unknown-linux-gnu
 base="https://github.com/hairbui76/admission-lab/releases/download/v${version}"
 
@@ -109,7 +109,7 @@ repository, at that tag"*.
 cosign verify-blob \
   --certificate SHA256SUMS.pem \
   --signature SHA256SUMS.sig \
-  --certificate-identity 'https://github.com/hairbui76/admission-lab/.github/workflows/release.yml@refs/tags/v0.1.0' \
+  --certificate-identity 'https://github.com/hairbui76/admission-lab/.github/workflows/release.yml@refs/tags/v1.0.0-rc.1' \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 ```
@@ -130,7 +130,7 @@ Each archive holds one directory named after the archive, containing the
 binary, `LICENSE`, and `README.md`:
 
 ```text
-admissionlab-0.1.0-x86_64-unknown-linux-gnu/
+admissionlab-1.0.0-rc.1-x86_64-unknown-linux-gnu/
 ├── admissionlab
 ├── LICENSE
 └── README.md
@@ -235,7 +235,7 @@ refuses to skip any of it:
 - uses: OWNER/admission-lab/.github/actions/admissionlab@v1
   with:
     config: admissionlab.yaml
-    version: "0.1.0"
+    version: "1.0.0-rc.1"
     sha256: "<the archive's line from SHA256SUMS>"
 ```
 

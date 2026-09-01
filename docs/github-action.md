@@ -40,7 +40,7 @@ jobs:
       - uses: OWNER/admission-lab/.github/actions/admissionlab@v1
         with:
           config: admissionlab.yaml
-          version: "0.1.0"
+          version: "1.0.0-rc.1"
           sha256: "<the release's SHA256SUMS entry for the linux x86_64 tarball>"
 ```
 
@@ -90,7 +90,7 @@ with, **what to do with the artifacts**, and **whether to keep the clusters**.
 | Input | Required | Default | What it does |
 | --- | --- | --- | --- |
 | `config` | yes | — | Path to the lab configuration (`admissionlab.yaml`), relative to the workspace or absolute. |
-| `version` | no | *(empty)* | Admission Lab release to install, e.g. `0.1.0` (a leading `v` is accepted). Requires `sha256`. Empty selects the from-source mode below. |
+| `version` | no | *(empty)* | Admission Lab release to install, e.g. `1.0.0-rc.1` (a leading `v` is accepted). Requires `sha256`. Empty selects the from-source mode below. |
 | `sha256` | no | *(empty)* | SHA-256 of that release's `admissionlab-<version>-x86_64-unknown-linux-gnu.tar.gz`. **Required whenever `version` is set.** |
 | `repository` | no | *(the action's own repository)* | `owner/repo` to download the release from. The default is right whenever the action is referenced as `owner/admission-lab/.github/actions/admissionlab@vX`; set it when you have vendored the action into a repository that does not itself publish Admission Lab releases. |
 | `artifact-name` | no | `admissionlab-artifacts` | Name of the uploaded workflow artifact **and** of the directory under `$GITHUB_WORKSPACE` the reports are written into. Must be a single path segment. |

@@ -151,7 +151,7 @@ fn manifest_for(config: &Path, component_version: &str) -> RunManifest {
     RunManifest {
         schema_version: SCHEMA_VERSION.to_owned(),
         run_id: RunId::generate(),
-        admissionlab_version: "0.1.0".to_owned(),
+        admissionlab_version: "1.0.0-rc.1".to_owned(),
         status: RunStatus::Completed,
         stage: RunStage::Completed,
         host: HostProvenance::detect(),

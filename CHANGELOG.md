@@ -14,11 +14,25 @@ number of its own; the two were never meant to be synchronized.
 
 ---
 
-## [Unreleased] — v1.0.0 release candidate
+## [Unreleased]
 
-Everything since `v0.2.0-beta.1`. **The `v1.0.0` tag has not been cut**: this
-section is the release candidate, and Phase 10 finalizes it into `1.0.0` with a
-date. The contracts it describes are frozen and test-enforced today.
+Nothing yet.
+
+---
+
+## [1.0.0-rc.1] — 2026-09-01
+
+Everything since `v0.2.0-beta.1`, cut as the **v1 release candidate**. The
+workspace crates now carry `1.0.0-rc.1`, which is what `admissionlab --version`
+prints and what the release archive is named after
+(`admissionlab-1.0.0-rc.1-<target>.tar.gz`). **The `v1.0.0` tag has not been
+cut**: this candidate is what gets finalized into `1.0.0`, and no new feature
+enters the window between the two. The contracts described below are frozen and
+test-enforced today.
+
+The manual acceptance pass a candidate is judged against — seventeen rows, the
+release blockers, and the rows only an operator with CI runners can sign off —
+is [`docs/release-checklist.md`](docs/release-checklist.md).
 
 ### Added
 
@@ -66,6 +80,10 @@ date. The contracts it describes are frozen and test-enforced today.
 
 ### Changed
 
+- **Crate versions moved to `[workspace.package]`.** All fifteen workspace
+  crates inherit one `version` field rather than each declaring its own, so a
+  release bump is a single line. The crate versions still promise nothing —
+  see [`docs/versioning.md`](docs/versioning.md).
 - **The three document families are frozen at `v1`** (from `v1beta1`):
   `admissionlab.io/v1`, `admissionlab.io/result/v1`, and
   `admissionlab.io/run/v1`. Within `v1.x` no field meaning changes, no required
@@ -229,6 +247,7 @@ was deliberately kept out of the critical path until this gate passed.
   and a bounded, argv-only external process runner with timeouts, separate
   stream capture, and credential redaction.
 
-[Unreleased]: https://github.com/hairbui76/admission-lab/compare/v0.2.0-beta.1...HEAD
+[Unreleased]: https://github.com/hairbui76/admission-lab/compare/v1.0.0-rc.1...HEAD
+[1.0.0-rc.1]: https://github.com/hairbui76/admission-lab/compare/v0.2.0-beta.1...v1.0.0-rc.1
 [0.2.0-beta.1]: https://github.com/hairbui76/admission-lab/compare/v0.1.0-alpha.1...v0.2.0-beta.1
 [0.1.0-alpha.1]: https://github.com/hairbui76/admission-lab/releases/tag/v0.1.0-alpha.1

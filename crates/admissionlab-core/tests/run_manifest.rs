@@ -89,7 +89,7 @@ fn realistic_manifest() -> RunManifest {
     RunManifest {
         schema_version: SCHEMA_VERSION.to_owned(),
         run_id: RunId::parse("6f1a7c2e-9b34-4d5a-8f0e-11c2b3a4d5e6").expect("valid run id"),
-        admissionlab_version: "0.1.0".to_owned(),
+        admissionlab_version: "1.0.0-rc.1".to_owned(),
         status: RunStatus::Completed,
         stage: RunStage::Completed,
         host: HostProvenance {

@@ -299,7 +299,7 @@ fn a_single_flipped_byte_in_a_real_fixture_refuses_the_reproduction() {
     let mut manifest = serde_json::json!({
         "schemaVersion": admissionlab_core::run_manifest::SCHEMA_VERSION,
         "runId": "00000000-0000-4000-8000-000000000000",
-        "admissionlabVersion": "0.1.0",
+        "admissionlabVersion": "1.0.0-rc.1",
         "status": "completed",
         "stage": "completed",
         "host": {"os": std::env::consts::OS, "arch": std::env::consts::ARCH},
