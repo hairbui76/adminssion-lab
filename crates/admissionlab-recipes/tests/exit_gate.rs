@@ -711,16 +711,11 @@ fn intersected_certified_kubernetes_version() -> Result<String, String> {
 
     let kyverno_certified: BTreeSet<&str> = kyverno
         .kubernetes
-        .certified
-        .iter()
-        .map(String::as_str)
+        .certified_versions()
+        .into_iter()
         .collect();
-    let istio_certified: BTreeSet<&str> = istio
-        .kubernetes
-        .certified
-        .iter()
-        .map(String::as_str)
-        .collect();
+    let istio_certified: BTreeSet<&str> =
+        istio.kubernetes.certified_versions().into_iter().collect();
     let intersection: Vec<&str> = kyverno_certified
         .intersection(&istio_certified)
         .copied()
@@ -732,7 +727,8 @@ fn intersected_certified_kubernetes_version() -> Result<String, String> {
              (certified: {:?}) in compatibility/recipes.yaml -- a lab installing both must use a \
              version both certify, and this gate refuses to guess one neither vendor has actually \
              been certified against",
-            kyverno.kubernetes.certified, istio.kubernetes.certified
+            kyverno.kubernetes.certified_versions(),
+            istio.kubernetes.certified_versions()
         )),
         [version] => Ok((*version).to_string()),
         multiple => Err(format!(

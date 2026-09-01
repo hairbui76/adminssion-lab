@@ -86,8 +86,11 @@ pub use admissionlab_spec::{
 };
 pub use capability::GATEWAY_NAME_LABEL;
 pub use compat::{
-    DocumentedKubernetesRange, KubernetesCompatibility, RecipeCompatibilityEntry,
-    RecipeCompatibilityError, RecipeCompatibilityMatrix, load_recipe_compatibility,
+    CERTIFY_KUBERNETES_ENV, CertificationTier, CertifiedCombination, CertifiedKubernetes,
+    CompatibilityProblem, DocumentedKubernetesRange, KubernetesCompatibility,
+    RELEASE_SUPPORTED_MINORS, RecipeCompatibilityEntry, RecipeCompatibilityError,
+    RecipeCompatibilityMatrix, SupportWindowException, SupportedKubernetes, UncertifiedSelection,
+    load_recipe_compatibility, narrow_certified_versions, validate_compatibility,
 };
 pub use load::{load_builtin_recipes, load_recipe_overrides, load_recipes};
 pub use model::{Recipe, RecipeError};

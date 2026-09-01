@@ -64,6 +64,17 @@ admissionlab-gateway = { workspace = true }
 admissionlab-installer = { workspace = true }
 admissionlab-normalize = { workspace = true }
 admissionlab-policy = { workspace = true }
+# Read-only lookup of the certified compatibility matrix
+# (`compatibility/recipes.yaml`) for `pipeline::certification`'s
+# uncertified-combination warning (Task 7.4 step 3). Already in this
+# crate's transitive graph -- `admissionlab-admission` depends on it --
+# so this promotes an existing edge to a direct one rather than adding a
+# crate; nothing depends on this bin+lib crate, so its edges can never
+# become part of a cycle. Deliberately NOT a way for the pipeline to
+# gain recipe-driven install behavior: the only API used is the
+# compatibility matrix, and the warning it produces can never refuse a
+# run (Global Constraint 6).
+admissionlab-recipes = { workspace = true }
 admissionlab-report = { workspace = true }
 # `pipeline::install::KubeStackInstaller` implements
 # `admissionlab_core::StackInstaller`, and `pipeline::LabBackend` is the

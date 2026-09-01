@@ -164,6 +164,7 @@
 //! which writes it, and cleanup, which follows it.
 
 pub mod capture;
+pub mod certification;
 pub mod compare;
 pub mod gateway;
 pub mod install;
@@ -404,6 +405,15 @@ struct Inputs {
 /// The two values every stage below needs and none of them owns: the
 /// request the user made, and the recorder each stage reports its own
 /// duration to (Task 5.7). They travel together because they have the
+    /// Advisory warnings about recipe/Kubernetes combinations Admission
+    /// Lab has not certified (Task 7.4 step 3). Never a reason to stop:
+    /// see [`certification`]'s own documentation. Left empty by
+    /// [`prepare_inputs`] and filled in by [`run_lab`] once any
+    /// reproduction pin has been applied — a pin can change the very
+    /// Kubernetes version this asks about, so computing it any earlier
+    /// would answer the wrong question, and it still happens before
+    /// anything is provisioned.
+    certification: Vec<Diagnostic>,
 /// same lifetime and the same reach — from the first file read to the
 /// last cluster deleted — and because threading the recorder as a ninth
 /// independent parameter through functions that already take seven would
@@ -487,6 +497,18 @@ pub async fn run_lab<B: LabBackend>(
                 request,
                 console,
                 None,
+    // Task 7.4 step 3. Still part of validating the user's input —
+    // nothing has been provisioned yet — but deliberately after the
+    // reproduction pin, which can replace the very Kubernetes version
+    // this asks about. Advisory in both directions: every warning is
+    // printed and carried into `LabResult::diagnostics`, and none of
+    // them can end the run. See `certification`'s own documentation for
+    // why refusing here would break Global Constraint 6.
+    inputs.certification = certification::uncertified_combinations(&inputs.lab);
+    for warning in &inputs.certification {
+        console.problem(&warning.message);
+    }
+
                 "prerequisites",
                 "This host does not meet the prerequisites `admissionlab test` needs. Run \
                  `admissionlab doctor` for the full report.",
@@ -945,6 +967,7 @@ fn prepare_inputs(
 /// - it must not collide with a discovered fixture's id, since two
 ///   entries under one identifier would make a per-fixture drill-down
 ///   ambiguous and would attribute one's changes to the other.
+        certification: Vec::new(),
 ///
 /// Both are checked here, at exit 2, before any cluster is created —
 /// the same placement, and for the same reason, as every other input
@@ -1110,7 +1133,14 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
         ),
         run.timings.clone(),
     );
-    let mut diagnostics = install_diagnostics(&stacks);
+    // The certification warnings lead, because they describe the stack
+    // the rest of these diagnostics were produced by: they were raised
+    // before this run had a cluster at all (Task 7.4 step 3), and they
+    // are run-level in exactly the sense `install_diagnostics` documents
+    // — about the environment the comparison ran in, not about any one
+    // fixture.
+    let mut diagnostics = inputs.certification.clone();
+    diagnostics.extend(install_diagnostics(&stacks));
     let captured = {
         let _stage = run.timings.stage(TimedStage::FixtureCapture);
         runner.capture_fixtures(prepared, &capture).await

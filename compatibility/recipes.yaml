@@ -8,14 +8,18 @@
 # expressible, not to assume every recipe automatically covers whatever
 # Admission Lab itself supports.
 #
-# This file has no Rust loader yet -- nothing in this workspace consults
-# it programmatically today. `crates/admissionlab-recipes/tests/load.rs`
-# still parses and asserts against it directly (a small, test-local
-# struct, not a public API), so a bad hand-edit here fails CI immediately
-# rather than silently drifting unnoticed; a typed, `pub` consumer is left
-# to whichever later task first has a concrete reason to read this file
-# at runtime (plausibly Task 2.8/2.9's own certification tooling, or a
-# future `doctor`-style preflight check).
+# This file's Rust loader is `admissionlab_recipes::compat`
+# (`crates/admissionlab-recipes/src/compat.rs`), which embeds these bytes
+# at compile time and is validated by
+# `crates/admissionlab-recipes/tests/compatibility.rs` -- so a bad
+# hand-edit here fails CI immediately rather than silently drifting
+# unnoticed. Its real consumers today are the recipe certification tests
+# (which derive from `certified` below which Kubernetes version(s) to
+# install against), `admissionlab test` itself (which warns, and never
+# refuses, when a lab asks for a combination no row below certifies --
+# Task 7.4 step 3), and `scripts/recipe-matrix.py`, which turns the rows
+# below into the CI job matrix `.github/workflows/recipe-matrix.yml`
+# runs. A row nothing consumes is not a certification.
 #
 # Shape, per entry under `recipes:`:
 #
@@ -40,16 +44,51 @@
 #       certified: the exact set of Kubernetes PATCH versions -- always
 #         a subset of `compatibility/kubernetes.yaml`'s own
 #         `supported: true` entries -- that this recipe version is
-#         DECLARED to target. Computed by intersecting `documentedRange`
+#         certified against, each with the CI tier that proves it (see
+#         "Tiers" below). Computed by intersecting `documentedRange`
 #         (when present) with Admission Lab's own supported matrix, then
 #         hand-reviewed and checked in here exactly like
 #         `compatibility/kubernetes.yaml` itself is (a deliberate,
-#         reviewed change to this file, never derived at runtime). This
-#         is a TARGET for that recipe's own certification task to test
-#         against, not a report of tests already run: Task 2.5 (this
-#         file's origin) implements no recipe and creates no cluster --
-#         Tasks 2.8/2.9 are what actually install and verify Kyverno/
-#         Istio, against exactly the Kubernetes version(s) named here.
+#         reviewed change to this file, never derived at runtime).
+#
+#         Each element is a mapping, not a bare string:
+#
+#           - version: "1.35.8"
+#             tier: perCommit
+#
+#         Task 2.5 wrote this list as bare strings, when it was a
+#         DECLARED target for a certification task not yet written and
+#         no CI job read it. Task 7.4 gives every element the tier that
+#         actually runs it, because a certification nobody schedules is
+#         a claim rather than evidence -- and because
+#         `.github/workflows/recipe-matrix.yml`'s job matrix is
+#         generated from exactly these rows rather than from a
+#         hardcoded array that could disagree with them.
+#
+# Tiers (PRODUCT.md §32; ROADMAP Task 7.5). `tier` records the MOST
+# FREQUENT schedule that runs a combination; every tier additionally
+# runs every more frequent tier's rows, so the sets are cumulative
+# downward and each row appears exactly once, at its cheapest schedule:
+#
+#   perCommit     Tier 1. Runs on every pull request that touches the
+#                 code or metadata it covers. Reserved for one
+#                 Kubernetes version per recipe, because a per-commit
+#                 job that installs a full Istio on three clusters costs
+#                 more than the signal it adds.
+#   nightly       Tier 2. `.github/workflows/nightly.yml`. The rest of
+#                 the supported minors for the admission recipes, so
+#                 every supported minor is exercised by a certified
+#                 recipe once a day (the Phase 7 exit gate's "run Tier 2
+#                 across all three Kubernetes minors").
+#   weeklyRelease Tier 3. Weekly cron plus manual dispatch, and every
+#                 release candidate. The expanded Gateway combinations,
+#                 run alongside reliability repetition and the Gateway
+#                 demos.
+#
+# A tier is a statement about SCHEDULE, never about confidence: every
+# row below has actually been installed and verified by a test in this
+# repository (each entry's own comment names which), and a `nightly` row
+# is exactly as certified as a `perCommit` one.
 #
 # Multiple entries may share a `name` over time as a recipe's pinned
 # version changes (append a new entry; do not edit an old one in place),
@@ -61,6 +100,42 @@
 # (both fetched from upstream chart/doc sources; commands given inline in
 # each file), cross-referenced against `compatibility/kubernetes.yaml`
 # (same date): supported set 1.35.8 / 1.36.4 (primary) / 1.37.0.
+#
+# Tiers assigned 2026-09-01 for Task 7.4, from the certification tests
+# that already existed rather than from intent -- see each entry.
+
+# The Kubernetes support-window escape hatch (Task 7.4 step 1; Global
+# Constraint 10, "support for the latest three upstream-supported
+# Kubernetes minor versions at release time").
+#
+# `admissionlab_recipes::compat::validate_compatibility` requires exactly
+# `RELEASE_SUPPORTED_MINORS` (3) `supported: true` minors in
+# `compatibility/kubernetes.yaml` for a release candidate. The count is a
+# Rust constant, not a field here, precisely so that "we support three
+# minors" cannot be edited away in passing -- Global Constraint 10 is a
+# product decision, not configuration.
+#
+# What IS expressible here is the roadmap's own exception: "unless the
+# upstream support window temporarily differs and release notes explain
+# it." When upstream itself is between windows (a minor reaching EOL
+# before its successor is out, say), set:
+#
+#   supportWindowException:
+#     expectedSupportedMinors: 2
+#     reason: "<what upstream did, in one sentence>"
+#     releaseNotes: "<path or URL to the release notes that explain it>"
+#
+# All three fields are required when the key is present, and
+# `expectedSupportedMinors` must actually differ from 3 (an exception
+# that restates the default is stale, and validation says so). Taking
+# the exception is therefore a reviewable diff to this checked-in file
+# that names its own justification -- never a flag someone passes on a
+# release machine, and never something derived from what upstream
+# happened to publish that morning.
+#
+# Absent today: upstream supports 1.35, 1.36 and 1.37, which is exactly
+# three.
+
 recipes:
   - name: kyverno
     version: "3.9.0"
@@ -83,8 +158,18 @@ recipes:
       # make expressible (research-kyverno.md §1.1: "neither chart's
       # upstream-tested range reaches 1.36 (Admission Lab's primary) or
       # 1.37").
+      #
+      # perCommit: ROADMAP Task 7.5 puts "current Kyverno" in Tier 1,
+      # and `crates/admissionlab-recipes/tests/kyverno_recipe.rs`
+      # already runs on every pull request that touches this crate
+      # (`.github/workflows/integration.yml`), measured at 113.97 s.
+      # Kyverno's single certified version is 1.35.8 rather than the
+      # Tier-1 primary 1.36.4 for the reason directly above: a Tier-1
+      # job on 1.36.4 would be an uncertified combination, which is the
+      # one thing a certification job must not be.
       certified:
-        - "1.35.8"
+        - version: "1.35.8"
+          tier: perCommit
   - name: istio
     version: "1.30.4"
     kubernetes:
@@ -98,13 +183,29 @@ recipes:
       documentedRange: null
       # With no documented constraint narrowing it, `certified` is the
       # full Admission Lab supported set, including the Tier-1 primary
-      # -- unlike Kyverno's above. (This is a declared target for Task
-      # 2.9's own certification testing, not a claim that testing has
-      # already happened -- see this file's header comment.)
+      # -- unlike Kyverno's above. Every version listed here is actually
+      # installed and sidecar-injection-verified, in its own disposable
+      # cluster, by
+      # `crates/admissionlab-recipes/tests/istio_recipe.rs`
+      # (`istio_recipe_installs_and_injects_sidecar_for_every_certified_kubernetes_version`);
+      # all three iterations together measured 222.00 s.
+      #
+      # 1.36.4 is perCommit because it is Admission Lab's Tier-1 primary
+      # and ROADMAP Task 7.5 puts "current Istio" in Tier 1. The other
+      # two are nightly: running all three per commit triples the
+      # heaviest recipe job for a signal that a nightly catches within
+      # the day, and Tier 2's own purpose is exactly "latest 3 K8s
+      # minors x selected recipe versions". Between this entry's three
+      # rows and Kyverno's one, Tier 2 covers every supported minor --
+      # the Phase 7 exit gate's "run Tier 2 across all three Kubernetes
+      # minors".
       certified:
-        - "1.35.8"
-        - "1.36.4"
-        - "1.37.0"
+        - version: "1.35.8"
+          tier: nightly
+        - version: "1.36.4"
+          tier: perCommit
+        - version: "1.37.0"
+          tier: nightly
   # Task 6.10. `recipes/istio-gateway/` is a TWO-component stack -- the
   # vendored Gateway API CRD bundle (`gateway-api-crds.yaml`, Gateway API
   # v1.5.1) followed by `istiod` (`recipe.yaml`) -- and this single entry
@@ -147,14 +248,36 @@ recipes:
       # manufactured out of the TLSRoute floor: an absent constraint
       # means "unknown," never "supported" (Global Constraint 15).
       documentedRange: null
-      # The full Admission Lab supported set, matching the `istio` entry
-      # -- and, unlike that entry, every version listed here has actually
-      # been installed and traffic-tested end to end by
-      # `tests/istio_gateway_recipe.rs` (Gateway + HTTPRoute reconciled
-      # to Accepted/ResolvedRefs/Programmed, then a real HTTP 200 from
-      # the expected echo backend, in both the same-namespace and the
-      # cross-namespace/`ReferenceGrant` configuration).
+      # The full Admission Lab supported set, matching the `istio` entry.
+      # Every version listed here has actually been installed and
+      # traffic-tested end to end by `tests/istio_gateway_recipe.rs`
+      # (Gateway + HTTPRoute reconciled to
+      # Accepted/ResolvedRefs/Programmed, then a real HTTP 200 from the
+      # expected echo backend, in both the same-namespace and the
+      # cross-namespace/`ReferenceGrant` configuration); all three
+      # iterations together measured 269.95 s.
+      #
+      # 1.36.4 is perCommit -- ROADMAP Task 7.5 names "current Istio
+      # Gateway" in Tier 1, on the primary Kubernetes version.
+      #
+      # The other two are weeklyRelease rather than nightly, which is
+      # this file's only Tier-3 content and is a deliberate reading of
+      # Task 7.5's own Tier 3 line ("expanded supported combinations +
+      # reliability repetition + Gateway demos"): the two non-primary
+      # minors of the GATEWAY recipe are precisely "expanded Gateway
+      # combinations," and they are the most expensive rows here -- each
+      # builds the echo backend image, installs the Gateway API CRD
+      # bundle and istiod, waits for real status convergence and then
+      # sends real traffic. Nightly Tier 2 still covers all three
+      # supported minors through the `istio` and `kyverno` entries
+      # above, so scheduling these weekly costs no minor's coverage; it
+      # only means the Gateway data plane on a non-primary minor is
+      # proven weekly instead of daily, which is the trade Tier 3 exists
+      # to make.
       certified:
-        - "1.35.8"
-        - "1.36.4"
-        - "1.37.0"
+        - version: "1.35.8"
+          tier: weeklyRelease
+        - version: "1.36.4"
+          tier: perCommit
+        - version: "1.37.0"
+          tier: weeklyRelease

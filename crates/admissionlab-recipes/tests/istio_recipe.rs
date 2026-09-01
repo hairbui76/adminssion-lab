@@ -134,7 +134,10 @@ use admissionlab_core::{
     CommandSpec, ProcessRunner, RunId, RunPaths, Side, TokioProcessRunner,
 };
 use admissionlab_installer::{HelmInstaller, KubeReadinessProbe, install_stack};
-use admissionlab_recipes::{Capability, Recipe, load_builtin_recipes, load_recipe_compatibility};
+use admissionlab_recipes::{
+    CERTIFY_KUBERNETES_ENV, Capability, Recipe, load_builtin_recipes, load_recipe_compatibility,
+    narrow_certified_versions,
+};
 use admissionlab_spec::ResolvedComponent;
 
 /// Bounds one `install_stack` call for the `istio` component alone: the
@@ -870,7 +873,17 @@ fn istio_certified_kubernetes_versions() -> Result<Vec<String>, String> {
                 .to_string(),
         );
     }
-    Ok(istio.kubernetes.certified.clone())
+    // `ADMISSIONLAB_CERTIFY_KUBERNETES`, when set, narrows this to the
+    // single certified version a generated CI matrix job owns (Task
+    // 7.5); unset means all of them, exactly as before. See
+    // `admissionlab_recipes::CERTIFY_KUBERNETES_ENV`.
+    let requested = std::env::var(CERTIFY_KUBERNETES_ENV).ok();
+    let certified = narrow_certified_versions(istio, requested.as_deref())
+        .map_err(|error| error.to_string())?;
+    Ok(certified
+        .into_iter()
+        .map(std::borrow::ToOwned::to_owned)
+        .collect())
 }
 
 /// `fixtures/istio/smoke/`, resolved from this checkout's own repository

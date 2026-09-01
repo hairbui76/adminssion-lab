@@ -1754,6 +1754,203 @@ impl std::fmt::Debug for RunOutput {
     /// Prints both streams, because every failing assertion in this file
     /// is easier to diagnose with the run's own output attached than
     /// with the disposition alone.
+// ---------------------------------------------------------------------
+// Certified compatibility matrix (Task 7.4 step 3)
+//
+// The rule under test is a warning that must never become a refusal:
+// `compatibility/recipes.yaml` certifies Kyverno 3.9.0 on Kubernetes
+// 1.35.8 only (Kyverno's own documented window stops at 1.35), so a lab
+// that installs it on Admission Lab's Tier-1 primary 1.36.4 is a
+// supported Kubernetes version carrying an uncertified recipe
+// combination -- exactly the case the roadmap asks to warn about.
+//
+// Fake-driven, like every other test in this file: no cluster is
+// created and nothing is installed, because the check happens before
+// either could be. What the run itself does is irrelevant to it, which
+// is why these assert the run still reaches its ordinary verdict.
+// ---------------------------------------------------------------------
+
+/// Writes a lab whose two sides each install one component, given
+/// verbatim as YAML already indented to sit under `components:`.
+///
+/// Separate from [`write_lab`] rather than a parameter on it: that
+/// helper appends to the end of the document, and a component has to go
+/// inside an environment.
+fn write_lab_with_component(dir: &Path, kubernetes: &str, component: &str) -> PathBuf {
+    let config = dir.join("admissionlab.yaml");
+    let environment = format!("  kubernetes: \"{kubernetes}\"\n  components:\n{component}");
+    std::fs::write(
+        &config,
+        format!(
+            "apiVersion: admissionlab.io/v1alpha1\n\
+             kind: Lab\n\
+             baseline:\n{environment}\
+             candidate:\n{environment}\
+             fixtures:\n  include:\n    - \"fixtures/**/*.yaml\"\n"
+        ),
+    )
+    .expect("failed to write lab configuration");
+
+    let fixtures = dir.join("fixtures");
+    std::fs::create_dir_all(&fixtures).expect("failed to create fixtures dir");
+    std::fs::write(
+        fixtures.join("pod.yaml"),
+        "apiVersion: v1\nkind: Pod\nmetadata:\n  name: probe\nspec:\n  containers:\n\
+         \x20\x20\x20\x20- name: app\n      image: registry.k8s.io/pause:3.10\n",
+    )
+    .expect("failed to write fixture");
+    config
+}
+
+/// One Helm component, indented to sit under `components:`.
+fn helm_component(name: &str, chart: &str, repo: &str, version: &str) -> String {
+    format!(
+        "    - name: {name}\n      \
+         install:\n        \
+         type: helm\n        \
+         chart: {chart}\n        \
+         repo: {repo}\n        \
+         version: \"{version}\"\n        \
+         namespace: {name}\n"
+    )
+}
+
+#[test]
+fn an_uncertified_recipe_combination_warns_and_still_runs_to_a_verdict() {
+    let dir = unique_dir("uncertified");
+    let config = write_lab_with_component(
+        &dir,
+        // Supported (it is the Tier-1 primary), which is what makes this
+        // a certification question at all rather than a cluster-creation
+        // refusal.
+        "1.36.4",
+        &helm_component(
+            "kyverno",
+            "kyverno/kyverno",
+            "https://kyverno.github.io/kyverno/",
+            "3.9.0",
+        ),
+    );
+    let reports = dir.join("artifacts");
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    // 1. The run is not refused. Global Constraint 6: a user-defined
+    //    stack is first-class, and this one still reached a verdict.
+    assert_eq!(output.disposition, RunDisposition::Passed, "{output:?}");
+    assert_eq!(backend.clusters.created_sides().len(), 2);
+
+    // 2. It said so on the console, once -- not once per side.
+    let warnings = output
+        .stderr
+        .matches("which Admission Lab does not certify")
+        .count();
+    assert_eq!(warnings, 1, "expected exactly one warning: {output:?}");
+    assert!(
+        output.stderr.contains("kyverno 3.9.0 on Kubernetes 1.36.4"),
+        "the warning must name the combination: {output:?}"
+    );
+    assert!(
+        output
+            .stderr
+            .contains("Certified: kyverno 3.9.0 on Kubernetes 1.35.8"),
+        "the warning must name what IS certified: {output:?}"
+    );
+
+    // 3. And it reached the report as a run-level diagnostic.
+    let result = read_result(&reports.join("result.json"));
+    let diagnostics = result["diagnostics"].as_array().expect("diagnostics array");
+    let uncertified: Vec<&serde_json::Value> = diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic["code"] == "compatibility.uncertified_combination")
+        .collect();
+    assert_eq!(uncertified.len(), 1, "{result}");
+    let context = &uncertified[0]["context"];
+    assert_eq!(context["recipe"], serde_json::json!("kyverno"));
+    assert_eq!(context["recipeVersion"], serde_json::json!("3.9.0"));
+    assert_eq!(context["kubernetes"], serde_json::json!("1.36.4"));
+    assert_eq!(
+        context["sides"],
+        serde_json::json!("baseline, candidate"),
+        "both sides asked for it, and one diagnostic says so: {result}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_certified_combination_warns_about_nothing() {
+    let dir = unique_dir("certified");
+    let config = write_lab_with_component(
+        &dir,
+        "1.35.8",
+        &helm_component(
+            "kyverno",
+            "kyverno/kyverno",
+            "https://kyverno.github.io/kyverno/",
+            "3.9.0",
+        ),
+    );
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: None,
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    assert_eq!(output.disposition, RunDisposition::Passed, "{output:?}");
+    assert!(
+        !output.stderr.contains("does not certify"),
+        "the certified combination must be silent: {output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_user_defined_stack_admission_lab_ships_no_recipe_for_is_silent() {
+    let dir = unique_dir("user-defined");
+    let config = write_lab_with_component(
+        &dir,
+        "1.36.4",
+        &helm_component(
+            "my-webhook",
+            "internal/my-webhook",
+            "https://charts.example.invalid",
+            "0.4.2",
+        ),
+    );
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: None,
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    assert_eq!(output.disposition, RunDisposition::Passed, "{output:?}");
+    assert!(
+        !output.stderr.contains("does not certify"),
+        "a stack Admission Lab certifies nothing for is not a certification question at all, \
+         and warning about every such component would make the warning worthless: {output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,

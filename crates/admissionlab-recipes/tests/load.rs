@@ -980,9 +980,9 @@ fn kyverno_certified_kubernetes_excludes_the_tier_1_primary() {
     let kyverno = matrix.entry("kyverno").expect("a kyverno entry must exist");
 
     assert_eq!(kyverno.version, "3.9.0");
-    assert_eq!(kyverno.kubernetes.certified, vec!["1.35.8".to_string()]);
+    assert_eq!(kyverno.kubernetes.certified_versions(), vec!["1.35.8"]);
     assert!(
-        !kyverno.kubernetes.certified.contains(&"1.36.4".to_string()),
+        !kyverno.kubernetes.certified_versions().contains(&"1.36.4"),
         "Kyverno's own documented support window (v1.33-v1.35) does not reach 1.36; \
          certifying it against Admission Lab's Tier-1 primary would assert a claim Kyverno's \
          own docs do not make"
@@ -1007,12 +1007,8 @@ fn istio_certified_kubernetes_matches_the_full_supported_matrix() {
          found in research; this must stay unset rather than fabricated"
     );
     assert_eq!(
-        istio.kubernetes.certified,
-        vec![
-            "1.35.8".to_string(),
-            "1.36.4".to_string(),
-            "1.37.0".to_string()
-        ],
+        istio.kubernetes.certified_versions(),
+        vec!["1.35.8", "1.36.4", "1.37.0"],
         "with no documented constraint narrowing it, Istio's certified set should match \
          Admission Lab's full supported matrix -- unlike Kyverno's"
     );

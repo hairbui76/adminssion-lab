@@ -145,7 +145,8 @@ use admissionlab_core::{
 };
 use admissionlab_installer::{HelmInstaller, KubeReadinessProbe, ReadinessProbe, install_stack};
 use admissionlab_recipes::{
-    Capability, ReadinessCheck, load_builtin_recipes, load_recipe_compatibility,
+    CERTIFY_KUBERNETES_ENV, Capability, ReadinessCheck, load_builtin_recipes,
+    load_recipe_compatibility, narrow_certified_versions,
 };
 use admissionlab_spec::ResolvedComponent;
 
@@ -745,8 +746,17 @@ fn kyverno_certified_kubernetes_version() -> Result<String, String> {
     let kyverno = compat
         .entry("kyverno")
         .ok_or_else(|| "compatibility/recipes.yaml has no \"kyverno\" entry".to_string())?;
-    match kyverno.kubernetes.certified.as_slice() {
-        [version] => Ok(version.clone()),
+    // `ADMISSIONLAB_CERTIFY_KUBERNETES`, when set, narrows this to the
+    // one certified version a generated CI matrix job is responsible for
+    // (Task 7.5); unset -- every developer running this by hand -- means
+    // the whole certified list, exactly as before. Asking for a version
+    // this entry does not certify is an error, never a silent skip. See
+    // `admissionlab_recipes::CERTIFY_KUBERNETES_ENV`.
+    let requested = std::env::var(CERTIFY_KUBERNETES_ENV).ok();
+    let certified = narrow_certified_versions(kyverno, requested.as_deref())
+        .map_err(|error| error.to_string())?;
+    match certified.as_slice() {
+        [version] => Ok((*version).to_owned()),
         other => Err(format!(
             "expected exactly one certified Kubernetes version for kyverno in \
              compatibility/recipes.yaml, found {}: {other:?} -- this test does not guess which \

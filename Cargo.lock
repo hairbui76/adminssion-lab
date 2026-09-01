@@ -42,6 +42,7 @@ dependencies = [
  "admissionlab-normalize",
  "admissionlab-policy",
  "admissionlab-report",
+ "admissionlab-recipes",
  "admissionlab-spec",
  "assert_cmd",
  "async-trait",
