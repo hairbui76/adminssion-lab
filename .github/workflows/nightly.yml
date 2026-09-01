@@ -6,13 +6,17 @@ name: Nightly reliability
 # reliability is more important than optimizing a few seconds of runtime"
 # — makes the point of.
 #
-# Nine jobs, in four groups.
+# Ten job definitions in four groups -- and twenty-one jobs actually
+# scheduled here, plus the jobs `recipe-certification` expands into,
+# because ROADMAP Task 9.8 step 4 raised three of them to repetition
+# counts that only shard sensibly.
 #
 #   Repetition (does the happy path stay the happy path?)
 #     cluster-cycles           100 kind create/delete cycles
-#     dogfood-basic            50 full lab runs of examples/admission-basic
-#     dogfood-regression        5 full lab runs of examples/kyverno-istio-upgrade
-#     dogfood-gateway           3 full lab runs of examples/gateway-istio
+#     dogfood-basic            100 runs of examples/admission-basic     (4 shards x 25)
+#     dogfood-gateway           25 runs of examples/gateway-istio       (5 shards x 5)
+#     dogfood-migration         25 runs of examples/ingress-to-gateway  (5 shards x 5)
+#     dogfood-regression         5 runs of examples/kyverno-istio-upgrade
 #
 #   Certification (are the certified stacks still certified?)
 #     recipe-certification     Tier 2 of the generated recipe matrix
@@ -28,14 +32,15 @@ name: Nightly reliability
 # job can pass while having leaked an `adlab-*` cluster (Task 5.9 step
 # 1); `recipe-certification` is a call into another workflow, whose own
 # jobs end with the identical step. That is one script with one implementation
-# rather than a grep snippet pasted eight times — and pasted, in
+# rather than a grep snippet pasted nine times — and pasted, in
 # practice, with the `2>/dev/null ... || true` defect that makes such a
 # check incapable of failing.
 #
 # # Kubernetes version
 #
-# Seven of the eight jobs run against **1.36.4, Tier 1's primary supported
-# Kubernetes version** (`compatibility/kubernetes.yaml`), which is
+# Eight of the nine jobs defined here run against **1.36.4, Tier 1's
+# primary supported Kubernetes version** (`compatibility/kubernetes.yaml`),
+# which is
 # ROADMAP Task 5.9's "supported primary Kubernetes minor" entry:
 # `examples/admission-basic` pins it, `scripts/verify-cleanup.sh` pins
 # its node image, and `crates/admissionlab-admission/tests/kind_capture.rs`
@@ -67,30 +72,95 @@ name: Nightly reliability
 # every night (the Phase 7 exit gate's "run Tier 2 across all three
 # Kubernetes minors").
 #
-# The eight jobs defined in this file still run against the primary as
+# The nine jobs defined in this file still run against the primary as
 # described above. They measure repeated-run reliability, which is a
 # different question from certification and one that a three-minor matrix
 # would make three times more expensive without making more reliable.
 #
 # # Flake versus regression (Task 5.9 step 2)
 #
-# The two dogfood jobs are separate jobs, not two loops in one, because
+# The dogfood jobs are separate jobs, not loops folded into one, because
 # they are tracked as different things:
 #
 #   * `dogfood-basic` runs an example built to pass. Its expected exit
-#     code is 0, on every one of 50 runs, and *any* non-zero result is a
+#     code is 0, on every one of 100 runs, and *any* non-zero result is a
 #     flake or a regression in Admission Lab itself. This job's failure
 #     means "the tool is not reliable".
-#   * `dogfood-regression` runs the example built to find a real
-#     regression. Its expected exit code is 1 — a policy failure is the
-#     correct answer — and a 0 there would mean Admission Lab stopped
-#     detecting the known candidate regression. This job's failure means
-#     "the tool stopped being correct".
+#   * `dogfood-regression`, `dogfood-gateway` and `dogfood-migration` run
+#     the examples built to find a real regression. Their expected exit
+#     code is 1 — a policy failure is the correct answer — and a 0 there
+#     would mean Admission Lab stopped detecting a known seeded
+#     regression. Their failure means "the tool stopped being correct".
 #
 # Folding them together would produce one red X that answers neither
-# question. Both loops assert the *expected* exit code rather than
-# "success", and both distinguish an unexpected exit code (which fails
-# the job) from the expected verdict (which does not).
+# question. Every loop asserts the *expected* exit code rather than
+# "success", and every loop distinguishes an unexpected exit code (which
+# fails the job) from the expected verdict (which does not).
+#
+# # The flake budget (Task 9.8 step 4)
+#
+# Task 9.8 step 4 sets the counts: "Run canonical dogfood admission demo
+# 100 times and Gateway demos 50 times in scheduled/sharded CI." Both
+# numbers are met here, and the second is split because "Gateway demos"
+# is plural and this project has two of them:
+#
+#   examples/admission-basic       100   the canonical admission demo
+#   examples/gateway-istio          25 \ the two canonical Gateway demos,
+#   examples/ingress-to-gateway     25 /  50 runs between them
+#
+# The split is even rather than weighted. The two demos ask different
+# questions of the same asynchronous machinery — `gateway-istio` asks
+# whether a route's reconciliation and traffic behavior are stable across
+# runs, `ingress-to-gateway` asks whether an Ingress-to-Gateway migration
+# comparison is — and neither is the more likely to flake, so neither
+# earns the larger half. `examples/kyverno-istio-upgrade` stays at 5: it
+# is not a Gateway demo, and its own job comment explains why repeating a
+# binary product question fifty times learns nothing the fifth run did
+# not already say.
+#
+# ## Why these three are sharded and `cluster-cycles` is not
+#
+# Sharding trades one long unattended sequence for several shorter
+# parallel ones, and that trade is right for a *flake* budget and wrong
+# for a *leak* budget. A flake is a per-run event: 100 runs of
+# `admission-basic` are 100 independent trials whether they happen on one
+# machine or four, and four machines answer in a quarter of the wall
+# clock. `cluster-cycles` asks the opposite question — does a long
+# sequence on ONE machine accumulate anything? — and sharding it would
+# reset exactly the state a leak would show up in. Its own comment says
+# so, and it stays unsharded.
+#
+# Shard counts are chosen so that no single job runs longer than the
+# per-job sizing each one's comment states, and every count divides
+# evenly: 4 x 25, 5 x 5, 5 x 5. Each shard is a fresh runner VM, and each
+# uploads its own diagnostics artifact under a shard-suffixed name —
+# `actions/upload-artifact@v4` rejects two uploads to one name, and a
+# shared name would in any case hide which shard found the failure.
+#
+# ## Release-blocking (Task 9.8 step 4, and the Phase 9 exit gate)
+#
+# Task 9.8 step 4 is explicit: "Any unexplained false regression or
+# cross-correlation is release-blocking." Concretely, for this suite:
+#
+#   * a `dogfood-basic` run that did not exit 0, or a
+#     `dogfood-regression`/`dogfood-gateway`/`dogfood-migration` run that
+#     did not exit 1, blocks the release until it is explained — the
+#     explanation being a named root cause in Admission Lab, in a vendor,
+#     or in the runner environment, not "it passed on the retry";
+#   * a finding attributed to the wrong fixture or route contract
+#     (cross-correlation) blocks the release outright, explained or not:
+#     it is the fabrication Global Constraint 15 and the whole evidence
+#     model exist to prevent, and `docs/architecture.md` §6.4 is why
+#     fixture capture is serial in the first place;
+#   * an infrastructure failure — a runner that lost its Docker daemon, a
+#     registry that timed out — is tracked separately and does not block
+#     on its own. Repeated environment-induced flakes do require
+#     diagnosis: the second occurrence of the same environmental failure
+#     is a pattern, and a pattern nobody has explained is indistinguishable
+#     from a product bug that only shows up under load.
+#
+# `docs/performance.md` states this policy in one place for a reader who
+# is not reading a workflow file.
 #
 # # Diagnostics (Task 5.9 step 3)
 #
@@ -102,12 +172,31 @@ name: Nightly reliability
 #
 # # Cost
 #
-# This suite is expensive on purpose. Rough sizing against the measured
-# figures each job's own comment cites: the whole matrix is a few hours
-# of runner time per night, running in parallel, with `cluster-cycles`
-# the long pole at up to ~55 minutes. `recipe-certification` adds five
-# real-cluster jobs of its own, in parallel with these and with each
-# other; `.github/workflows/recipe-matrix.yml` sizes them.
+# This suite is expensive on purpose, and Task 9.8 step 4 made it more
+# so. Rough sizing against the measured figures each job's own comment
+# cites, on the reference machine, before any runner slowness:
+#
+#   cluster-cycles      1 job  x ~53 min   = ~53 min  (the long pole)
+#   dogfood-basic       4 jobs x ~9 min    = ~37 min of runner time
+#   dogfood-gateway     5 jobs x ~17 min   = ~85 min
+#   dogfood-migration   5 jobs x ~15 min   = ~73 min
+#   dogfood-regression  1 job  x ~7 min    = ~7 min
+#   forced failures     4 jobs, minutes each
+#
+# So roughly four to five hours of runner time per night, of which the
+# wall clock is `cluster-cycles`' hour because everything else runs
+# beside it. `recipe-certification` adds five real-cluster jobs of its
+# own, in parallel with these and with each other;
+# `.github/workflows/recipe-matrix.yml` sizes them.
+#
+# That is a real increase over the pre-9.8 suite (which ran 50 + 5 + 3
+# dogfood runs in three jobs) and it was taken deliberately rather than
+# moved to a weekly workflow. PRODUCT.md §33 closes with the sentence
+# this whole file exists for — "Before v1, repeated-run reliability is
+# more important than optimizing a few seconds of runtime" — and a flake
+# budget that reports weekly finds a flake up to seven days after the
+# commit that introduced it, which is exactly when the bisect is
+# hardest. Nightly runner time is the cheaper of the two costs.
 
 on:
   schedule:
@@ -247,16 +336,32 @@ jobs:
       contents: read
 
   dogfood-basic:
-    name: 50 dogfood runs (examples/admission-basic, expect exit 0)
+    name: Dogfood admission demo, shard ${{ matrix.shard }}/4 (25 runs, expect exit 0)
     runs-on: ubuntu-latest
-    # 50 runs. `examples/admission-basic`'s own header measures one run
-    # at "about a minute" (two `kind` clusters, no components, four
-    # dry-run requests); ROADMAP Task 5.7 measured a comparable
-    # two-cluster lab end to end at ~22 seconds on a 16-core host. At the
-    # example's own pessimistic figure that is ~50 minutes, plus one
-    # release build. 180 minutes is roughly 3x that, which is the margin
-    # a GitHub-hosted runner needs against a 16-core reference machine.
-    timeout-minutes: 180
+    # 100 runs in four shards of 25 — ROADMAP Task 9.8 step 4's
+    # "canonical dogfood admission demo 100 times", raised from the 50
+    # this job ran for Task 5.9.
+    #
+    # `examples/admission-basic`'s own header measures one run at "about
+    # a minute" (two `kind` clusters, no components, four dry-run
+    # requests); ROADMAP Task 5.7 measured a comparable two-cluster lab
+    # end to end at ~22 seconds on a 16-core host. 25 runs is therefore
+    # ~9 minutes on the reference machine and ~25 minutes at the
+    # example's own pessimistic figure, plus one release build per shard.
+    # 90 minutes is roughly 3x the pessimistic figure, which is the
+    # margin a GitHub-hosted runner needs against a 16-core reference
+    # machine — the same 3x the pre-shard version of this comment sized
+    # its 180 minutes with.
+    timeout-minutes: 90
+    strategy:
+      # Four independent trials-in-parallel, not one loop cut in four:
+      # `fail-fast: false` because a flake found in shard 2 must not
+      # cancel the 75 runs still to happen elsewhere. The whole point of
+      # the count is the denominator, and a cancelled shard has no
+      # denominator to report.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -324,7 +429,7 @@ jobs:
         # `ADMISSIONLAB_BIN`.
         run: cargo build --release -p admissionlab-cli --bin admissionlab
 
-      - name: Run examples/admission-basic 50 times
+      - name: Run examples/admission-basic 25 times (this shard's quarter of 100)
         # `examples/admission-basic` is designed to pass: two identical
         # bare clusters, so the two sides agree by construction and the
         # run exits 0. Any other exit code is therefore a flake or a
@@ -336,12 +441,20 @@ jobs:
         # (which the CLI places under `${TMPDIR:-/tmp}/admissionlab-runs`
         # — there is no `--run-root` flag) is isolated and collectable.
         # A successful iteration's workspace is deleted immediately:
-        # 50 workspaces of per-fixture evidence would fill the runner's
-        # disk, and a job that dies of ENOSPC on run 31 answers nothing
-        # about runs 32-50.
+        # 25 workspaces of per-fixture evidence would fill the runner's
+        # disk, and a job that dies of ENOSPC on run 11 answers nothing
+        # about runs 12-25.
+        #
+        # Every log line carries the shard, so a failure copied out of a
+        # summary page is still traceable to one of a hundred runs rather
+        # than to one of twenty-five in an unnamed quarter.
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "4"
         run: |
           set -euo pipefail
-          runs=50
+          runs=25
+          total=$(( runs * SHARDS ))
           binary="${GITHUB_WORKSPACE}/target/release/admissionlab"
           diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
           mkdir -p "${diagnostics}"
@@ -359,19 +472,19 @@ jobs:
               >"${workspace}/console.log" 2>&1 || status=$?
 
             if [ "${status}" -eq 0 ]; then
-              echo "run ${i}/${runs}: exit 0 (expected)"
+              echo "shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit 0 (expected)"
               rm -rf "${workspace}"
             else
               failures=$(( failures + 1 ))
-              echo "::error::run ${i}/${runs}: exit ${status}, expected 0 — flake or regression"
+              echo "::error::shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit ${status}, expected 0 — flake or regression"
               tail -n 40 "${workspace}/console.log" || true
-              mv "${workspace}" "${diagnostics}/basic-run-${i}"
+              mv "${workspace}" "${diagnostics}/basic-shard-${SHARD}-run-${i}"
             fi
           done
 
-          echo "admission-basic: ${runs} runs, ${failures} unexpected exit code(s)"
+          echo "admission-basic shard ${SHARD}/${SHARDS}: ${runs} runs (of ${total} across all shards), ${failures} unexpected exit code(s)"
           if [ "${failures}" -ne 0 ]; then
-            echo "::error::${failures} of ${runs} admission-basic runs did not exit 0"
+            echo "::error::${failures} of ${runs} admission-basic runs in shard ${SHARD} did not exit 0"
             exit 1
           fi
 
@@ -392,7 +505,11 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: nightly-dogfood-basic-diagnostics
+          # Shard-suffixed: `actions/upload-artifact@v4` rejects a second
+          # upload to a name that already exists, so four shards sharing
+          # one name would fail the first shard that found something —
+          # and would in any case hide which shard found it.
+          name: nightly-dogfood-basic-diagnostics-shard-${{ matrix.shard }}
           path: nightly-diagnostics
           # A job that failed before the loop wrote anything should still
           # fail on its own account, not on a missing-artifact warning.
@@ -526,7 +643,7 @@ jobs:
         run: ./scripts/verify-cleanup.sh --check-only
 
   dogfood-gateway:
-    name: 3 dogfood runs (examples/gateway-istio, expect exit 1)
+    name: Dogfood Gateway demo, shard ${{ matrix.shard }}/5 (5 runs, expect exit 1)
     runs-on: ubuntu-latest
     # Kubernetes 1.36.4, the primary: `examples/gateway-istio` pins it,
     # and `compatibility/recipes.yaml` certifies the `istio-gateway`
@@ -542,12 +659,31 @@ jobs:
     # set on every pull request; this asks the same question again, on a
     # cold runner, every night.
     #
-    # Three, not five: each run creates two clusters and installs two
-    # full Istio stacks, and the candidate side additionally spends its
-    # whole 120-second reconciliation budget re-observing a route that
-    # has settled on refusing its backend. Measured at 204.5 s per run on
-    # a warm reference machine.
+    # 25 runs in five shards of 5 — this job's half of ROADMAP Task 9.8
+    # step 4's "Gateway demos 50 times", the other half being
+    # `dogfood-migration` below. Raised from the 3 Task 5.9 ran, and
+    # sharded rather than looped: each run creates two clusters and
+    # installs two full Istio stacks, and the candidate side additionally
+    # spends its whole 120-second reconciliation budget re-observing a
+    # route that has settled on refusing its backend. Measured at 204.5 s
+    # per run on a warm reference machine, so 5 runs is ~17 minutes there
+    # and 25 in one job would be ~85 minutes before any runner slowness —
+    # which is how a nightly suite quietly becomes a nightly-and-a-bit
+    # one.
+    #
+    # 120 minutes is roughly 7x the reference figure for five runs. The
+    # multiple is larger than `dogfood-basic`'s 3x on purpose: this run's
+    # cost is dominated by container image pulls, and a GitHub-hosted
+    # runner with a cold registry cache pays them at a rate this project
+    # does not control.
     timeout-minutes: 120
+    strategy:
+      # `fail-fast: false` for the same reason `dogfood-basic` sets it:
+      # a flake in one shard must not cancel the runs that would tell you
+      # how often it happens.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -580,7 +716,7 @@ jobs:
       - name: Build admissionlab (release)
         run: cargo build --release -p admissionlab-cli --bin admissionlab
 
-      - name: Run examples/gateway-istio 3 times
+      - name: Run examples/gateway-istio 5 times (this shard's fifth of 25)
         # Exit 1 is the pass condition, exactly as it is for
         # `dogfood-regression`: the candidate's `ReferenceGrant` names a
         # Service the route does not reference, the route stops resolving
@@ -588,9 +724,13 @@ jobs:
         # critical. Exit 0 would mean Admission Lab stopped detecting it;
         # any other code means the run never reached a verdict, which is
         # a different failure and is reported as such.
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "5"
         run: |
           set -euo pipefail
-          runs=3
+          runs=5
+          total=$(( runs * SHARDS ))
           binary="${GITHUB_WORKSPACE}/target/release/admissionlab"
           diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
           mkdir -p "${diagnostics}"
@@ -608,23 +748,23 @@ jobs:
               >"${workspace}/console.log" 2>&1 || status=$?
 
             if [ "${status}" -eq 1 ]; then
-              echo "run ${i}/${runs}: exit 1 (expected — the broken ReferenceGrant was detected)"
+              echo "shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit 1 (expected — the broken ReferenceGrant was detected)"
               rm -rf "${workspace}"
             elif [ "${status}" -eq 0 ]; then
               failures=$(( failures + 1 ))
-              echo "::error::run ${i}/${runs}: exit 0 — the known Gateway regression was NOT detected (product regression)"
-              mv "${workspace}" "${diagnostics}/gateway-run-${i}"
+              echo "::error::shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit 0 — the known Gateway regression was NOT detected (product regression)"
+              mv "${workspace}" "${diagnostics}/gateway-shard-${SHARD}-run-${i}"
             else
               failures=$(( failures + 1 ))
-              echo "::error::run ${i}/${runs}: exit ${status} — the run never reached a verdict"
+              echo "::error::shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit ${status} — the run never reached a verdict"
               tail -n 40 "${workspace}/console.log" || true
-              mv "${workspace}" "${diagnostics}/gateway-run-${i}"
+              mv "${workspace}" "${diagnostics}/gateway-shard-${SHARD}-run-${i}"
             fi
           done
 
-          echo "gateway-istio: ${runs} runs, ${failures} unexpected exit code(s)"
+          echo "gateway-istio shard ${SHARD}/${SHARDS}: ${runs} runs (of ${total} across all shards), ${failures} unexpected exit code(s)"
           if [ "${failures}" -ne 0 ]; then
-            echo "::error::${failures} of ${runs} gateway-istio runs did not exit 1"
+            echo "::error::${failures} of ${runs} gateway-istio runs in shard ${SHARD} did not exit 1"
             exit 1
           fi
 
@@ -638,7 +778,141 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4.6.2
         with:
-          name: nightly-dogfood-gateway-diagnostics
+          # Shard-suffixed for the reason `dogfood-basic`'s own upload
+          # step gives.
+          name: nightly-dogfood-gateway-diagnostics-shard-${{ matrix.shard }}
+          path: nightly-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  dogfood-migration:
+    name: Dogfood migration demo, shard ${{ matrix.shard }}/5 (5 runs, expect exit 1)
+    runs-on: ubuntu-latest
+    # Kubernetes 1.36.4, the primary: `examples/ingress-to-gateway` pins
+    # it on both sides, and `compatibility/recipes.yaml` certifies both
+    # the archived `ingress-nginx-legacy` stack and
+    # `nginx-gateway-fabric` on it.
+    #
+    # The second half of ROADMAP Task 9.8 step 4's "Gateway demos 50
+    # times" — 25 runs in five shards of 5, beside `dogfood-gateway`'s
+    # 25. New in Task 9.8: until now this demo ran only inside
+    # `.github/workflows/recipe-matrix.yml`'s weekly Tier 3
+    # `migration-demo` job, which asks whether the seeded regression is
+    # still detected and answers it once. That is a correctness question.
+    # This job asks the reliability question instead, which only
+    # repetition can answer, and it asks it of the demo with the largest
+    # asynchronous surface in the project: two DIFFERENT data planes
+    # (a legacy `ingress-nginx` controller on the baseline, NGF on the
+    # candidate), each programmed by its own controller, each probed with
+    # real HTTP through its own port-forward.
+    #
+    # Exit 1 is the pass condition:
+    # `crates/admissionlab-cli/tests/migration_demo.rs` asserts it —
+    # the candidate's `HTTPRoute` drops a route the baseline `Ingress`
+    # served, the policy grades that critical, and the run reports a
+    # policy failure.
+    #
+    # `.github/workflows/integration.yml` measures this lab at ~175 s per
+    # run on a warm reference machine, so 5 runs is ~15 minutes there. Its
+    # cost is dominated by two chart installs per run — the
+    # `ingress-nginx` chart from an HTTP repository and the NGF chart from
+    # an OCI registry — plus their images, all of which a cold
+    # GitHub-hosted runner downloads. 120 minutes is the same ~7x margin
+    # `dogfood-gateway` takes, for the same reason.
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: nightly-dogfood-migration
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Build the echo backend image
+        # Both sides route to it, and both sides side-load it from the
+        # local Docker store through the example's own `images:` list.
+        run: ./scripts/build-test-images.sh
+
+      - name: Build admissionlab (release)
+        run: cargo build --release -p admissionlab-cli --bin admissionlab
+
+      - name: Run examples/ingress-to-gateway 5 times (this shard's fifth of 25)
+        env:
+          SHARD: ${{ matrix.shard }}
+          SHARDS: "5"
+        run: |
+          set -euo pipefail
+          runs=5
+          total=$(( runs * SHARDS ))
+          binary="${GITHUB_WORKSPACE}/target/release/admissionlab"
+          diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
+          mkdir -p "${diagnostics}"
+          failures=0
+
+          for i in $(seq 1 "${runs}"); do
+            workspace="${RUNNER_TEMP}/migration-${i}"
+            reports="${workspace}/reports"
+            mkdir -p "${reports}"
+
+            status=0
+            TMPDIR="${workspace}" "${binary}" test \
+              examples/ingress-to-gateway/admissionlab.yaml \
+              --report-dir "${reports}" \
+              >"${workspace}/console.log" 2>&1 || status=$?
+
+            if [ "${status}" -eq 1 ]; then
+              echo "shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit 1 (expected — the dropped route was detected)"
+              rm -rf "${workspace}"
+            elif [ "${status}" -eq 0 ]; then
+              failures=$(( failures + 1 ))
+              echo "::error::shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit 0 — the known migration regression was NOT detected (product regression)"
+              mv "${workspace}" "${diagnostics}/migration-shard-${SHARD}-run-${i}"
+            else
+              failures=$(( failures + 1 ))
+              echo "::error::shard ${SHARD}/${SHARDS} run ${i}/${runs}: exit ${status} — the run never reached a verdict"
+              tail -n 40 "${workspace}/console.log" || true
+              mv "${workspace}" "${diagnostics}/migration-shard-${SHARD}-run-${i}"
+            fi
+          done
+
+          echo "ingress-to-gateway shard ${SHARD}/${SHARDS}: ${runs} runs (of ${total} across all shards), ${failures} unexpected exit code(s)"
+          if [ "${failures}" -ne 0 ]; then
+            echo "::error::${failures} of ${runs} ingress-to-gateway runs in shard ${SHARD} did not exit 1"
+            exit 1
+          fi
+
+      - name: Strip kubeconfigs from the collected diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          find nightly-diagnostics -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload diagnostics from failed runs
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nightly-dogfood-migration-diagnostics-shard-${{ matrix.shard }}
           path: nightly-diagnostics
           if-no-files-found: ignore
           retention-days: 14
