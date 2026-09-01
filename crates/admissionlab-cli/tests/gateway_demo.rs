@@ -609,10 +609,10 @@ fn scratch_dir(label: &str) -> PathBuf {
 #[test]
 fn the_checked_in_example_declares_exactly_one_per_side_difference() {
     let config = repo_root().join("examples/gateway-istio/admissionlab.yaml");
-    let loaded = admissionlab_spec::load_lab(&config)
-        .unwrap_or_else(|error| panic!("the example must load: {error}"));
-    let lab = admissionlab_spec::resolve_lab(loaded)
-        .unwrap_or_else(|error| panic!("the example must resolve: {error}"));
+    // The version-aware loader, because the examples are `v1beta1`
+    // documents as of Task 7.7 and because it is what the binary uses.
+    let lab = admissionlab_spec::load_any_supported_lab(&config)
+        .unwrap_or_else(|error| panic!("the example must load and resolve: {error}"));
 
     assert_eq!(lab.baseline.kubernetes, lab.candidate.kubernetes);
     assert_eq!(lab.baseline.images, lab.candidate.images);

@@ -108,7 +108,7 @@
 # for well over a minute. Every one of those gates is independently
 # meaningful; together they also happen to make the race unreachable in
 # practice.
-apiVersion: admissionlab.io/v1alpha1
+apiVersion: admissionlab.io/v1beta1
 kind: Lab
 
 baseline:
@@ -376,5 +376,10 @@ policy:
     # this lab can still report is a real one. The conjunctive rule is
     # unchanged: a candidate must be at least 1 s slower *and* at least
     # twice as slow before it counts.
-    absoluteIncrease: 1000
+    #
+    # The key carries its unit as of `admissionlab.io/v1beta1`; it was
+    # spelled `absoluteIncrease` under `v1alpha1`, with the same
+    # milliseconds behind it. An Alpha file that still says
+    # `absoluteIncrease` loads unchanged -- see `docs/schema-migrations.md`.
+    absoluteIncreaseMillis: 1000
     relativeMultiplier: 2.0

@@ -4,11 +4,12 @@
 //! Four properties are load-bearing here, and each has tests below:
 //!
 //! - **Alpha configurations still work, identically.** Every checked-in
-//!   `v1alpha1` document — including the `examples/` a user copied from,
-//!   which this task deliberately does *not* migrate — resolves through
+//!   `v1alpha1` document resolves through
 //!   [`admissionlab_spec::load_any_supported_lab`] to exactly what the
 //!   original `load_lab` + `resolve_lab` pair produced. Not "equivalently":
-//!   equal, as values.
+//!   equal, as values. Those documents live in `testdata/configs/` — see
+//!   [`valid_alpha_documents`] for why they are the proof and `examples/`
+//!   no longer is.
 //! - **The two versions describe one lab.** A hand-written `v1beta1`
 //!   twin of an Alpha file resolves to the same [`ResolvedLab`]. This is
 //!   the assertion that catches a migration which compiles, parses, and
@@ -85,19 +86,33 @@ impl Drop for TempDir {
 }
 
 /// Every checked-in `v1alpha1` lab document that is expected to load and
-/// resolve cleanly — the `testdata/configs` fixtures plus the `examples/`
-/// a user would have copied from.
+/// resolve cleanly: the living proof that an Alpha file nobody touched
+/// still runs.
 ///
-/// The `examples/` entries are the point of ROADMAP Task 7.1 Step 2:
-/// this task deliberately leaves them written in `v1alpha1` (migrating
-/// them belongs to the later documentation task), so their presence here
-/// is a standing proof that an Alpha file nobody touched still runs.
+/// **These live in `testdata/configs/`, and `examples/` is deliberately
+/// not among them any more.** ROADMAP Task 7.1 Step 2 parked the Alpha
+/// read-support proof on `examples/` because that task left them
+/// unmigrated; Task 7.7 migrates them, because the examples a user
+/// copies from must showcase the *current* version. The proof therefore
+/// moved here rather than evaporating, and
+/// `renamed-fields-v1alpha1.yaml` is deliberately the maximal one —
+/// every optional section populated, both renamed keys in their Alpha
+/// spelling, components with recipes, a full gateway suite with probes —
+/// so what is being kept alive is a realistic Alpha configuration and
+/// not a three-line stub.
 fn valid_alpha_documents() -> Vec<PathBuf> {
-    let root = workspace_root();
     vec![
         testdata_config("minimal-valid.yaml"),
         testdata_config("gateway-valid.yaml"),
         testdata_config("renamed-fields-v1alpha1.yaml"),
+    ]
+}
+
+/// The `examples/` a user copies from — every one of which must be a
+/// `v1beta1` document, and must load.
+fn example_documents() -> Vec<PathBuf> {
+    let root = workspace_root();
+    vec![
         root.join("examples/admission-basic/admissionlab.yaml"),
         root.join("examples/gateway-istio/admissionlab.yaml"),
         root.join("examples/kyverno-istio-upgrade/admissionlab.yaml"),
@@ -143,24 +158,63 @@ fn every_checked_in_alpha_document_resolves_identically_through_the_new_loader()
 }
 
 #[test]
-fn the_examples_directory_is_still_written_in_v1alpha1() {
+fn the_alpha_read_support_fixtures_really_are_alpha_documents() {
     // Not a tautology dressed as a test: the assertion above is only
     // evidence for "Alpha files keep working" for as long as those files
-    // really are Alpha files. If a later task migrates `examples/` to
-    // v1beta1 (which it may), this test fails and points at the file
-    // that has to be replaced with an Alpha fixture somewhere else, so
-    // the compatibility promise never silently stops being tested.
+    // really are Alpha files. Migrate one of them in passing and this
+    // test names it, so the compatibility promise cannot silently stop
+    // being tested by a file that quietly stopped being Alpha.
     for path in valid_alpha_documents() {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
-        if path.to_string_lossy().contains("examples/") {
-            assert!(
-                text.contains(v1alpha1::API_VERSION),
-                "{} is no longer a v1alpha1 document; the Alpha read-support test needs a \
-                 replacement fixture",
-                path.display()
-            );
-        }
+        assert!(
+            text.contains(v1alpha1::API_VERSION),
+            "{} is no longer a v1alpha1 document; the Alpha read-support proof needs a \
+             replacement fixture, and it needs to be a realistic one",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn the_examples_directory_is_written_in_the_current_v1beta1() {
+    // The reversed guard (ROADMAP Task 7.7 step 6). `examples/` is what a
+    // user copies, so it must showcase the version this release actually
+    // documents — an example still written in the previous version is
+    // how a deprecated spelling outlives its deprecation. Alpha
+    // read-support is proven by `testdata/configs/` instead, which is
+    // where a compatibility fixture belongs: nobody copies it into a
+    // repository by accident.
+    for path in example_documents() {
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
+        assert!(
+            text.contains(v1beta1::API_VERSION),
+            "{} does not declare {}; every example must showcase the current \
+             configuration version",
+            path.display(),
+            v1beta1::API_VERSION
+        );
+        assert!(
+            !text.contains(v1alpha1::API_VERSION),
+            "{} still mentions {}; migrate it, or move the comment that names the old \
+             version into docs/schema-migrations.md",
+            path.display(),
+            v1alpha1::API_VERSION
+        );
+    }
+}
+
+#[test]
+fn every_example_loads_and_resolves_through_the_version_loader() {
+    // The migration was only safe if the migrated files still work. This
+    // is the cheap half of that proof — every example parses, validates
+    // and resolves — and `admissionlab-cli`'s `#[ignore]`d `alpha_e2e`
+    // is the expensive half, driving `examples/kyverno-istio-upgrade`
+    // through two real clusters.
+    for path in example_documents() {
+        load_any_supported_lab(&path)
+            .unwrap_or_else(|e| panic!("{} must load and resolve: {e}", path.display()));
     }
 }
 

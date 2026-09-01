@@ -146,10 +146,14 @@ const LEGIBLE_ENV_VALUE: &str = "eu-west-1";
 /// the two.
 #[test]
 fn the_example_configuration_resolves_and_discovers_its_fixtures() {
-    let loaded = admissionlab_spec::load_lab(&example_config())
-        .expect("the canonical example must parse against the v1alpha1 model");
-    let lab = admissionlab_spec::resolve_lab(loaded)
-        .expect("the canonical example must resolve (paths, pinned versions, unique names)");
+    // `load_any_supported_lab`, not `load_lab`: as of Task 7.7 the
+    // examples are `admissionlab.io/v1beta1` documents, and this is the
+    // loader the binary itself uses -- the one that accepts every
+    // supported version and migrates to the current model before
+    // resolving.
+    let lab = admissionlab_spec::load_any_supported_lab(&example_config()).expect(
+        "the canonical example must load and resolve (paths, pinned versions, unique names)",
+    );
 
     assert_eq!(lab.baseline.kubernetes, lab.candidate.kubernetes);
     assert_eq!(

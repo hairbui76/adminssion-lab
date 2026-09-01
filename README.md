@@ -12,12 +12,24 @@ admitted, and the first place the two stacks diverged was
 evidence comes from real Kubernetes API servers, and nothing touches your
 production cluster.
 
-> **Public Alpha.** Admission Lab is pre-1.0. Alpha covers **admission**
-> regression only. The `admissionlab.io/result/v1alpha1` result schema is
-> **experimental** and may change without a compatibility guarantee until
-> Public Beta. Gateway API behavior comparison is **planned for Public Beta**
-> and is not available today — no Gateway behavior is produced, reported, or
-> supported by this release.
+> **Public Beta.** Admission Lab is pre-1.0. Beta covers **admission**
+> regression *and* Gateway API behavior — reconciliation and real HTTP traffic,
+> compared as separate evidence.
+>
+> The document contracts are frozen at `v1beta1` and grow only by **addition**
+> from here: a new optional field, never a rename or a removal. Configuration is
+> [`admissionlab.io/v1beta1`](schemas/admissionlab-v1beta1.json), the result is
+> [`admissionlab.io/result/v1beta1`](schemas/result-v1beta1.json), the run
+> manifest is
+> [`admissionlab.io/run-manifest/v1beta1`](schemas/run-manifest-v1beta1.json).
+> `admissionlab.io/v1alpha1` configurations still load unchanged —
+> [`docs/schema-migrations.md`](docs/schema-migrations.md) is the record.
+>
+> **Frozen is not stable.** Until v1.0, a new `apiVersion` with a migration
+> remains possible; what is ruled out is a silent change under an existing one.
+> Which Kubernetes × stack combinations this project has actually *proven* is a
+> shorter list than the ones it will happily run —
+> [`docs/compatibility.md`](docs/compatibility.md) draws that line.
 
 ---
 
@@ -30,13 +42,15 @@ production cluster.
 - [Exit codes](#exit-codes)
 - [Cleanup](#cleanup)
 - [Server-side dry-run: what it can and cannot see](#server-side-dry-run-what-it-can-and-cannot-see)
+- [Gateway: three layers of evidence](#gateway-three-layers-of-evidence)
+- [Schemas](#schemas)
 - [Documentation](#documentation)
 
 ---
 
 ## Install
 
-### From source (the Alpha path)
+### From source
 
 Admission Lab builds with the exact toolchain pinned in
 `rust-toolchain.toml`; `rustup` installs it automatically the first time you
@@ -128,11 +142,11 @@ Save this as `admissionlab.yaml`. It compares two Kyverno chart versions on the
 same Kubernetes version — the shape of almost every real upgrade question.
 
 ```yaml
-apiVersion: admissionlab.io/v1alpha1
+apiVersion: admissionlab.io/v1beta1
 kind: Lab
 
 baseline:
-  kubernetes: "1.36.4"
+  kubernetes: "1.35.8"
   components:
     - name: kyverno
       version: "3.8.2"
@@ -150,7 +164,7 @@ baseline:
           name: kyverno-resource-validating-webhook-cfg
 
 candidate:
-  kubernetes: "1.36.4"
+  kubernetes: "1.35.8"
   components:
     - name: kyverno
       version: "3.9.0"
@@ -176,6 +190,14 @@ Every path in the file — fixture globs, `expectationsFile`, manifest paths,
 Helm values files — resolves against **the configuration file's own
 directory**, never the working directory.
 
+Kubernetes `1.35.8` is not arbitrary: it is the version Admission Lab certifies
+this Kyverno chart line on. The **candidate** side above is therefore a
+certified combination; the **baseline**'s `3.8.2` is the version you are
+upgrading *from*, and nothing certifies it — which is normal, and is why a run
+like this prints a warning naming that side and then runs anyway. Admission Lab
+never refuses a combination it has not certified. See
+[`docs/compatibility.md`](docs/compatibility.md).
+
 **Do not skip `readiness`.** `helm upgrade --install` returns as soon as a
 release is applied, not when its controller is serving. A lab that replays
 fixtures inside that window compares two stacks that were not yet doing
@@ -185,7 +207,7 @@ the full reference and all five check types.
 The smallest configuration that loads at all is just five keys:
 
 ```yaml
-apiVersion: admissionlab.io/v1alpha1
+apiVersion: admissionlab.io/v1beta1
 kind: Lab
 baseline:
   kubernetes: "1.36.4"
@@ -226,15 +248,18 @@ admissionlab test admissionlab.yaml
 ```
 
 That is the whole interface. `test` takes one positional configuration path and
-three flags:
+four flags:
 
 ```
-      --keep-clusters     Preserve baseline/candidate clusters after the run
-                          instead of deleting them
-  -v, --verbose           Raise Admission Lab's own crates to `debug`-level
-                          logging (ignored when RUST_LOG is set)
-      --report-dir <DIR>  Write `result.json` and `report.html` into this
-                          directory instead of the run's own `reports/`
+      --keep-clusters          Preserve baseline/candidate clusters after the
+                               run instead of deleting them
+  -v, --verbose                Raise Admission Lab's own crates to `debug`-level
+                               logging (ignored when RUST_LOG is set)
+      --report-dir <DIR>       Write `result.json` and `report.html` into this
+                               directory instead of the run's own `reports/`
+      --github-summary <FILE>  Write a GitHub Actions job summary (Markdown) to
+                               this file. Written whatever happens, and never
+                               stating a verdict the run did not reach
 ```
 
 ---
@@ -247,20 +272,21 @@ they never disagree.
 
 Here is the terminal report for the canonical example result the report crate
 renders in `crates/admissionlab-report/tests/terminal.rs` — this is checked-in
-rendered output, not a mock-up:
+rendered output, not a mock-up. It is a lab with a `gateway:` section, so it
+shows both engines at once:
 
 ```text
-Admission Lab result  run alpha-demo-run
-schema admissionlab.io/result/v1alpha1 (experimental; stable at Beta)
+Admission Lab result  run beta-demo-run
+schema admissionlab.io/result/v1beta1 (frozen; additive changes only)
 
 Environments
   baseline   Kubernetes v1.34.1  (sidecar-injector 1.26.3)
   candidate  Kubernetes v1.34.1  (sidecar-injector 1.27.0)
 
-Summary  4 fixtures
+Summary  5 fixtures
   identical    1
   expected     1
-  warnings     0
+  warnings     1
   critical     1
   inconclusive 1
 
@@ -270,8 +296,27 @@ Critical  1
     first divergence [observed]: the container appears in inject.example.com's candidate patch
       baseline none -> candidate inject.example.com (round 0, index 0)
 
-Warnings  0
-  none
+Warnings  2
+  echo-route-contract [echo-route]
+    traffic_status_changed
+    baseline HTTP 200 from echo-v1 -> candidate HTTP 503 from echo-v1
+  echo-route-contract [echo-route]
+    traffic_status_changed
+    baseline HTTP 204 from echo-v1 -> candidate answered nothing
+
+Gateway  1 route contract(s)
+  echo-route-contract  both sides converged; differences and absences are evidence
+    baseline: converged in 4180ms
+      GatewayClass lab-gateway-class  Accepted=True (Accepted)
+      Gateway default/lab-gateway  Accepted=True (Accepted) Programmed=True (Accepted)
+      HTTPRoute default/echo-route via default/lab-gateway#http  Accepted=True (Accepted) ResolvedRefs=True (Accepted)
+      traffic: probe #0 -> HTTP 200 from echo-v1
+      traffic: probe #1 -> HTTP 204 from echo-v1
+    candidate: converged in 4180ms
+      GatewayClass lab-gateway-class  Accepted=True (Accepted)
+      Gateway default/lab-gateway  Accepted=True (Accepted) Programmed=True (Accepted)
+      HTTPRoute default/echo-route via default/lab-gateway#http  Accepted=True (Accepted) ResolvedRefs=True (Accepted)
+      traffic: probe #0 -> HTTP 503 from echo-v1
 
 Inconclusive  1
   crd-custom-resource
@@ -283,6 +328,9 @@ Stale expectations  1
 Diagnostics  2
   metrics.unavailable: per-webhook latency metrics were not scraped on the candidate side
   kubeconfig.loaded: loaded isolated kubeconfigs for both sides
+
+Stage timings
+  clusters 43.51s (baseline 41.20s, candidate 43.12s), install 96.40s, capture 6.12s (baseline 5.94s, candidate 6.11s) [4 fixture(s)/side], gateway 9.74s (baseline 9.40s, candidate 9.73s), compare 0.21s, elapsed 149.01s
 
 Result: fail
 ```
@@ -322,7 +370,7 @@ The numbering is frozen. A CI job can branch on it.
 
 | Code | Meaning | Typical cause |
 | ---: | --- | --- |
-| `0` | Completed and passed | No unexpected critical change. **Warnings still exit `0`** — Alpha has no separate "completed with warnings" code, and folding warnings into `1` would fail every job on a difference a human merely ought to see. |
+| `0` | Completed and passed | No unexpected critical change. **Warnings still exit `0`** — there is no separate "completed with warnings" code, and folding warnings into `1` would fail every job on a difference a human merely ought to see. |
 | `1` | Completed, regression policy failed | An unexpected critical change, or a `policy.failOn` category was observed. |
 | `2` | Invalid user configuration or fixture definition | A malformed `admissionlab.yaml`, an unknown `policy.failOn` name, a fixture with no `metadata.name`, a duplicate fixture ID, an unpinned Helm version, an unsupported Kubernetes version, a glob matching zero fixtures — **or a missing host prerequisite**, so that `test` and `doctor` never disagree about "you have not installed `kind`". Every check in this class runs before any cluster is created. |
 | `3` | Lab infrastructure failure | `kind`/Docker could not create a cluster, the run workspace could not be written, the report directory was not writable — **or cleanup failed.** A run that leaked a cluster never exits `0`. |
@@ -366,12 +414,12 @@ Clusters are always named `adlab-<side>-<short-run-id>`, so
 
 ## Server-side dry-run: what it can and cannot see
 
-**This is the single most important semantic limitation in Alpha. Read it
-before you trust a green run.**
+**This is the single most important semantic limitation of the admission
+engine. Read it before you trust a green run.**
 
 Admission Lab replays every admission fixture as a Kubernetes **server-side
 dry-run CREATE** (`?dryRun=All`) against a real API server. This is
-authoritative for Alpha: it runs the real admission chain — real mutating
+authoritative: it runs the real admission chain — real mutating
 webhooks, real reinvocation, real validating webhooks, real API-server
 validation — and returns the actual admitted, mutated object. There is no
 in-process simulator anywhere in the result path, and there is no fallback to a
@@ -410,13 +458,99 @@ silently switched.** Concretely:
   observed a real rejection; that is a comparable outcome, not an unsupported
   one.
 
-Fixture execution is **serial within each cluster** in Alpha, which is what
-makes audit-log correlation deterministic. Baseline and candidate run
-concurrently with each other because the two clusters are isolated.
+Fixture execution is **serial within each cluster**, which is what makes
+audit-log correlation deterministic. Baseline and candidate run concurrently
+with each other because the two clusters are isolated.
 
-Gateway behavior is different in kind — reconciliation and data-plane
-programming need durable objects — which is one reason Gateway support is
-**planned for Public Beta** rather than shipped here.
+Gateway behavior is different in kind — a controller cannot reconcile an object
+that was never persisted — so the `gateway:` suite is the roadmap's own explicit
+exception to this rule, and applies its manifests **for real**. What makes that
+safe is that the cluster is disposable and the client is built only from that
+cluster's own kubeconfig; Admission Lab never applies them anywhere else. See
+below.
+
+---
+
+## Gateway: three layers of evidence
+
+A `gateway:` section in your lab configuration adds a second engine. It observes
+Gateway API behavior as **three separate kinds of evidence**, and never lets one
+stand in for another:
+
+| Layer | The question it answers |
+| --- | --- |
+| **Admission** | What did the API server decide about each fixture object? |
+| **Reconciliation** | What did the implementation publish in `status` — which conditions, with which reasons, and did they settle? |
+| **Traffic** | What did a real HTTP request through the real data plane get back, and which backend answered it? |
+
+They are sibling sections in `result.json` (`admission`,
+`gatewayReconciliation`, `traffic`), always written, so "there was no Gateway
+suite" and "the suite produced nothing" are never the same shape.
+
+**Three things are worth knowing before you read a Gateway report:**
+
+**A status is *converged* when it has stopped changing, not when it is good.** A
+route the implementation has definitively rejected has finished reconciling: the
+evidence says `converged: true` with a `False` condition, and that is correct.
+Convergence is decided by observing the required conditions settled — `True` or
+`False`, never `Unknown`, never missing — with a **current `observedGeneration`**,
+identically across **two consecutive polls at least 250 ms apart**. A status
+whose `observedGeneration` lags its object's `generation` is *stale*: it
+describes a spec that has since changed, so it cannot converge, it raises a
+diagnostic, and it stops the comparator from reading an absent condition as a
+removed one.
+
+**`Programmed: True` does not prove traffic works.** It is the controller's
+statement about its own bookkeeping — this Gateway has been configured into the
+data plane, as far as the implementation can tell. It does not say that a
+backend exists, that it is ready, that your route's rules match, or that a
+request would be answered by the workload you meant. That is why the traffic
+probe is a *separate* layer of evidence rather than something inferred from
+conditions: the only thing that establishes a route carries traffic is a request
+that got an answer.
+
+**A probe that could not be sent is a skip with a reason, never a failure and
+never silence.** Probes are sent only when the `Gateway` is `Programmed` and the
+contract's own route parent is both `Accepted` and `ResolvedRefs`. Otherwise the
+report records the exact condition, state and controller reason that stopped it
+— `Programmed=False (AddressNotAssigned)`, say — because probing anyway would
+record the data plane's own error page (Gateway API specifies `503` for an
+unaccepted route, `500` for an unresolved backend) and then compare that
+invented status against a real one. If the other side *did* answer, that
+difference is reported as a `traffic_status_changed` finding, which is the true
+claim: the baseline answered a probe the candidate did not.
+
+[`docs/architecture.md` §7](docs/architecture.md#7-the-gateway-engine) is the
+full engine description — apply ordering, persisted-fixture isolation, endpoint
+resolution, the port-forward, and the probe contract.
+[`docs/config.md`](docs/config.md#gateway) is the field reference.
+
+---
+
+## Schemas
+
+Three versioned document families, all frozen at `v1beta1` and all checked in:
+
+| Document | `apiVersion` | Schema |
+| --- | --- | --- |
+| Lab configuration | `admissionlab.io/v1beta1` | [`schemas/admissionlab-v1beta1.json`](schemas/admissionlab-v1beta1.json) |
+| Lab configuration (previous, still readable) | `admissionlab.io/v1alpha1` | [`schemas/admissionlab-v1alpha1.json`](schemas/admissionlab-v1alpha1.json) |
+| Result (`result.json`) | `admissionlab.io/result/v1beta1` | [`schemas/result-v1beta1.json`](schemas/result-v1beta1.json) |
+| Run manifest (`run.json`) | `admissionlab.io/run-manifest/v1beta1` | [`schemas/run-manifest-v1beta1.json`](schemas/run-manifest-v1beta1.json) |
+| Run manifest (previous, still readable) | `admissionlab.io/run-manifest/v1alpha1` | [`schemas/run-manifest-v1alpha1.json`](schemas/run-manifest-v1alpha1.json) |
+
+Point your editor at the configuration schema and a wrong `apiVersion` or a
+misspelled key is flagged as you type.
+
+[`docs/schema-migrations.md`](docs/schema-migrations.md) is the contract: which
+version each document is at, what an older one still means, how a reader must
+behave on a version it does not know, and a note for every version step this
+project has taken.
+
+**`expectations.yaml` is the one exception**, and deliberately so: the
+`Expectations` document versions independently of the `Lab` one, has not been
+promoted, and is still `admissionlab.io/v1alpha1`. Changing it to match the lab
+file beside it is a configuration error.
 
 ---
 
@@ -424,11 +558,12 @@ programming need durable objects — which is one reason Gateway support is
 
 | Document | What is in it |
 | --- | --- |
-| [`docs/architecture.md`](docs/architecture.md) | As-built crate map and dependency rules, the run pipeline's stages, the evidence model, audit correlation, and why fixture execution is serial |
-| [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` v1alpha1 reference: every field, every default, path resolution, `policy`, overrides, and `expectations.yaml` |
+| [`docs/architecture.md`](docs/architecture.md) | As-built crate map and dependency rules, the run pipeline's stages, the evidence model, audit correlation, why fixture execution is serial, and the Gateway engine end to end (§7) |
+| [`docs/compatibility.md`](docs/compatibility.md) | Certified vs supported vs merely configurable: the certified table, what a certification asserts, the CI tiers, the three-minors rule, and what happens on a combination nobody certified |
+| [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` `v1beta1` reference: every field, every default, path resolution, `gateway`, `policy`, overrides, `expectations.yaml`, and how a `v1alpha1` file still loads |
 | [`docs/fixtures.md`](docs/fixtures.md) | Fixture format, discovery globs, identity and hashing, the setup-outside-the-glob pattern, and the dogfood webhook's annotation vocabulary |
 | [`docs/github-action.md`](docs/github-action.md) | The composite action: pinned/checksummed installation, every input, the artifacts it uploads on a failing run, exit-code behavior, and what the job summary says |
-| [`docs/recipes.md`](docs/recipes.md) | What a recipe is, the certified set, the capability model, override directories, and why recipes may never classify regressions |
+| [`docs/recipes.md`](docs/recipes.md) | What a recipe is, the pins each built-in recipe carries, the capability model, override directories, and why recipes may never classify regressions |
 | [`docs/schema-migrations.md`](docs/schema-migrations.md) | The three versioned document families, the pre-v1.0 compatibility rule, how a reader must behave on a version it does not know, and the migration note for every version step |
 | [`docs/security.md`](docs/security.md) | Threat model, the trust boundary around third-party charts, exactly what is redacted and what is not, and the audit-policy Secret exclusion |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Real failure modes and their fixes, keyed to the exit codes above |

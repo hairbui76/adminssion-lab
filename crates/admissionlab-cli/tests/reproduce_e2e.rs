@@ -286,11 +286,10 @@ fn reproducing_the_dogfood_run_twice_produces_the_same_semantic_result() {
 #[test]
 fn a_single_flipped_byte_in_a_real_fixture_refuses_the_reproduction() {
     let source = example_source_root();
-    let lab = admissionlab_spec::resolve_lab(
-        admissionlab_spec::load_lab(&source.join("admissionlab.yaml"))
-            .expect("the canonical example must parse"),
-    )
-    .expect("the canonical example must resolve");
+    // The version-aware loader, because the examples are `v1beta1`
+    // documents as of Task 7.7 and because it is what the binary uses.
+    let lab = admissionlab_spec::load_any_supported_lab(&source.join("admissionlab.yaml"))
+        .expect("the canonical example must load and resolve");
     let fixtures =
         admissionlab_fixtures::discover_fixtures(&lab.fixtures).expect("discover the corpus");
 

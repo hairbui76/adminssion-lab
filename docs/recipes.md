@@ -10,11 +10,12 @@ Recipes exist to save you from rediscovering that `istio/istiod` installs into
 configurations are created by its controller at runtime and not rendered by its
 chart.
 
-> **Alpha wiring status, stated up front.** Recipes are a fully implemented,
-> validated, tested format with a certified built-in set — but they are **not
-> yet wired into `admissionlab.yaml`**. The `recipe:` field on a component
-> parses and is carried through, and nothing resolves it: an explicit `install:`
-> block is required today whether or not you set it. Recipes are consumed
+> **Wiring status, stated up front.** Recipes are a fully implemented,
+> validated, tested format, three of whose recipes carry certified Kubernetes
+> rows — but they are **not yet wired into `admissionlab.yaml`**. The
+> `recipe:` field on a component parses and is carried through, and nothing
+> resolves it: an explicit `install:` block is required today whether or not you
+> set it. Recipes are consumed
 > through the Rust API and by this repository's own certification tests. Treat
 > this page as the reference for the format and for the pins the certified
 > recipes carry — pins you can copy straight into an `install:` block — not as a
@@ -26,7 +27,8 @@ chart.
 
 - [The hard rule: a recipe never classifies a regression](#the-hard-rule-a-recipe-never-classifies-a-regression)
 - [Anatomy of a recipe](#anatomy-of-a-recipe)
-- [The certified set](#the-certified-set)
+- [The recipes this project ships](#the-recipes-this-project-ships) (and
+  [`docs/compatibility.md`](compatibility.md) for what a certification means)
 - [Capability model](#capability-model)
 - [Override directories](#override-directories)
 - [Using a recipe's pins today](#using-a-recipes-pins-today)
@@ -130,18 +132,30 @@ window gets a *different, quietly wrong* result rather than an error.
 
 ---
 
-## The certified set
+## The recipes this project ships
 
-Two recipes are embedded in the compiled binary; the others ship as on-disk
-recipes because they install raw manifests from paths that only exist on disk.
+Five, of which two are embedded in the compiled binary; the others ship as
+on-disk recipes because they install raw manifests from paths that only exist on
+disk.
 
-| Recipe | Version | Install | Built in? | Notes |
-| --- | --- | --- | --- | --- |
-| `kyverno` | `3.9.0` (appVersion v1.19.0) | `kyverno/kyverno` from `https://kyverno.github.io/kyverno/`, namespace `kyverno` | yes | Installed entirely at chart defaults. Readiness gates only `kyverno-admission-controller` — the chart's other three Deployments (background, cleanup, reports) sit outside the admission path. This chart line is the last to support the legacy `ClusterPolicy`/`Policy` API its fixtures use. |
-| `istio` | `1.30.4` | `istio/istiod` from `https://istio-release.storage.googleapis.com/charts`, namespace `istio-system` | yes | **`istio/base` is deliberately omitted.** Verified empirically: `istiod` alone reaches Available, serves working sidecar injection, and logs no errors. `istio/base` supplies cluster-wide Istio CRDs this recipe's scope never touches. |
-| `test-webhook` | `0.1.0` | five raw manifests from `recipes/test-webhook/manifests/` | no — loaded as an on-disk override | Admission Lab's own deterministic dogfood webhook. Not built in because a built-in recipe's text is embedded at compile time and has no directory to resolve relative manifest paths against. |
-| `gateway-api-crds` | `1.5.1` (Gateway API) | the vendored `standard-install.yaml` bundle under `recipes/istio-gateway/gateway-api/` | no — loaded as an on-disk override | Half of the Istio Gateway API stack, composed **first**. Byte-identical to the upstream release artifact, with its SHA-256 re-checked by the recipe's own test. Declares no capability: it installs an API, not an implementation of one. |
-| `istio-gateway` | `1.30.4` | `istio/istiod` from `https://istio-release.storage.googleapis.com/charts`, namespace `istio-system` | no — composed with `gateway-api-crds` above | The other half: the same chart pin as `istio` (machine-checked against it), plus the `gatewayApi` capability and the `gatewayEndpoint` strategy that locates a Gateway's data-plane Service by its well-known `gateway.networking.k8s.io/gateway-name` label. |
+**"Ships a recipe" and "is certified" are different claims.** Three of the five
+below carry certified Kubernetes rows in
+[`compatibility/recipes.yaml`](../compatibility/recipes.yaml) — `kyverno`,
+`istio` and `istio-gateway`. The other two do not, and that is deliberate rather
+than an omission: `test-webhook` is Admission Lab's own dogfood instrument
+rather than a stack anyone compares, and `gateway-api-crds` installs
+CustomResourceDefinitions and has no behavior of its own to certify against a
+Kubernetes version independently of the implementation that serves them. See
+[`docs/compatibility.md`](compatibility.md) for the certified table and what a
+certification actually asserts.
+
+| Recipe | Version | Certified? | Install | Built in? | Notes |
+| --- | --- | --- | --- | --- | --- |
+| `kyverno` | `3.9.0` (appVersion v1.19.0) | yes — Kubernetes `1.35.8` only | `kyverno/kyverno` from `https://kyverno.github.io/kyverno/`, namespace `kyverno` | yes | Installed entirely at chart defaults. Readiness gates only `kyverno-admission-controller` — the chart's other three Deployments (background, cleanup, reports) sit outside the admission path. This chart line is the last to support the legacy `ClusterPolicy`/`Policy` API its fixtures use. |
+| `istio` | `1.30.4` | yes — `1.35.8`, `1.36.4`, `1.37.0` | `istio/istiod` from `https://istio-release.storage.googleapis.com/charts`, namespace `istio-system` | yes | **`istio/base` is deliberately omitted.** Verified empirically: `istiod` alone reaches Available, serves working sidecar injection, and logs no errors. `istio/base` supplies cluster-wide Istio CRDs this recipe's scope never touches. |
+| `test-webhook` | `0.1.0` | **no** | five raw manifests from `recipes/test-webhook/manifests/` | no — loaded as an on-disk override | Admission Lab's own deterministic dogfood webhook. Not built in because a built-in recipe's text is embedded at compile time and has no directory to resolve relative manifest paths against. |
+| `gateway-api-crds` | `1.5.1` (Gateway API) | **no** — certified as half of `istio-gateway`, never alone | the vendored `standard-install.yaml` bundle under `recipes/istio-gateway/gateway-api/` | no — loaded as an on-disk override | Half of the Istio Gateway API stack, composed **first**. Byte-identical to the upstream release artifact, with its SHA-256 re-checked by the recipe's own test. Declares no capability: it installs an API, not an implementation of one. |
+| `istio-gateway` | `1.30.4` | yes — `1.35.8`, `1.36.4`, `1.37.0` | `istio/istiod` from `https://istio-release.storage.googleapis.com/charts`, namespace `istio-system` | no — composed with `gateway-api-crds` above | The other half: the same chart pin as `istio` (machine-checked against it), plus the `gatewayApi` capability and the `gatewayEndpoint` strategy that locates a Gateway's data-plane Service by its well-known `gateway.networking.k8s.io/gateway-name` label. |
 
 `recipes/istio-gateway/` is one **stack of two components**, not one recipe: the
 schema has exactly one `install:` per recipe, so "install the CRDs, then Istio"
@@ -153,16 +167,25 @@ in the recipe files — and it is read by the certification tests at test time
 rather than copied, so a recipe and its test cannot silently drift apart. The
 `kyverno` entry is deliberately **narrower** than Admission Lab's own supported
 set, because Kyverno's own documentation for this chart line states support for
-Kubernetes v1.33–v1.35. The `istio` entry has no vendor constraint, so it is
-certified across Admission Lab's entire supported set.
+Kubernetes v1.33–v1.35 — so `kyverno` is certified on `1.35.8` and nowhere else,
+deliberately not on Admission Lab's own primary `1.36.4`. Neither `istio` nor
+`istio-gateway` has a vendor constraint to narrow them, and both are certified
+across Admission Lab's entire supported set, each on its own schedule.
+
+**Which recipe is certified on which Kubernetes version is a shorter list than
+"the recipes above" and "the versions Admission Lab provisions" —
+[`docs/compatibility.md`](compatibility.md) is that list**, together with what a
+certification actually asserts, what happens when you ask for a combination
+outside it (a warning, never a refusal), and how the matrix is proposed and
+reviewed.
 
 Each recipe directory carries a `README.md` with the full pin rationale,
 including the measurements behind the readiness ordering.
 
 ### What recipes deliberately do not support
 
-The recipe schema has no `setValues` or `valuesFiles` fields. Both certified
-recipes therefore install their chart entirely at default values. That is a
+The recipe schema has no `setValues` or `valuesFiles` fields. Every recipe here
+therefore installs its chart entirely at default values. That is a
 current limitation of the schema, stated here so you do not go looking for the
 key.
 
@@ -177,10 +200,11 @@ capabilities:
   - admission
 ```
 
-`admission` is the only capability that means anything in Alpha. `gatewayApi`
-arrives with Public Beta's Gateway suite (Phase 6) and is declared today by the
-`istio-gateway` recipe, which pairs it with the `gatewayEndpoint` metadata the
-Gateway engine needs to find a Gateway's data plane.
+Two capabilities mean something today. `admission` says the component
+participates in the admission chain. `gatewayApi` says it implements the Gateway
+API, and is declared by the `istio-gateway` recipe, which pairs it with the
+`gatewayEndpoint` metadata the Gateway engine needs to find a Gateway's data
+plane.
 
 A capability is a statement of fact, not an aspiration. The `test-webhook`
 recipe deliberately claimed **no** capability until its webhook actually
@@ -224,7 +248,7 @@ Kyverno recipe transcribed into a lab document, comparing it against the
 previous chart version:
 
 ```yaml
-apiVersion: admissionlab.io/v1alpha1
+apiVersion: admissionlab.io/v1beta1
 kind: Lab
 
 baseline:
@@ -257,12 +281,19 @@ fixtures:
     - "fixtures/kyverno/smoke/2*.yaml"
 ```
 
+Note what that lab is and is not: the *candidate* side is the certified
+`kyverno` 3.9.0 pin on a Kubernetes version `compatibility/recipes.yaml`
+certifies it on. The baseline's 3.8.2 is the version you are upgrading *from*,
+and Admission Lab certifies nothing about it — which is fine, and is exactly the
+ordinary case, but it is why a run like this prints an uncertified-combination
+warning naming that side. See [`docs/compatibility.md`](compatibility.md).
+
 **Transcribe the `readiness` list too.** A lab document's own `readiness`
 section uses the identical vocabulary, so the recipe's entries paste in
 verbatim:
 
 ```yaml
-apiVersion: admissionlab.io/v1alpha1
+apiVersion: admissionlab.io/v1beta1
 kind: Lab
 baseline:
   kubernetes: "1.35.8"

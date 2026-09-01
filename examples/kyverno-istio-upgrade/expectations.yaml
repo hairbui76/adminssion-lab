@@ -34,6 +34,17 @@
 # folding it in would make `warn` mean two unrelated things — but it is
 # visible, which is what stops this file from accumulating entries that
 # stopped applying releases ago. `alpha_e2e` asserts there are none.
+#
+# # Why this still says v1alpha1 while `admissionlab.yaml` says v1beta1
+#
+# `Expectations` is a separate document with its own version, and Phase 7
+# promoted the `Lab` document only. `admissionlab.io/v1alpha1` is the
+# version this file's loader
+# (`admissionlab_policy::expectation::resolve_expectations`) accepts, and
+# the only one -- so this line is correct, not stale, and changing it to
+# match the lab file beside it would make the run fail to start. When
+# `Expectations` is promoted, `docs/schema-migrations.md` will carry that
+# migration exactly as it carries the `Lab` one.
 apiVersion: admissionlab.io/v1alpha1
 kind: Expectations
 expectations:

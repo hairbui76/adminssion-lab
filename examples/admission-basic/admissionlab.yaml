@@ -93,7 +93,7 @@
 # Deployment still exercises real defaulting, and the ConfigMap is the
 # control — an object with nothing to default, which must come back from
 # both sides byte-identical after normalization.
-apiVersion: admissionlab.io/v1alpha1
+apiVersion: admissionlab.io/v1beta1
 kind: Lab
 
 baseline:

@@ -32,7 +32,7 @@ today.
 
 | Family | Document | Version string | Written by | Read by |
 | --- | --- | --- | --- | --- |
-| Configuration | `admissionlab.yaml` (and `expectations.yaml`) | `apiVersion: admissionlab.io/<version>` | a user, by hand | `admissionlab_spec::load_lab` |
+| Configuration | `admissionlab.yaml` (and `expectations.yaml`) | `apiVersion: admissionlab.io/<version>` | a user, by hand | `admissionlab_spec::load_any_supported_lab` |
 | Result | `result.json` | `schemaVersion: admissionlab.io/result/<version>` | `admissionlab test` | reports, CI, downstream tooling |
 | Run manifest | `run.json` | `schemaVersion: admissionlab.io/run-manifest/<version>` | `admissionlab test` | `admissionlab reproduce`, bug reports |
 
@@ -45,8 +45,8 @@ family's version carries the `admissionlab.io/` prefix and the family name.
 
 | Family | Current version | Also readable | Schema files |
 | --- | --- | --- | --- |
-| Configuration | `admissionlab.io/v1beta1` | `admissionlab.io/v1alpha1`, migrated on load | `schemas/admissionlab-*.json` |
-| Result | `admissionlab.io/result/v1beta1` | — | `schemas/result-*.json` |
+| Configuration | `admissionlab.io/v1beta1` | `admissionlab.io/v1alpha1`, migrated on load | [`schemas/admissionlab-v1beta1.json`](../schemas/admissionlab-v1beta1.json), [`schemas/admissionlab-v1alpha1.json`](../schemas/admissionlab-v1alpha1.json) |
+| Result | `admissionlab.io/result/v1beta1` | — | [`schemas/result-v1beta1.json`](../schemas/result-v1beta1.json) |
 | Run manifest | `admissionlab.io/run-manifest/v1beta1` | `admissionlab.io/run-manifest/v1alpha1`, read as-is | [`schemas/run-manifest-v1beta1.json`](../schemas/run-manifest-v1beta1.json), [`schemas/run-manifest-v1alpha1.json`](../schemas/run-manifest-v1alpha1.json) |
 
 Each family's row is maintained by the code that owns it; the run manifest row
@@ -58,6 +58,14 @@ the same change — a version bump with no line here is an incomplete one.
 Note that the three families version **independently**. A `v1beta1` run manifest
 recording a run driven by a `v1alpha1` configuration is an ordinary, correct
 document, and the manifest's own `configApiVersion` field is what says so.
+
+**Two documents inside the configuration family version independently of the
+`Lab` document too**, and both are still `admissionlab.io/v1alpha1`: the
+`Expectations` document (`expectations.yaml`) and the `FixtureMatrix` document
+(`*.matrix.yaml`, owned by `admissionlab-fixtures`). Public Beta promoted the
+`Lab` document only. Setting either of those to `v1beta1` to match a lab file
+beside it is a configuration error, not a migration — and when either is
+promoted, it gets its own note below.
 
 ---
 
@@ -206,6 +214,64 @@ a reader can make from the version string alone.
 
 One entry per version step, per family. A note says what changed, what a
 consumer must do, and what a document from the previous version still means.
+
+### Configuration: `v1alpha1` → `v1beta1` (Task 7.1)
+
+**Two fields were renamed. Nothing else changed, in either direction.**
+
+| `v1alpha1` | `v1beta1` | Type and meaning |
+| --- | --- | --- |
+| `policy.latency.absoluteIncrease` | `policy.latency.absoluteIncreaseMillis` | Unchanged: a plain integer, milliseconds, same default (`100`). |
+| `gateway.reconciliationTimeout` | `gateway.reconciliationTimeoutMillis` | Unchanged: a plain integer, milliseconds, same default (`120000`). |
+
+**Why:** both values were always milliseconds, and neither name said so. A
+reader looking at `absoluteIncrease: 50` had to open the documentation to learn
+whether that was fifty milliseconds or fifty seconds. Putting the unit in the
+name is the kind of change that is only cheap once, at a version boundary — which
+is precisely what a version boundary is for. Every other name was examined at
+the same time and deliberately kept, including `images`, `expectationsFile` and
+`failOn`.
+
+**What a user must do:** nothing, to keep running. A `v1alpha1` document loads
+unchanged. To move a file forward, change the `apiVersion` line **and** whichever
+of the two keys the file uses, together.
+
+**The two spellings do not mix, on purpose.** A `v1beta1` document containing
+`absoluteIncrease`, or a `v1alpha1` document containing `absoluteIncreaseMillis`,
+is a named parse error rather than a tolerated alias. An alias would let a file
+mean something it does not say, and would make "we renamed it" a claim in a
+changelog rather than a fact about the parser.
+
+**What a `v1alpha1` document still means:** exactly what it always did. It is
+parsed against the frozen `v1alpha1` model, migrated to the `v1beta1` model as
+pure data — no I/O, no path resolution, no defaulting — and resolved by the one
+resolver both versions share, so it produces a byte-for-byte equal resolved lab.
+Migration is total: no document the `v1alpha1` loader accepts can fail to
+migrate, which `crates/admissionlab-spec/tests/migrate_alpha_beta.rs` asserts
+over every checked-in Alpha document rather than over one hand-picked example.
+`testdata/configs/renamed-fields-v1alpha1.yaml` is kept in the repository, with
+every optional section populated, for exactly that purpose.
+
+**`expectations.yaml` was not promoted.** The `Expectations` document versions
+independently of the `Lab` one and is still `admissionlab.io/v1alpha1` — the only
+value its loader accepts. Setting it to `v1beta1` to match the lab file beside it
+is a configuration error, and when it *is* promoted, that step gets its own note
+here.
+
+### Result: → `v1beta1` (Task 7.2)
+
+The result document's first published version is `admissionlab.io/result/v1beta1`,
+so there is no migration step and no earlier schema file to keep valid. Alpha
+builds emitted `admissionlab.io/result/v1alpha1`, which was explicitly labelled
+experimental and never had a checked-in schema; a consumer holding one should
+read it as the pre-Beta document it is and not expect the `v1beta1` shape.
+
+What `v1beta1` freezes, and what a consumer can therefore rely on: three sibling
+evidence sections per fixture (`admission`, `gatewayReconciliation`, `traffic`),
+each always present — as `null` where it does not apply, never omitted — and
+stable `sc-<16hex>` semantic-change identifiers. From here the document grows by
+**addition** only. A consumer must tolerate fields it does not know; that is the
+whole of what the freeze asks of it.
 
 ### Run manifest: `v1alpha1` → `v1beta1` (Task 7.3)
 

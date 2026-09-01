@@ -21,17 +21,18 @@ enforces it is cited.
 - [4. The evidence model](#4-the-evidence-model)
 - [5. Audit correlation](#5-audit-correlation)
 - [6. Fixture execution is serial, and why](#6-fixture-execution-is-serial-and-why)
+- [7. The Gateway engine](#7-the-gateway-engine)
 
 ---
 
 ## 1. Crate map
 
-Fifteen workspace members under `crates/`. Two are stubs reserved for Phase 6
-and beyond; one exists only to be run inside a disposable cluster.
+Fifteen workspace members under `crates/`. Two of them exist only to be run
+inside a disposable cluster (`admissionlab-test-webhook`, `admissionlab-echo`).
 
 | Crate | What it owns |
 | --- | --- |
-| `admissionlab-spec` | The `admissionlab.io/v1alpha1` `Lab` document: strict model, loader, `resolve_lab`, and the JSON Schema. Owns the *resolved* install/readiness/normalization/capability vocabulary every other crate names. |
+| `admissionlab-spec` | The `Lab` document in every supported version — `admissionlab.io/v1beta1` (current) and `admissionlab.io/v1alpha1` (migrated on load) — with the strict models, `load_any_supported_lab`, `migrate_v1alpha1_to_v1beta1`, `resolve_lab`, and the JSON Schemas. Owns the *resolved* install/readiness/normalization/capability vocabulary every other crate names. |
 | `admissionlab-core` | Run identity and workspace: `RunId`/`FixtureId`/`Side`/`Diagnostic`, `ArtifactStore`/`RunPaths`, `ProcessRunner`, `RunManifest`, `StageTimings`, `RunDisposition`, and `LabRunner` — the orchestration of the stages that happen *while clusters exist*. Declares the `ClusterManager`, `StackInstaller` and `FixtureCapture` traits. |
 | `admissionlab-cluster` | `KindClusterManager`: the `kind` lifecycle, per-side kubeconfigs, node-image resolution against `compatibility/kubernetes.yaml`, and the rendered audit policy every cluster boots with. |
 | `admissionlab-installer` | Installing one side's components: `HelmInstaller`, the raw-manifest backend, the readiness probes, and `install_stack`'s ordered component loop. |
@@ -44,8 +45,8 @@ and beyond; one exists only to be run inside a disposable cluster.
 | `admissionlab-report` | `LabResult`, the single redaction pass, and the three renderers (terminal, JSON, standalone HTML) plus the GitHub job summary. |
 | `admissionlab-cli` | The `admissionlab` binary — `test`, `doctor`, `reproduce` — the exit-code mapping, and the compare-and-report assembly (`src/pipeline/`). A `[lib]` as well as a `[[bin]]`, so integration tests can drive the pipeline through fake backends. |
 | `admissionlab-test-webhook` | The deterministic dogfood webhook (PRODUCT.md §30): a container image that denies, mutates, fails, or sleeps on command, driven entirely by annotations on the fixture. It is what the project's own integration tests observe admission with; `recipes/test-webhook` is its on-disk recipe. |
-| `admissionlab-gateway` | Reserved for Phase 6. Currently one line: `#![forbid(unsafe_code)]`. |
-| `admissionlab-echo` | Reserved test fixture binary. Currently `fn main() {}`. |
+| `admissionlab-gateway` | The Gateway engine: persisting a suite's manifests in apply order (`apply`), reading Gateway API status into an observed model and deciding when it has converged (`reconcile`, `conditions`), resolving a Gateway's data-plane `Service` and forwarding a local port to it (`endpoint`, `port_forward`), sending the contracted HTTP probes (`probe`), and comparing two sides' route contracts (`diff`). Like `admissionlab-diff`, it computes differences and never grades them. |
+| `admissionlab-echo` | The deterministic HTTP echo backend the Gateway traffic probes reach: it answers `GET /healthz` and echoes every other request as JSON naming the backend that answered, configured entirely by `ADMISSIONLAB_BACKEND_ID` and `ADMISSIONLAB_ECHO_DELAY_MS`. It is what makes `expectedBackend` an observation rather than an assumption. |
 
 ---
 
@@ -64,9 +65,10 @@ admission   -> core, fixtures
 normalize   -> admission
 diff        -> admission, core, normalize, spec
 policy      -> core, diff, spec
-report      -> admission, core, diff, policy
+gateway     -> core, spec
+report      -> admission, core, diff, gateway, policy
 cli         -> every crate above
-test-webhook, gateway, echo             (leaves)
+test-webhook, echo                      (leaves — run inside a cluster)
 ```
 
 `admissionlab-cli` is the designated sink: it depends on everything and nothing
@@ -293,6 +295,14 @@ Global Constraint 15: *missing observability data is represented as
 unavailable/unknown; it must never be fabricated or presented as proven
 causality.* This is not a convention applied by hand at each call site. It is
 built into the types, in three repeated moves.
+
+The examples below are drawn from the admission evidence family. The Gateway
+family (`ReconciliationEvidence`, `HttpProbeResult`, `GatewayCaseResult`) is
+built from the same three moves and is described in
+[§7](#7-the-gateway-engine), where the specific fabrications it is guarding
+against — a missing `observedGeneration` read as current, a `Missing` condition
+read as `False`, a skipped probe read as a failed one — are what make the rules
+concrete.
 
 ### 4.1 Three states, never two
 
@@ -626,9 +636,9 @@ fixture capture ever exceeds the product target materially — the measurement i
    `audit.json`, today simply unused for matching — becomes the discriminator.
 2. **Prove the tag reaches the audit log**, in a real `kind` integration test,
    before anything depends on it.
-3. **Add a max-concurrency configuration setting defaulting to `1` until Beta**,
-   so that adopting the mechanism and adopting the concurrency remain two
-   separate, separately reversible decisions.
+3. **Add a max-concurrency configuration setting defaulting to `1`**, so that
+   adopting the mechanism and adopting the concurrency remain two separate,
+   separately reversible decisions.
 4. **Run 100 concurrent and mixed-noise cases and prove zero cross-correlation**
    — including the hard case above: several in-flight requests creating
    identically named objects.
@@ -648,3 +658,342 @@ measured, meets PRODUCT.md §33's targets with roughly 25x of headroom on the
 binding one, and buys a determinism guarantee — byte-offset audit correlation
 with zero ambiguity — that concurrency would spend. `execute.rs` and
 `capture.rs` are unchanged by this decision; the decision is that they should be.
+
+---
+
+## 7. The Gateway engine
+
+Everything above §7 is about one question: *what did an API server decide about
+one object?* The Gateway engine asks a different one — *what did a Gateway API
+implementation actually **do** with a set of objects?* — and the two are not
+variations on a theme. Admission is a request/response, observable inside one
+round trip. Gateway behavior is a controller reconciling persisted state and a
+data plane being programmed, observable only over time and only from outside.
+
+That difference shapes every decision below.
+
+### 7.1 Three layers of evidence, kept apart on purpose
+
+A Gateway route contract produces **three** independent kinds of evidence, and
+Admission Lab never lets one stand in for another:
+
+| Layer | What it observes | Where it lives |
+| --- | --- | --- |
+| **Admission** | What the API server decided about each fixture object. | `admissionlab-admission`; `result.json`'s `admission` section. |
+| **Reconciliation** | What the implementation published in `status` — the conditions, their reasons, and whether they settled. | `admissionlab_gateway::reconcile::ReconciliationEvidence`; `result.json`'s `gatewayReconciliation` section. |
+| **Traffic** | What a real HTTP request through the real data plane got back. | `admissionlab_gateway::probe::HttpProbeResult`; `result.json`'s `traffic` section. |
+
+They are **sibling sections in the result document**, always written — as
+`null`, never omitted — so that "there was no Gateway suite" and "the Gateway
+suite produced nothing" are distinguishable at the JSON level rather than by
+counting keys. The HTML report keeps them as two headings, *Reconciliation* and
+*Traffic*, for the same reason.
+
+The traffic layer carries its own three-state evidence level, mirroring §4.1's
+rule:
+
+- `observed` — both sides answered at least one probe;
+- `partial` — exactly one side did;
+- `unavailable` — neither did, because the contract declared no probe or the
+  probes never ran.
+
+`unavailable` never means "both data planes behaved the same".
+
+### 7.2 Gateway fixtures are persisted, and the disposable cluster is what makes that safe
+
+Global Constraint 16 makes server-side dry-run authoritative for *admission*
+fixtures. Gateway is the roadmap's own explicit exception, and the reason is
+mechanical rather than a preference: a dry-run `Gateway` is never seen by a
+controller, never gets a `Programmed` condition, and never programs a listener.
+Under dry-run the whole of this section would be unobservable.
+
+So the suite's manifests are applied for real, with a server-side apply
+(`Content-Type: application/apply-patch+yaml`, field manager
+`admissionlab-gateway`, forced), one object at a time, each awaited before the
+next is sent.
+
+What makes that safe is isolation, and the isolation is **cluster-level, not
+namespace-level**. The two sides are two separate `kind` clusters
+(`adlab-<side>-<short-run-id>`), each with its own kubeconfig file, and the
+Gateway client is built *only* from the `ClusterHandle`'s own kubeconfig path:
+there is no code path in `admissionlab-gateway` that reads an environment
+variable, a default kubeconfig location, or a current context. A suite cannot
+be applied to a cluster the run did not create.
+
+Two consequences worth knowing:
+
+- **Nothing is deleted at the end**, not even after a partial failure. Deleting
+  objects would race the very controllers being observed, and cluster teardown
+  is the authoritative cleanup. The recorded object list is provenance — what
+  this run put into the cluster — not a cleanup list.
+- **Every file is read, hashed and parsed before a single object is sent.** A
+  suite with a typo in its fourth manifest fails before its first one is
+  applied, rather than half-applied.
+
+### 7.3 Apply ordering, and why it overrides the installer's rule
+
+`admissionlab_installer::manifests` deliberately refuses to sort: a user's
+manifest order is a user's decision. `plan_gateway_apply` deliberately does the
+opposite, and sorts by **category**:
+
+```text
+0 Namespace   1 Secret/ConfigMap   2 Service   3 Deployment/Pod
+4 GatewayClass   5 Gateway   6 ReferenceGrant   7 HTTPRoute   8 everything else
+```
+
+Ties keep source order — the sort is stable — so within a category, and among
+kinds the table does not name, the file order you wrote is the order applied.
+
+The reason is determinism, not tidiness. An `HTTPRoute` whose `parentRefs` name
+a `Gateway` that does not exist yet gets `Accepted: False` with reason
+`NoMatchingParent` from the controller. Whether it later recovers, and how
+quickly, depends on the controller's requeue behavior — which would make the
+observed status a function of apply timing. Global Constraint 7 does not allow
+that.
+
+Two deliberate limits: categories are matched on `kind` **alone**, case
+sensitively (so Istio's `networking.istio.io/v1 Gateway` sorts with the Gateway
+API's, which is the accepted collision), and CRDs are *not* in the table at all
+— the one class of object these fixtures genuinely depend on is installed by the
+**stack under test**, not by a fixture.
+
+### 7.4 Status convergence: two polls, at least 250 ms apart
+
+The rule, from ROADMAP Task 6.4 and implemented in
+`admissionlab_gateway::reconcile`:
+
+> For the target parent, a route is converged when status has current
+> `observedGeneration` and the required positive conditions are present with
+> stable `True`/`False` values for two consecutive polls at least 250 ms apart.
+
+Concretely, all of the following must hold, twice in a row, with at least
+`STABILITY_INTERVAL` (250 ms) between the two observations:
+
+| Object | Conditions that must be present and settled |
+| --- | --- |
+| `GatewayClass` (when the `Gateway` names one) | `Accepted` |
+| `Gateway` | `Accepted`, `Programmed` |
+| `HTTPRoute`, **for the contract's own parent entry** | `Accepted`, `ResolvedRefs` |
+
+"Settled" means `True` or `False` — not `Unknown`, and not missing. "Current"
+means the condition's `observedGeneration` equals its object's
+`metadata.generation` (§7.5). The two observations must agree on the condition
+*states* and on both objects' generations; they need **not** agree on the
+`reason`, because a controller may refine a reason while its verdict stands, and
+treating that as instability would spin until the deadline.
+
+Polling starts at 100 ms and backs off, doubling, to a 2 s ceiling — so evidence
+at the deadline is never more than two seconds stale — while never sleeping past
+the deadline. The interval starts *below* the stability window on purpose:
+starting at 250 ms would add a quarter second to every route that reconciles
+instantly, for nothing.
+
+It polls rather than watches. The rule is stated in terms of polls, and more
+importantly a watch stream gives no way to say "this has not changed for 250 ms"
+without adding a timer anyway.
+
+**A timeout is evidence, not a verdict.** Exceeding
+`gateway.reconciliationTimeoutMillis` (default 120 000) returns success with
+`converged: false`, the last observation intact, and a
+`gateway.reconciliation.timeout` diagnostic. It is never an error, and it is
+never called a regression here — only a baseline/candidate comparison can decide
+what an unconverged route means, and that decision belongs to `diff` and
+`policy`.
+
+Only two things are errors: the cluster could not be queried at all, and the
+`Gateway` or `HTTPRoute` under contract never existed up to the deadline. A
+transient 404 mid-poll is retried.
+
+### 7.5 `observedGeneration`, staleness, and the zero that is never invented
+
+A condition's `observedGeneration` is `Option<i64>`. When the controller
+published none, it stays `None` — **never backfilled with the object's current
+generation**, which would silently turn every unfresh status into a fresh-looking
+one. Freshness is then computed, never stored:
+
+| Published `observedGeneration` | Freshness |
+| --- | --- |
+| equal to `metadata.generation` | `current` |
+| less than `metadata.generation` | `stale` |
+| absent | `unknown` — never assumed current |
+| *greater* than `metadata.generation` | `unknown` — within one read of one object those two cannot legitimately be in that relationship, so rather than pick which to believe, it reports that it cannot tell |
+
+When several conditions are merged, `stale` beats `unknown` beats `current`:
+`stale` is a *positive* finding about the status, and it wins.
+
+**A missing `metadata.generation` is an error**, not a defaulted `0`. It is the
+number every `observedGeneration` is compared against, so inventing one would
+turn the freshness check into a coin flip; the error names the field.
+
+Staleness has three distinct effects, and it is worth keeping them apart:
+
+1. **It prevents convergence.** A required condition that is not `current`
+   cannot form a stable snapshot at all.
+2. **It raises a diagnostic** — `gateway.reconciliation.stale_status` — saying
+   that the published status describes a spec that has since changed.
+3. **It silences absence claims in the comparator.** A condition absent from a
+   *stale* status is not evidence that it was removed, and a parent absent from
+   one is not evidence of detachment. That is what the per-side evidence level
+   (`converged` / `unconverged` / `stale`) exists to gate.
+
+There is a fourth non-fabrication rule in the same family: a condition's state
+has **four** values, not three — `True`, `False`, `Unknown`, and `Missing`.
+Collapsing `Missing` into `False` would report "the implementation rejected
+this" for a route the implementation has not read yet, which is the single most
+likely way this engine could produce a confident, well-formed, entirely
+fictional regression.
+
+### 7.6 Converged is not finished, and `Programmed` is not traffic
+
+Three claims that sound alike and are not:
+
+**Converged ≠ healthy.** A settled `False` converges. That is correct, not a
+bug: a route the implementation has definitively rejected has *finished
+reconciling*, and the evidence says so with `converged: true` and a `False`
+condition. `converged` is used for exactly one thing — deciding whether a side
+is a stable reference at all. It is never a pass.
+
+**Converged ≠ finished.** The rule answers "has this route's status stopped
+changing?", which is not the same question as "has the implementation finished?"
+Measured against a real Istio: a `Gateway` publishes a stable, current, settled
+`Programmed: False (AddressNotAssigned)` within roughly 270 ms of being applied,
+every time — and clears it a second or two later on its own. The convergence
+rule, applied once, would happily accept that snapshot. The CLI-side suite
+runner therefore re-applies the whole rule on an interval until the contract is
+carrying traffic or the deadline passes; the rule is a *stability* test, and
+stability is a necessary condition for finished, not a sufficient one.
+
+**`Programmed: True` ≠ traffic works.** `Programmed` means the implementation
+has configured this `Gateway` into the data plane and believes it can serve —
+"as far as the implementation can tell". It is a statement by the controller
+about its own bookkeeping. It does not say a backend exists, that it is ready,
+that the route's rules match, or that a request would be answered by the
+workload you meant. A `Gateway` can also be a completely valid object
+(`Accepted: True`) that no data plane has been told about
+(`Programmed: False`) — the two conditions are separate for exactly that reason.
+
+This is why traffic is a *separate layer of evidence* rather than an assertion
+derived from conditions. The only thing that establishes that a route carries
+traffic is a request that got an answer.
+
+### 7.7 Endpoint resolution → port-forward → probe
+
+Three steps, each of which can fail in a way that names what it could not do.
+
+**1. Find the data plane's `Service`.** A Gateway's data plane is a `Service`
+the implementation created, and the lab says how to find it, never guesses.
+Two strategies: `serviceBySelector` (preferred) and `serviceByName`. Two
+placeholders — `{gatewayName}` and `{gatewayNamespace}` — are substituted into
+the namespace, the name, and selector *values*. That is the complete vocabulary:
+no conditionals, no defaults, no nesting, and any other `{...}` is a load-time
+error rather than a literal. A selector value of `{gateway}` left as a literal
+would match no `Service`, read as "this Gateway has no data plane", and be
+Global Constraint 15's fabrication wearing a typo's clothes.
+
+Selector matching is done **client-side**: every `Service` in the namespace is
+listed once and matched locally, because a server-side `labelSelector` returns
+only the matches and so cannot say what it filtered out — and "no `Service`
+matched; here is everything I considered" is the error a user can act on. Zero
+matches is *not found*; several is *ambiguous*, never "the first one".
+
+Port selection has the same character. `portName` and `port` may each be given,
+and if both, they must name the same port. With neither, a `Service` exposing
+exactly one port resolves to it — choosing the only candidate is not a guess —
+and a `Service` exposing several is an error listing every one of them.
+
+**2. Forward a local port to it.** One `kubectl port-forward
+service/<name> :<remote-port> --address 127.0.0.1` per **contract** (not per
+probe), with the local port chosen by the OS and then *read back from kubectl's
+output*, because a fixed port would collide between two concurrent runs or
+between a run's own two sides.
+
+Becoming ready is bounded, at 15 seconds. Staying alive is not — the forward
+lives as long as the contract's probes. That bound is load-bearing rather than
+defensive: measured against a real cluster, `kubectl port-forward` to a
+`Service` with no ready endpoints does not fail. It waits, silently, printing
+nothing at all until it is killed. The handle kills *and reaps* the child on
+close, and closing is deliberately not conditional on the probes succeeding.
+
+**3. Send the request.** One TCP connection, one HTTP/1.1 handshake, one
+request, no redirects followed, no connection pooling. The request arrives at
+`127.0.0.1` while carrying the contract's own `Host` header — those two being
+different is the entire point, since the `Host` is what a listener's `hostname`
+and a route's `hostnames` match on. An `authorization`, `cookie` or
+`proxy-authorization` header is redacted from every rendering of the request,
+by exact name rather than by substring guessing.
+
+Only a failure to obtain a response at all is retried, and only within a
+5-second readiness window: a connection refused, reset, or closed mid-send. **A
+response is never retried, whatever it says.** The attempt count is recorded
+honestly rather than normalized away.
+
+**Which backend answered** is an observation with two gates, both required: the
+response's content type must name JSON, and the body must parse as the echo
+contract — five required keys, of which only `backend` is read, so that a
+`{"backend": "..."}` from some unrelated service cannot be mistaken for an
+answer. Anything else yields `backend: None`, which means *which workload
+answered is unknown* — never *no workload answered*, and never a guess.
+
+And the probe **asserts nothing**. A `403` is a result. `expectedStatus` and
+`expectedBackend` are validated as configuration and are never compared against
+a response by this engine: what an observed difference *means* is `policy`'s
+decision, exactly as it is for admission.
+
+### 7.8 When a probe is skipped, and why that is not silence
+
+A probe is sent only when the route is genuinely carrying traffic for its
+contract — which takes three published `True` conditions: the `Gateway`'s
+`Programmed`, the contract's parent entry's `Accepted`, and that same parent's
+`ResolvedRefs`. Anything else is recorded as a **skip, with the specific
+condition, state and controller reason that caused it**, rendered as e.g.
+`Programmed=False (AddressNotAssigned)`.
+
+The five skip reasons, in the order they are evaluated:
+
+1. the lab declares no `gatewayEndpoint` at all, so there is no data-plane
+   `Service` to send anything through;
+2. the `Gateway` is not `Programmed`;
+3. the `HTTPRoute` published no status entry for the Gateway and listener this
+   contract names;
+4. it published *several* matching entries, so which one describes the listener
+   a request would arrive on cannot be determined;
+5. the parent's `Accepted` or `ResolvedRefs` is not `True`.
+
+Skipping is not about sparing the run a request. A request *would* get an
+answer — and that answer would be the data plane's own error page. Gateway API
+specifies a `503` for a route whose parent did not accept it and a `500` for a
+rule whose backend does not resolve, so probing anyway would record a status
+that says nothing about this route's behavior and everything about the
+implementation's chosen failure code. The condition change is the finding; a
+status code invented by the same broken state is not a second, independent one.
+
+A skip is carried three ways, and all three are needed: in `probes.json` beside
+the request that was not sent, as a `gateway.probe_skipped` run diagnostic in
+the terminal report and `result.json`, and — when the *other* side did answer —
+as a `traffic_status_changed` finding. The terminal renderer prints
+`traffic: no probe was sent` rather than "none", so an empty list is never read
+as a probe that returned nothing.
+
+The asymmetry in that last case is deliberate. A probe the **baseline** answered
+and the candidate did not is reported whenever the baseline converged: that is a
+previously working traffic contract the candidate lacks. The mirror case — only
+the candidate answered — is reported only when *both* sides converged, because a
+baseline that never reconciled had no data plane to probe, and calling the
+candidate's extra answer a traffic regression would run the claim backwards.
+
+### 7.9 Where the evidence lands
+
+Per side, under the run workspace:
+
+```text
+raw/<side>/gateway/applied.json                          what this run put in the cluster
+raw/<side>/gateway/<contract-id>/reconciliation.json     conditions, freshness, converged, elapsed
+raw/<side>/gateway/<contract-id>/probes.json             { sent: [...], skipped: [...] }
+```
+
+`applied.json` is written **before the first observation**, so a run that dies
+mid-suite still says what it put in the cluster. `probes.json` holds both halves
+in one file rather than an empty file plus a diagnostic elsewhere. And
+reconciliation evidence is captured for **every** contract, before any probe,
+whether or not that contract declares one — the layers are independent, and the
+cheaper one is never conditional on the more expensive one.

@@ -4,6 +4,13 @@ A fixture is an ordinary Kubernetes object. Admission Lab replays each one as a
 **server-side dry-run CREATE** against both clusters and compares what the two
 admission chains returned.
 
+> **This page is about *admission* fixtures.** A lab's `gateway:` section names
+> a different kind of input — Gateway API manifests that are **applied for
+> real**, because a controller cannot reconcile an object that was never
+> persisted. They are not discovered by `fixtures.include`, they get no fixture
+> ID, and none of the dry-run rules below apply to them. See
+> [Gateway manifests are not fixtures](#gateway-manifests-are-not-fixtures).
+
 ---
 
 ## Contents
@@ -14,6 +21,7 @@ admission chains returned.
 - [Content hashing](#content-hashing)
 - [Setup manifests live outside the glob](#setup-manifests-live-outside-the-glob)
 - [The dry-run contract](#the-dry-run-contract)
+- [Gateway manifests are not fixtures](#gateway-manifests-are-not-fixtures)
 - [The dogfood webhook's annotation vocabulary](#the-dogfood-webhooks-annotation-vocabulary)
 
 ---
@@ -63,7 +71,7 @@ metadata:
   generateName: web-   # rejected
 ```
 
-Alpha requires a deterministic `metadata.name` on every fixture: no name-rewrite
+Admission Lab requires a deterministic `metadata.name` on every fixture: no name-rewrite
 contract exists yet that could make a generated name reproducible across runs,
 and a fixture whose identity changes every run cannot be compared between two
 clusters. If both `name` and `generateName` are set, `name` wins and the
@@ -124,7 +132,7 @@ fixtures:
   directory containing your `admissionlab.yaml`**. The working directory is
   never consulted.
 - **OR, not AND.** A file is selected if at least one pattern matches. There is
-  no `exclude` list in Alpha.
+  no `exclude` list.
 - **`*` matches `/`.** These are `globset` patterns with the separator not
   treated as literal, so `fixtures/*.yaml` also reaches nested files. Write a
   narrower pattern if that is not what you want.
@@ -164,7 +172,7 @@ dry-run does not create a namespace, so every pod fixture that follows would com
 back `404 NotFound` — an outcome about Admission Lab's own setup, not about the
 stack under test.
 
-Alpha therefore has **no first-class fixture setup stage**. The convention that
+There is therefore **no first-class fixture setup stage**. The convention that
 works, and the one this repository's own corpus uses:
 
 1. Name setup manifests so they fall **outside** your include glob. The
@@ -246,6 +254,46 @@ is already correct.
 
 See the [README's dry-run section](../README.md#server-side-dry-run-what-it-can-and-cannot-see)
 for what dry-run cannot observe at all.
+
+---
+
+## Gateway manifests are not fixtures
+
+Everything above describes the admission engine's inputs. A lab that declares a
+`gateway:` section supplies a second, different kind of input, and conflating
+the two is the fastest way to misread a Gateway report.
+
+| | Admission fixture | Gateway suite manifest |
+| --- | --- | --- |
+| Named by | `fixtures.include` globs | `gateway.manifests` paths |
+| Sent as | server-side dry-run CREATE (`dryRun=All`) | server-side **apply**, persisted, field manager `admissionlab-gateway` |
+| Persisted? | never | yes — and never deleted; cluster teardown is the cleanup |
+| Order | discovery order, replayed serially | **sorted by category**: namespaces, then config, Services, workloads, `GatewayClass`, `Gateway`, `ReferenceGrant`, `HTTPRoute`, then everything else in source order |
+| Identity | a computed fixture ID | none; a *route contract* has an `id`, the manifests do not |
+| Compared as | the admitted object that came back | published `status` conditions, plus a real HTTP probe |
+
+Why persisted rather than dry-run: a dry-run `Gateway` is never seen by a
+controller, never gets a `Programmed` condition, and never programs a listener.
+Under dry-run there would be nothing to observe at all. Global Constraint 16
+makes dry-run authoritative for *admission*; the Gateway suite is the roadmap's
+own explicit exception to it, and what makes the exception safe is that the
+cluster is disposable and the client is built only from that cluster's own
+kubeconfig.
+
+Why sorted rather than applied as written: an `HTTPRoute` whose `parentRefs`
+name a `Gateway` that does not exist yet gets `Accepted: False` with reason
+`NoMatchingParent`, and whether it recovers — and how fast — depends on the
+controller's requeue timing. That would make the observed status a function of
+apply order, which Global Constraint 7 does not allow. This is a deliberate
+override of the raw-manifest installer's rule, which refuses to sort.
+
+Setup objects behave in the opposite way from the admission side, too: a
+`Namespace` in `gateway.manifests` **does** create the namespace, because it is
+really applied. The [setup-outside-the-glob](#setup-manifests-live-outside-the-glob)
+pattern exists because a dry-run CREATE persists nothing; it is not needed here.
+
+See [`docs/config.md`](config.md#gateway) for the field reference and
+[`docs/architecture.md` §7](architecture.md#7-the-gateway-engine) for the engine.
 
 ---
 

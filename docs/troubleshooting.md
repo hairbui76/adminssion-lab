@@ -20,6 +20,7 @@ RUST_LOG=debug admissionlab test admissionlab.yaml   # RUST_LOG always wins over
 - [Exit 4 — installation and readiness](#exit-4--installation-and-readiness)
 - [Exit 5 — fixture execution](#exit-5--fixture-execution)
 - [Results that look wrong](#results-that-look-wrong)
+- [The Gateway suite](#the-gateway-suite)
 - [Keeping clusters and cleaning up by hand](#keeping-clusters-and-cleaning-up-by-hand)
 - [Where the evidence lives](#where-the-evidence-lives)
 - [The forced-failure catalog](#the-forced-failure-catalog)
@@ -126,7 +127,7 @@ The include globs selected nothing, so there is nothing to replay.
 | --- | --- |
 | `metadata.name` missing | Every fixture needs a non-empty string name. A present-but-empty or non-string name reports identically. |
 | `apiVersion` / `kind` missing | Same rule. |
-| `generateName` is not supported | Alpha requires deterministic names. Write an explicit `metadata.name`. |
+| `generateName` is not supported | Fixtures need deterministic names. Write an explicit `metadata.name`. |
 | duplicate fixture ID | Two documents slug to the same ID — the error names both files and both document indices. Rename one. Remember slugging is lossy: `a.b` and `a-b` collide. |
 | not an object | A document parsed to an array, a string, or a scalar. A YAML list at the top level is a common cause. |
 
@@ -184,7 +185,7 @@ disk fails here.
 ### A component timed out
 
 Each component gets **600 seconds** to install and become ready. This is not
-configurable in Alpha.
+configurable.
 
 - On a cold machine, image pulls dominate. Pre-pulling the chart's images, or
   simply re-running once the layers are cached, often resolves it.
@@ -319,7 +320,7 @@ is a run where nothing was in the admission path.
 
 ### `warnings` but exit `0`
 
-By design. Alpha has no separate "completed with warnings" exit code, and
+By design. There is no separate "completed with warnings" exit code, and
 folding warnings into `1` would fail every CI job on a difference a human merely
 ought to look at. The warnings are in the terminal summary, in `result.json`, and
 in the HTML report. To make a category fail, add it to `policy.failOn`.
@@ -352,6 +353,145 @@ unavailable and never as zero, and never fail a run on their own. A
 An entry in your `expectations.yaml` matched nothing this run. Usually the
 change it accounted for has been fixed and the entry can be deleted. It does not
 fail the run.
+
+---
+
+## The Gateway suite
+
+Everything in this section applies only to a lab with a `gateway:` section. The
+Gateway suite runs in its own pipeline stage (`gateway_suite`), after fixture
+capture, and a failure inside it exits `5` — the same code as a capture failure,
+for the same reason: the run could not obtain the evidence it was asked for.
+
+Its evidence lands beside the admission evidence, per side:
+
+```text
+raw/<side>/gateway/applied.json                        what this run put in the cluster
+raw/<side>/gateway/<contract-id>/reconciliation.json   conditions, freshness, converged, elapsed
+raw/<side>/gateway/<contract-id>/probes.json           { sent: [...], skipped: [...] }
+```
+
+`applied.json` is written *before* the first observation, so a run that died
+mid-suite still tells you what it put in the cluster.
+
+### A route never converged (`gateway.reconciliation.timeout`)
+
+The route did not reach a stable, current status within
+`gateway.reconciliationTimeoutMillis` (default 120 000). **This is recorded as
+evidence, not as an error and not as a regression** — the run continues, the
+last observation is kept, and only the baseline/candidate comparison decides
+what it means. A timeout on *one* side is usually the interesting finding.
+
+Read `reconciliation.json` for that contract and ask, in order:
+
+1. **Is a required condition missing or `Unknown`?** Convergence needs settled
+   (`True`/`False`) values for `Accepted`+`Programmed` on the `Gateway` and
+   `Accepted`+`ResolvedRefs` on the route's own parent entry. A `Missing`
+   condition usually means the implementation has not read the object yet —
+   which is a controller that is not running, not watching, or not the one your
+   `GatewayClass` names.
+2. **Is the status stale?** See below.
+3. **Did the stack install correctly?** A Gateway API implementation that never
+   became ready produces exactly this: objects that exist and are never
+   reconciled. The `install` stage passing only means its readiness checks
+   passed.
+
+### `gateway.reconciliation.stale_status`
+
+A required condition's `observedGeneration` is older than its object's
+`metadata.generation`: the published status describes a spec that has since
+changed. The implementation is behind, not wrong.
+
+Two consequences: the route cannot converge (a stale status is not evidence
+about the current spec), and the comparator stops treating *absences* on that
+side as evidence — a condition missing from a stale status is not proof it was
+removed. If this appears consistently, the implementation is slow to reconcile
+relative to your timeout; raise `reconciliationTimeoutMillis`.
+
+### `gateway.reconciliation.parent_absent` / `parent_ambiguous`
+
+`parent_absent`: the `HTTPRoute` published no status entry for the `Gateway` and
+listener your contract names. Either the route is not attached to that Gateway
+at all (check its `parentRefs`), or the contract's
+`gatewayNamespace`/`gatewayName`/`listenerName` do not match what it attached
+to. Admission Lab never infers the target Gateway from the route's own
+`parentRefs` — a contract that read its target out of the fixture it is testing
+could never catch that fixture pointing somewhere wrong, because it would follow
+it there.
+
+`parent_ambiguous`: *several* status entries match. Set `listenerName` on the
+contract to name the listener, by `sectionName`.
+
+### `gateway.reconciliation.gateway_class_absent`
+
+The `Gateway` names a `spec.gatewayClassName` that does not exist in the
+cluster. Usually the `GatewayClass` is in the stack's manifests rather than the
+suite's, and the stack did not install it — or the name is a typo.
+
+### `gateway.probe_skipped`
+
+No traffic probe was sent, and the diagnostic names the exact reason. This is
+never a failure; it is an absence of traffic evidence, recorded with its cause.
+The five causes:
+
+| Reason names | What to do |
+| --- | --- |
+| the lab declares no `gatewayEndpoint` | Add one. Without it *no* probe is ever sent, on any route — only reconciliation is compared. |
+| the `Gateway` is not `Programmed` | A reconciliation problem, not a traffic one. Start above. |
+| the route published no status entry for this parent | See `parent_absent`. |
+| several matching parent entries | See `parent_ambiguous`. |
+| the parent's `Accepted` or `ResolvedRefs` is not `True` | The condition and its controller reason are in the message — e.g. `ResolvedRefs=False (RefNotPermitted)` usually means a cross-namespace `backendRef` with no `ReferenceGrant`. |
+
+Probing anyway would record the data plane's own error page — Gateway API
+specifies `503` for an unaccepted route and `500` for an unresolved backend —
+and comparing that invented status against a real one would report a second,
+fake finding on top of the real condition change.
+
+### The endpoint `Service` could not be resolved
+
+Three distinct failures, and each names what it saw:
+
+- **not found** — with `serviceBySelector`, the error lists every `Service` in
+  the namespace that was considered, so a label typo is visible immediately.
+  Selector matching is done client-side precisely so that list can exist.
+- **ambiguous** — several `Service`s matched. Narrow the selector; Admission Lab
+  will not pick one.
+- **the port could not be resolved** — the `Service` exposes more than one port
+  and the strategy named neither `portName` nor `port`, or named a port the
+  `Service` does not expose. The error lists every port it does expose. A
+  `Service` with exactly one port resolves without either field, because
+  choosing the only candidate is not a guess.
+
+Remember that placeholders are a closed two-word vocabulary: `{gatewayName}` and
+`{gatewayNamespace}`, substituted into `namespace`, `name` and selector
+*values* — never into selector keys, and never into `portName`. Anything else in
+braces is a load-time error rather than a literal, which is deliberate: a
+selector value left as the literal `{gateway}` would match nothing and read as
+"this Gateway has no data plane".
+
+### The port-forward never became ready
+
+`kubectl port-forward` was started but never announced a local address within
+15 seconds. The commonest cause is a `Service` with **no ready endpoints** —
+measured directly, `kubectl port-forward` in that situation does not fail: it
+waits, silently, printing nothing at all. Add a `gateway.readiness` entry for
+the backing workload, which is what that section is for.
+
+The child process is always killed and reaped, on this path and on every probe
+path, including when a probe fails.
+
+### A probe answered, but `backend` is `null`
+
+`backend` means *which workload answered is unknown* — never *no workload
+answered*. Identification requires two things: a JSON content type, and a body
+that parses as the echo contract. A response from something that is not the
+Admission Lab echo backend will not identify itself, which is correct rather
+than broken. The `status` is still a real observation.
+
+Note also that Admission Lab never compares an observed response against
+`expectedStatus`/`expectedBackend`. Those record what a route *should* do, for a
+human reading the file; whether an observed difference matters is `policy`'s
+decision, exactly as it is for admission.
 
 ---
 

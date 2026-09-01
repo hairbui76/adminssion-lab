@@ -119,7 +119,7 @@ cluster can reach the network: pull images, phone home, call an external policy
 service. Admission Lab itself also reaches the network to add Helm repositories
 and pull charts and node images.
 
-There is no strict/offline mode in Alpha. A future one is desirable. Until then,
+There is no strict/offline mode. A future one is desirable. Until then,
 the mitigation is environmental: run in a CI environment with the network policy
 you actually want, rather than assuming the tool imposes one.
 
@@ -189,7 +189,7 @@ not an error. The empty pointer `""` addresses a payload's root and replaces the
 whole thing. Pointers run *after* the recursive rules, so a pointer's
 replacement is the last word for its location.
 
-> **Alpha limitation.** This is a library capability with no YAML surface yet.
+> **Current limitation.** This is a library capability with no YAML surface yet.
 > `admissionlab.yaml` has no `redaction:` section, so configured pointers cannot
 > be set from configuration today. Rules 1, 2, 3a, and 4 apply regardless.
 

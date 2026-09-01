@@ -473,9 +473,13 @@ pub struct UncertifiedSelection {
 /// Constraint 6.
 ///
 /// So [`validate_compatibility`] takes the supported set as data
-/// instead. The caller — `tests/compatibility.rs` and
-/// `admissionlab-cli`, both of which already have
-/// `admissionlab-cluster` — converts in one `filter`/`map`. The
+/// instead. Its caller — today exactly one, `tests/compatibility.rs`,
+/// which already depends on `admissionlab-cluster` — converts in one
+/// `filter`/`map`. (`admissionlab-cli` reads this matrix at run time
+/// through [`RecipeCompatibilityMatrix::certifies`], to warn about an
+/// uncertified combination; it deliberately does not *validate* the
+/// checked-in file, because a malformed build artifact is not a user's
+/// lab's problem.) The
 /// alternative, re-`include_str!`ing `compatibility/kubernetes.yaml`
 /// here, would put a second parser for that file in the workspace, and
 /// two parsers for one support matrix is exactly the drift this
