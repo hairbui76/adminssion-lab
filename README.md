@@ -581,6 +581,19 @@ condition that changed (`ResolvedRefs`), the reason Gateway API specifies for
 it (`RefNotPermitted`), and the traffic probe that was skipped because of it.
 Build the echo backend first with `./scripts/build-test-images.sh`.
 
+[`examples/ingress-to-gateway/`](examples/ingress-to-gateway/) is the migration
+counterpart, and the only example whose two sides run *different* stacks: the
+archived community `ingress-nginx` on the baseline, NGINX Gateway Fabric on the
+candidate, asked the same two HTTP questions. It demonstrates one behavior
+preserved, one non-portable feature accepted in writing
+(`nginx.ingress.kubernetes.io/limit-rps`, which Gateway API v1 cannot express),
+and one unintended regression — a hand-written `HTTPRoute` that accepts both
+hostnames and sends both to the same backend, where the `Ingress` served one
+from each. It exits `1` naming the *observed* backends rather than a manifest
+difference, which is the whole point: the route reconciles cleanly, every probe
+returns `200`, and no status, condition or manifest diff says anything is
+wrong.
+
 `PRODUCT.md` is the product specification, `ROADMAP.md` the implementation
 plan, and `CONTRIBUTING.md` explains how to propose changes and run the
 verification suite.

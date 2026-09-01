@@ -34,6 +34,7 @@ as you type.
 - [`install`](#install)
 - [`fixtures`](#fixtures)
 - [`gateway`](#gateway)
+- [`migration`](#migration)
 - [`policy`](#policy)
 - [Semantic change kinds and default severities](#semantic-change-kinds-and-default-severities)
 - [`expectations.yaml`](#expectationsyaml)
@@ -142,6 +143,7 @@ baseline: { ... }        # required
 candidate: { ... }       # required
 fixtures: { ... }        # required
 gateway: { ... }         # optional; omit for an admission-only lab
+migration: { ... }       # optional; omit unless migrating off Ingress
 policy: { ... }          # optional; every field defaults
 expectationsFile: ...    # optional
 ```
@@ -154,6 +156,7 @@ expectationsFile: ...    # optional
 | `candidate` | object | yes | — | The stack under test. |
 | `fixtures` | object | yes | — | Which fixtures to replay through both sides. |
 | `gateway` | object | no | none | The Gateway behavior suite. Omit the whole section for an admission-only lab; see [`gateway`](#gateway). |
+| `migration` | object | no | none | The Ingress-to-Gateway migration suite. `v1beta1` only — a `v1alpha1` document has no such key and always resolves to none. See [`migration`](#migration). |
 | `policy` | object | no | all defaults | Omit the whole section to accept every default. |
 | `expectationsFile` | path | no | none | Path to an `Expectations` document, resolved against the config file's directory. A missing file here is exit `2` — you named it, so it is your configuration at fault. |
 
@@ -503,6 +506,124 @@ equally hand-write where its data plane is.
 
 ---
 
+## `migration`
+
+The Ingress-to-Gateway migration suite: for each case, the legacy `Ingress`
+manifests applied to the **baseline** cluster, the Gateway API manifests applied
+to the **candidate** cluster, and the HTTP requests replayed through **both**.
+Omit the whole section for a lab that is not migrating off `Ingress`.
+
+**Admission Lab converts nothing.** Both halves of every case are written by a
+person, or produced by some other tool (`ingress2gateway`, a vendor's migration
+guide, a hand edit); this suite checks the conversion *you already performed*.
+That is not a missing feature waiting on a converter — a suite that generated
+the candidate manifests would compare a converter against itself, and would
+report "no behavior change" for precisely the mistakes it exists to catch.
+
+Like `gateway`, these manifests are **applied for real, not dry-run**, and are
+safe for the same reason: the disposable cluster.
+
+```yaml
+migration:
+  baseline:
+    gatewayEndpoint:                       # where the Ingress controller's
+      type: serviceByName                  # ONE SHARED data plane is
+      namespace: ingress-nginx-legacy
+      name: ingress-nginx-legacy-controller
+      portName: http
+  candidate:
+    gatewayEndpoint:                       # where the implementation's
+      type: serviceBySelector              # PER-GATEWAY data plane is
+      namespace: "{gatewayNamespace}"
+      selector:
+        gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+  cases:
+    - id: legacy-echo
+      baselineIngressManifests:
+        - baseline/ingress.yaml
+      candidateGatewayManifests:
+        - candidate/gateway.yaml
+      probes:
+        - host: migrate.example.test
+          path: /legacy/health
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-a
+      expectedNonportable:
+        - feature: nginx.ingress.kubernetes.io/limit-rps
+          reason: rate limiting moves to the platform's shared edge proxy
+```
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `cases[]` | list | yes | At least one. Every `id` unique. |
+| `baseline` / `candidate` | mapping | in practice | Each carries one [`gatewayEndpoint`](#gatewayendpoint), in the same shape and validated by the same rules as `gateway`'s. |
+
+**Two endpoint blocks, not one**, and the asymmetry is structural: an `Ingress`
+controller is *one shared* `Service` in the controller's own namespace with
+nothing to substitute, while a Gateway API implementation provisions *one
+`Service` per `Gateway`* and must be templated on the Gateway being probed. A
+single strategy cannot be both.
+
+Both blocks are **optional in the schema and required to run**. Optional,
+because they were added after the `migration:` section itself and an addition
+must leave documents written before it valid ([`docs/schema-migrations.md`](schema-migrations.md)).
+Required, because a suite with nowhere to send its probes would install two
+stacks, compare nothing, and report success — so `admissionlab test` refuses it
+in its pre-flight validation, before any cluster is created, naming the missing
+field.
+
+### `cases[]`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `id` | string | yes | Unique within the suite. Lowercase letters, digits and `-` — it is a path segment under `raw/<side>/migration/`. |
+| `baselineIngressManifests[]` | list of paths | yes | Non-empty. Applied to the baseline cluster. |
+| `candidateGatewayManifests[]` | list of paths | yes | Non-empty. Applied to the candidate cluster. Must apply **exactly one** `Gateway` and **exactly one** `HTTPRoute`: their identities are read from the manifests themselves rather than configured a second time, and two of either would make "did the route reconcile" a guess. |
+| `probes[]` | list | yes | Non-empty, and the same shape as [`gateway`'s probes](#probes). Unlike a route contract, a migration case with no probes asserts nothing at all: an `Ingress` and an `HTTPRoute` share no status vocabulary, so traffic is the only thing the two sides can be compared on. |
+| `expectedNonportable[]` | list | no | See below. |
+
+Each probe's `expectedStatus`/`expectedBackend` describe **what the baseline
+does today** — that is what "the behavior being migrated" means. The candidate
+is observed answering the same request, whatever it answers, and a difference is
+the finding.
+
+### `expectedNonportable[]`
+
+`Ingress` features you already know have no faithful Gateway API equivalent,
+each with a written justification.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `feature` | string | yes | The annotation key **verbatim** (`nginx.ingress.kubernetes.io/limit-rps`, not `limit-rps`). Non-empty, unique within its case. |
+| `reason` | string | yes | Non-empty. What the feature did, and what the migration does instead. |
+
+A declared feature that the baseline manifests really carry is reported as a
+`non_portable_feature` change with `expected: true` and graded `info`; an
+undeclared one is graded `warning`. A declaration that matches nothing is
+reported as an unmatched expectation and does not move the verdict — the
+migration analogue of a stale `expectations.yaml` entry.
+
+**This is deliberately not `expectations.yaml`.** That file selects on a
+`SemanticChangeKind`, the closed set of *admission* differences; a
+non-portability is a fact about an `Ingress`. It is also permanent where a
+regression expectation is transient: `limit-rps` does not become portable later,
+and reporting it as stale every run would train reviewers to ignore staleness.
+
+### How a migration case reaches the report and the verdict
+
+A migration case is **not** a `fixtures[]` entry in `result.json`: its findings
+are a separate change vocabulary from the semantic changes a fixture carries, so
+they live in an optional top-level `migration` array and are not counted in
+`summary`'s five buckets. They do reach `policy.disposition`, which is the run's
+verdict and what the exit code comes from — an unexplained traffic difference is
+`critical` (exit 1), an undeclared non-portability is `warning`, and a case whose
+two sides could not be compared at all is at least `warning`. See
+[`examples/ingress-to-gateway/`](../examples/ingress-to-gateway/) for a worked
+lab that produces one of each.
+
+---
+
 ## `policy`
 
 Every field defaults independently, so `policy` may be omitted entirely.
@@ -721,6 +842,7 @@ Stated so you do not go looking:
 - **Component install timeout** (fixed at 600 s), **fixture concurrency**
   (serial within each cluster, by design), **audit policy**, and the **run root**
   (`${TMPDIR}/admissionlab-runs`).
-- **`migration` section.** A reserved name with no fields; Ingress-to-Gateway
-  migration configuration is planned for v1.0 and there is nothing to configure
-  today.
+- **Migration serving and reconciliation budgets.** A `migration:` case gets two
+  minutes for its candidate route to reconcile and two minutes per side for the
+  case's probes to be served, both fixed. `gateway.reconciliationTimeout` is the
+  Gateway suite's knob and does not apply here.
