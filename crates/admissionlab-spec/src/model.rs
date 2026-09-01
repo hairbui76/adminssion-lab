@@ -116,6 +116,14 @@ pub struct LabSpec {
     /// used for this.
     #[serde(default)]
     pub expectations_file: Option<PathBuf>,
+    /// The Gateway behavior suite: which Gateway API fixtures to persist
+    /// in each side's cluster, and what each route is contracted to do.
+    /// Omit the section entirely for an admission-only lab (Global
+    /// Constraint 8: Public Alpha is admission regression only, so the
+    /// overwhelmingly common configuration has no `gateway` section at
+    /// all) — [`crate::ResolvedLab::gateway`] is then `None`.
+    #[serde(default)]
+    pub gateway: Option<GatewaySuiteSpec>,
 }
 
 /// One side (baseline or candidate) of a comparison: a Kubernetes version
@@ -552,17 +560,275 @@ mod duration_millis {
     }
 }
 
-/// Placeholder for the gateway conformance suite configuration.
+/// The Gateway behavior suite (ROADMAP Task 6.1): the Gateway API
+/// fixtures a lab persists in each side's cluster, plus the traffic
+/// contract each route is expected to satisfy.
 ///
-/// Reserved by the project's cross-task type registry so
-/// [`crate::ResolvedLab::gateway`] has a stable name to carry from the
-/// start; [`LabSpec`] has no `gateway` section yet and
-/// [`crate::resolve_lab`] always produces `None`. Phase 6 defines this
-/// type's real fields, the YAML section that populates it, and the
-/// resolution logic that fills it in. Left deliberately empty rather than
-/// guessing at fields no task has asked for yet.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct GatewaySuiteSpec {}
+/// # Why this type lives in `admissionlab-spec` and not `admissionlab-gateway`
+///
+/// ROADMAP Task 6.1 lists `crates/admissionlab-gateway/src/model.rs` as
+/// this type's file, but §1.2's cross-task type registry *also* freezes
+/// [`crate::ResolvedLab::gateway`] as an `Option<GatewaySuiteSpec>`.
+/// Those two statements can only both hold if exactly one crate defines
+/// the type and the other names it — and the direction is forced:
+/// `admissionlab-gateway` depends on `admissionlab-core`, which depends
+/// on this crate, so a `spec -> gateway` edge would be a dependency
+/// cycle Cargo rejects outright. The canonical definition therefore
+/// lives here, next to every other type a user hand-writes in
+/// `admissionlab.yaml`, and `admissionlab_gateway::model` **re-exports
+/// this exact type** rather than declaring a second one — §1.2's "these
+/// names are canonical" rule forbids a synonym, and a parallel
+/// `GatewayRouteContract`-style twin is exactly the drift that rule
+/// exists to prevent. Everything Phase 6 adds that a *user never writes*
+/// (observed conditions, reconciliation evidence, probe results) is
+/// declared in `admissionlab-gateway` itself; only the hand-written
+/// configuration surface is here. That is the same split this workspace
+/// already uses between [`ComponentSpec`] (hand-written) and
+/// [`crate::ResolvedComponent`] (runtime).
+///
+/// # One type for both the raw and the resolved stage
+///
+/// Unlike [`EnvironmentSpec`]/[`crate::ResolvedEnvironment`], there is
+/// no separate resolved twin, because §1.2 freezes the single name
+/// `GatewaySuiteSpec` on [`crate::ResolvedLab`]. The two stages are
+/// distinguished by *where the value is read from*, and the difference
+/// is confined to one field:
+///
+/// - in [`LabSpec::gateway`], every [`GatewaySuiteSpec::manifests`] path
+///   is exactly as the user wrote it (possibly relative);
+/// - in [`crate::ResolvedLab::gateway`], every path has been joined onto
+///   the configuration file's own directory by [`crate::resolve_lab`].
+///
+/// Nothing else changes between the stages: [`RouteContract`] and
+/// [`HttpProbeContract`] contain no filesystem paths at all, and
+/// [`crate::resolve_lab`] validates them in place rather than rewriting
+/// them.
+///
+/// # Traffic expectations are not regression policy
+///
+/// [`HttpProbeContract::expected_status`] and
+/// [`HttpProbeContract::expected_backend`] say what a route *should do*.
+/// They deliberately carry no severity, no `failOn` category, and no
+/// "expected regression" marker: Global Constraint 6 keeps
+/// classification out of vendor-supplied metadata, and this project
+/// already has exactly one place where a behavioral difference is graded
+/// ([`PolicySpec`], evaluated by `admissionlab-policy`) and exactly one
+/// place where a known-and-accepted difference is recorded (the
+/// expectations file, [`LabSpec::expectations_file`]). A severity field
+/// here would be a second, competing grader whose answer could disagree
+/// with the first for the same run — see [`PolicyOverrideSpec`] for the
+/// vocabulary that already exists for "this difference is acceptable".
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GatewaySuiteSpec {
+    /// Kubernetes manifest files defining the Gateway API fixture:
+    /// namespaces, backends, `GatewayClass`, `Gateway`, `HTTPRoute`, and
+    /// anything else the suite needs. Resolved against the configuration
+    /// file's own directory by [`crate::resolve_lab`], the same as every
+    /// other path in the document (see [`crate::resolve::config_directory`]).
+    /// Must not be empty — validated by [`crate::resolve_lab`], for the
+    /// same reason [`ManifestsInstallSpec::paths`] must not be: a suite
+    /// that installs nothing and calls that success is a quiet no-op.
+    ///
+    /// **These manifests are persisted, not dry-run.** Global Constraint
+    /// 16 makes server-side dry-run the authoritative *admission*
+    /// fixture mode; ROADMAP Phase 6's own execution note carves out
+    /// Gateway fixtures explicitly, because controller reconciliation
+    /// and data-plane programming require durable resources. The
+    /// isolation that makes that safe is the disposable cluster itself —
+    /// see `admissionlab_gateway::apply`'s module documentation, which
+    /// is where that statement is enforced rather than merely repeated.
+    pub manifests: Vec<PathBuf>,
+    /// The routes this suite observes and probes. Must not be empty, and
+    /// every [`RouteContract::id`] must be unique within the suite —
+    /// both validated by [`crate::resolve_lab`].
+    pub routes: Vec<RouteContract>,
+    /// How long to wait for a route to reach a stable, current status on
+    /// each side before recording it as unconverged.
+    ///
+    /// Written in YAML as a plain integer number of milliseconds
+    /// (`reconciliationTimeout: 120000`), matching
+    /// [`LatencyPolicy::absolute_increase`]'s established style rather
+    /// than serde's default `{secs, nanos}` object shape. Defaults to
+    /// [`DEFAULT_RECONCILIATION_TIMEOUT`] when omitted, and must be
+    /// non-zero — a zero timeout could never observe the two-poll
+    /// stability window `admissionlab_gateway::reconcile` requires, so
+    /// it would report every route as unconverged without ever having
+    /// looked.
+    #[serde(with = "duration_millis", default = "default_reconciliation_timeout")]
+    #[schemars(with = "u64")]
+    pub reconciliation_timeout: Duration,
+}
+
+/// The default [`GatewaySuiteSpec::reconciliation_timeout`]: two
+/// minutes.
+///
+/// Chosen to be comfortably longer than a healthy Istio Gateway
+/// reconciliation (`Accepted` and `Programmed` normally settle in
+/// seconds once the control plane is running) while still bounded, so a
+/// stuck controller fails the run in bounded time instead of hanging it.
+/// A timeout is never itself a regression verdict — see
+/// `admissionlab_gateway::reconcile`, which returns explicit
+/// `converged: false` evidence for the comparator to interpret.
+pub const DEFAULT_RECONCILIATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// [`GatewaySuiteSpec::reconciliation_timeout`]'s `serde` default. A
+/// function rather than `#[serde(default)]` because [`Duration`]'s own
+/// `Default` is zero, which this field explicitly rejects.
+const fn default_reconciliation_timeout() -> Duration {
+    DEFAULT_RECONCILIATION_TIMEOUT
+}
+
+/// One route's reconciliation and traffic contract: which `HTTPRoute`,
+/// attached to which `Gateway`, and what requests through it are
+/// expected to do.
+///
+/// # Gateway identity is always explicit
+///
+/// `gateway_namespace`/`gateway_name` are required fields with no
+/// default and no inference (ROADMAP Task 6.1 Step 2). Admission Lab
+/// never guesses the target `Gateway` from "the first `Gateway` in the
+/// manifest directory", from the route's own `parentRefs`, or from a
+/// single-Gateway fixture happening to be unambiguous. Two reasons, both
+/// load-bearing: a fixture that installs two Gateways (the realistic
+/// migration case Phase 7 exists for) has no defensible "first"; and a
+/// contract that reads its target out of the fixture it is testing can
+/// never detect the fixture pointing at the wrong Gateway, because it
+/// would follow the fixture there. The contract states the expectation;
+/// the cluster supplies the observation.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RouteContract {
+    /// A stable identifier for this contract, unique within the suite.
+    /// Used to correlate the same contract's baseline and candidate
+    /// results (see `GatewayCaseComparison` in §1.2's registry), so it
+    /// plays the role [`ComponentSpec::name`] plays for components and
+    /// must not be empty.
+    pub id: String,
+    /// The namespace of the `Gateway` this route attaches to. Explicit
+    /// and required — see this type's documentation.
+    pub gateway_namespace: String,
+    /// The name of the `Gateway` this route attaches to. Explicit and
+    /// required — see this type's documentation.
+    pub gateway_name: String,
+    /// The namespace of the `HTTPRoute` under contract.
+    pub route_namespace: String,
+    /// The name of the `HTTPRoute` under contract.
+    pub route_name: String,
+    /// Which of the `Gateway`'s listeners this contract is about, by the
+    /// listener's `name` — Gateway API's `parentRef.sectionName`.
+    ///
+    /// `None` means "whichever listener the route attached to", which is
+    /// unambiguous only while the route reports exactly one parent
+    /// status entry for this Gateway. `admissionlab_gateway::conditions`
+    /// reports an ambiguous match as ambiguous rather than picking one
+    /// (Global Constraint 15), so a multi-listener Gateway needs this
+    /// field set.
+    #[serde(default)]
+    pub listener_name: Option<String>,
+    /// The HTTP probes to send through this route once it reconciles.
+    /// May be empty: a contract that only asserts the route reconciles
+    /// (its `Accepted`/`ResolvedRefs` conditions) is a meaningful,
+    /// self-contained test, unlike an empty `manifests` list which
+    /// installs nothing at all.
+    #[serde(default)]
+    pub probes: Vec<HttpProbeContract>,
+}
+
+/// One HTTP request to send through a reconciled route, and what the
+/// response is expected to look like.
+///
+/// See [`GatewaySuiteSpec`]'s "Traffic expectations are not regression
+/// policy" section for why nothing here grades a mismatch.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct HttpProbeContract {
+    /// The `Host` header to send, which is what a Gateway API listener's
+    /// `hostname` and an `HTTPRoute`'s `hostnames` are matched against.
+    /// Required and non-empty: a Gateway that routes purely on path
+    /// still needs *some* authority in the request, and leaving it
+    /// implicit would make the probe's meaning depend on whatever
+    /// address the data plane happened to be reached at.
+    pub host: String,
+    /// The request path, which must begin with `/` — the same shape an
+    /// `HTTPRoute`'s `matches[].path.value` takes. Validated by
+    /// [`crate::resolve_lab`].
+    pub path: String,
+    /// The HTTP method, uppercase, from [`ALLOWED_HTTP_METHODS`].
+    /// Validated by [`crate::resolve_lab`]; see that constant for why
+    /// the list is closed and why case matters.
+    pub method: String,
+    /// Extra request headers to send, beyond `Host` (which is `host`
+    /// above). A [`BTreeMap`] rather than a `Vec` of pairs so the
+    /// serialized/schema order is deterministic and a repeated header
+    /// name cannot silently mean two different things. Empty by
+    /// default.
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    /// The HTTP status code the response is expected to carry. Must be a
+    /// real HTTP status code (`100..=599`) — validated by
+    /// [`crate::resolve_lab`]; see [`is_valid_http_status`].
+    pub expected_status: u16,
+    /// Which backend the request is expected to reach, as that backend
+    /// reports itself (ROADMAP Task 6.5's deterministic echo server
+    /// answers with its own identity). `None` means the contract does
+    /// not constrain *which* backend answered, only the status — a real
+    /// and sometimes correct answer for a probe asserting a 404 or a
+    /// 403, where no backend was reached at all.
+    #[serde(default)]
+    pub expected_backend: Option<String>,
+}
+
+/// The closed set of HTTP methods [`HttpProbeContract::method`] accepts,
+/// uppercase.
+///
+/// **Provenance, not invention:** this is exactly the Gateway API v1
+/// `HTTPMethod` enumeration (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`,
+/// `CONNECT`, `OPTIONS`, `TRACE`, `PATCH`) — the same nine values an
+/// `HTTPRoute`'s own `matches[].method` field accepts, which is in turn
+/// the eight methods RFC 9110 defines plus RFC 5789's `PATCH`. Keeping
+/// the probe vocabulary identical to the routing vocabulary means a
+/// probe can always be written for any method a route can match on, and
+/// never for one it cannot.
+///
+/// **An allow-list, not a deny-list**, for the reason
+/// [`crate::validate::require_pinned_helm_version`] gives for its own
+/// grammar: a typo (`GTE`) and a method this project cannot route on
+/// (`LINK`) are both rejected by the same rule, without anyone having to
+/// enumerate every wrong answer.
+///
+/// **Case-sensitive.** RFC 9110 §9.1 defines the method token as
+/// case-sensitive and the registered methods as uppercase, and Gateway
+/// API's own `HTTPMethod` enum lists only the uppercase spellings — so
+/// `get` is not a lowercase `GET`, it is a method no conformant Gateway
+/// will ever match. Accepting it here by up-casing would make a
+/// configuration that silently probes something other than what it says.
+pub const ALLOWED_HTTP_METHODS: [&str; 9] = [
+    "CONNECT", "DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE",
+];
+
+/// Whether `status` is a syntactically real HTTP status code.
+///
+/// RFC 9110 §15 fixes the three-digit range at `100..=599` and reserves
+/// each hundred for a class (`1xx` informational through `5xx` server
+/// error); no code outside that range can ever appear on the wire, so a
+/// contract naming one could never be satisfied by any response. This
+/// deliberately does **not** check the code against a registry of
+/// *assigned* codes: `599` is unassigned but perfectly reachable from a
+/// misbehaving proxy, and a lab whose whole purpose is observing what a
+/// stack really returns must be able to write that expectation down.
+///
+/// `pub` because `admissionlab_gateway` re-exports it alongside the
+/// contract types: the code that later compares an *observed* status
+/// against a contract should test membership with the same predicate
+/// that admitted the contract in the first place.
+#[must_use]
+pub const fn is_valid_http_status(status: u16) -> bool {
+    // `matches!` with a range pattern rather than `(100..=599).contains(&status)`:
+    // `RangeInclusive::contains` is not a `const fn`, and this predicate is
+    // wanted in const context.
+    matches!(status, 100..=599)
+}
 
 /// Placeholder for the migration test suite configuration.
 ///

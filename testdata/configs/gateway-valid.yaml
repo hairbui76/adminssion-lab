@@ -1,0 +1,115 @@
+# A lab that runs both engines: the admission comparison Public Alpha
+# ships, plus ROADMAP Phase 6's Gateway behavior suite.
+#
+# The `gateway` section is what Task 6.1 adds. Everything above it is an
+# ordinary admission lab and is unchanged -- a Gateway suite is an
+# addition to a lab, never a different kind of lab, which is why
+# `gateway` is one more optional top-level section rather than a separate
+# document kind.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+baseline:
+  kubernetes: "1.33.4"
+  components:
+    - name: istiod
+      version: "1.28.0"
+      install:
+        type: helm
+        chart: istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        version: "1.28.0"
+        namespace: istio-system
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+candidate:
+  kubernetes: "1.33.4"
+  components:
+    - name: istiod
+      version: "1.29.0"
+      install:
+        type: helm
+        chart: istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        version: "1.29.0"
+        namespace: istio-system
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+fixtures:
+  include:
+    - "fixtures/admission/**/*.yaml"
+
+gateway:
+  # Every path is resolved against *this file's* directory, never the
+  # process's working directory -- the same rule every other path in the
+  # document follows. These manifests are applied to the disposable
+  # cluster and left there: controller reconciliation needs durable
+  # objects, so the Gateway suite is the roadmap's own documented
+  # exception to dry-run-only fixture execution.
+  manifests:
+    - fixtures/gateway/namespace.yaml
+    - fixtures/gateway/backends/echo-a.yaml
+    - fixtures/gateway/backends/echo-b.yaml
+    - fixtures/gateway/gateway.yaml
+    - fixtures/gateway/routes.yaml
+  # Plain milliseconds, matching `policy.latency.absoluteIncrease`'s own
+  # style. Omit the field entirely to accept the two-minute default.
+  reconciliationTimeout: 90000
+  routes:
+    # The Gateway is named explicitly on every contract. Admission Lab
+    # never infers it from the route's own `parentRefs` or from "the only
+    # Gateway in the directory" -- a contract that read its target out of
+    # the fixture it is testing could never catch that fixture pointing
+    # at the wrong Gateway.
+    - id: echo-a-root
+      gatewayNamespace: gateway-lab
+      gatewayName: lab-gateway
+      routeNamespace: gateway-lab
+      routeName: echo-a
+      listenerName: http
+      probes:
+        - host: a.lab.example
+          path: /
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-a
+        - host: a.lab.example
+          path: /healthz
+          method: HEAD
+          headers:
+            x-lab-probe: reconciliation
+          expectedStatus: 200
+          expectedBackend: echo-a
+
+    - id: echo-b-prefix
+      gatewayNamespace: gateway-lab
+      gatewayName: lab-gateway
+      routeNamespace: gateway-lab
+      routeName: echo-b
+      listenerName: http
+      probes:
+        - host: b.lab.example
+          path: /api/v1/items
+          method: POST
+          expectedStatus: 201
+          expectedBackend: echo-b
+        # No `expectedBackend`: this probe asserts that an unmatched path
+        # is rejected by the Gateway itself, so no backend is reached and
+        # naming one would be an expectation nothing could satisfy.
+        - host: b.lab.example
+          path: /not-routed
+          method: GET
+          expectedStatus: 404
+
+    # A contract with no probes at all: it asserts only that the route
+    # reconciles against its Gateway. Valid on purpose -- reconciliation
+    # is the first of Phase 6's three layers and is worth testing alone.
+    - id: echo-b-second-listener
+      gatewayNamespace: gateway-lab
+      gatewayName: lab-gateway
+      routeNamespace: gateway-lab
+      routeName: echo-b
+      listenerName: http-alt

@@ -126,6 +126,10 @@ dependencies = [
 [[package]]
 name = "admissionlab-gateway"
 version = "0.1.0"
+dependencies = [
+ "admissionlab-core",
+ "admissionlab-spec",
+]
 
 [[package]]
 name = "admissionlab-installer"

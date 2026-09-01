@@ -309,6 +309,165 @@ pub(crate) fn require_component_version(
     ))
 }
 
+/// Validates a [`crate::GatewaySuiteSpec`]'s non-path content (ROADMAP
+/// Task 6.1 Steps 1-2).
+///
+/// Everything here is a *strict config* rule: it rejects a document that
+/// parsed cleanly but describes a suite no run could ever satisfy — an
+/// empty manifest list, two contracts sharing an id, a Gateway named by
+/// an empty string, a method no conformant Gateway can match, or a
+/// status code that cannot appear on the wire. Every one of these would
+/// otherwise surface much later, on a real cluster, after two `kind`
+/// clusters had already been created.
+///
+/// [`crate::resolve_lab`] resolves [`crate::GatewaySuiteSpec::manifests`]
+/// separately (paths are the one thing resolution rewrites); this
+/// function never touches them beyond the emptiness check.
+pub(crate) fn gateway_suite(
+    gateway: &crate::model::GatewaySuiteSpec,
+    path: &Path,
+) -> Result<(), SpecError> {
+    if gateway.manifests.is_empty() {
+        return Err(SpecError::validation(
+            path,
+            "gateway.manifests",
+            "must not be empty",
+        ));
+    }
+    if gateway.reconciliation_timeout.is_zero() {
+        return Err(SpecError::validation(
+            path,
+            "gateway.reconciliationTimeout",
+            "must be greater than zero (a zero timeout can never observe the two-poll \
+             stability window reconciliation requires)",
+        ));
+    }
+    if gateway.routes.is_empty() {
+        return Err(SpecError::validation(
+            path,
+            "gateway.routes",
+            "must not be empty",
+        ));
+    }
+
+    let mut seen_ids = std::collections::BTreeSet::new();
+    for (index, route) in gateway.routes.iter().enumerate() {
+        let locator = format!("gateway.routes[{index}]");
+        let id = require_non_empty(&locator, "id", &route.id, path)?;
+        if !seen_ids.insert(id.clone()) {
+            return Err(SpecError::validation(
+                path,
+                format_args!("{locator}.id"),
+                format_args!("duplicate route contract id {id:?}"),
+            ));
+        }
+        require_non_empty(&locator, "gatewayNamespace", &route.gateway_namespace, path)?;
+        require_non_empty(&locator, "gatewayName", &route.gateway_name, path)?;
+        require_non_empty(&locator, "routeNamespace", &route.route_namespace, path)?;
+        require_non_empty(&locator, "routeName", &route.route_name, path)?;
+        if let Some(listener) = &route.listener_name {
+            // Present-but-empty is rejected rather than treated as
+            // absent: `listenerName: ""` reads as a deliberate narrowing
+            // to a listener whose name is the empty string, which Gateway
+            // API's own `sectionName` (a required, non-empty
+            // `SectionName`) can never be. Silently widening it back to
+            // "any listener" would make the two spellings mean the same
+            // thing while looking different.
+            require_non_empty(&locator, "listenerName", listener, path)?;
+        }
+
+        for (probe_index, probe) in route.probes.iter().enumerate() {
+            let locator = format!("{locator}.probes[{probe_index}]");
+            require_non_empty(&locator, "host", &probe.host, path)?;
+            gateway_probe_path(&locator, &probe.path, path)?;
+            gateway_probe_method(&locator, &probe.method, path)?;
+            gateway_probe_status(&locator, probe.expected_status, path)?;
+            if let Some(backend) = &probe.expected_backend {
+                // Same reasoning as `listenerName` above: an empty
+                // `expectedBackend` would silently mean "any backend",
+                // which is already spelled by omitting the field.
+                require_non_empty(&locator, "expectedBackend", backend, path)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Requires `value` to be non-empty once trimmed, returning it trimmed.
+///
+/// A shared helper for [`gateway_suite`]'s many required string fields,
+/// mirroring [`require_component_name`]'s trim-and-return shape so a
+/// padded contract id (`" web "`) does not keep its padding in the value
+/// later used to correlate baseline and candidate results.
+fn require_non_empty(
+    locator: &str,
+    field: &str,
+    value: &str,
+    path: &Path,
+) -> Result<String, SpecError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(SpecError::validation(
+            path,
+            format_args!("{locator}.{field}"),
+            "must not be empty",
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Rejects a probe path that does not begin with `/`.
+///
+/// An `HTTPRoute`'s own `matches[].path.value` is required to start with
+/// `/` (Gateway API validates that on the CRD), and an HTTP
+/// origin-form request target is `absolute-path [ "?" query ]` — so a
+/// probe path without a leading slash could not be sent as written and
+/// could not match any route.
+fn gateway_probe_path(locator: &str, probe_path: &str, path: &Path) -> Result<(), SpecError> {
+    if !probe_path.starts_with('/') {
+        return Err(SpecError::validation(
+            path,
+            format_args!("{locator}.path"),
+            format_args!("must start with \"/\", found {probe_path:?}"),
+        ));
+    }
+    Ok(())
+}
+
+/// Rejects a probe method outside [`crate::model::ALLOWED_HTTP_METHODS`].
+///
+/// See that constant for the list's provenance (Gateway API v1's own
+/// `HTTPMethod` enumeration) and for why the comparison is
+/// case-sensitive.
+fn gateway_probe_method(locator: &str, method: &str, path: &Path) -> Result<(), SpecError> {
+    if crate::model::ALLOWED_HTTP_METHODS.contains(&method) {
+        return Ok(());
+    }
+    Err(SpecError::validation(
+        path,
+        format_args!("{locator}.method"),
+        format_args!(
+            "{method:?} is not an HTTP method a Gateway API HTTPRoute can match; use one of \
+             {} (uppercase — HTTP methods are case-sensitive)",
+            crate::model::ALLOWED_HTTP_METHODS.join(", ")
+        ),
+    ))
+}
+
+/// Rejects a probe status code outside `100..=599`. See
+/// [`crate::model::is_valid_http_status`] for the range's source and for
+/// why unassigned-but-in-range codes stay legal.
+fn gateway_probe_status(locator: &str, status: u16, path: &Path) -> Result<(), SpecError> {
+    if crate::model::is_valid_http_status(status) {
+        return Ok(());
+    }
+    Err(SpecError::validation(
+        path,
+        format_args!("{locator}.expectedStatus"),
+        format_args!("{status} is not an HTTP status code; must be in 100..=599"),
+    ))
+}
+
 /// Rejects a [`crate::LabSpec`] whose `apiVersion`/`kind` do not match the
 /// only values [`crate::load_lab`] accepts.
 pub(crate) fn api_version_and_kind(

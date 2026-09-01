@@ -29,6 +29,17 @@
       "description": "Which fixtures to replay through both environments.",
       "$ref": "#/$defs/FixtureSelectionSpec"
     },
+    "gateway": {
+      "description": "The Gateway behavior suite: which Gateway API fixtures to persist\nin each side's cluster, and what each route is contracted to do.\nOmit the section entirely for an admission-only lab (Global\nConstraint 8: Public Alpha is admission regression only, so the\noverwhelmingly common configuration has no `gateway` section at\nall) — [`crate::ResolvedLab::gateway`] is then `None`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GatewaySuiteSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "kind": {
       "description": "Must equal [`KIND`]; checked by [`crate::load_lab`] and\n`const`-locked in the generated schema (see [`kind_schema`]).",
       "type": "string",
@@ -132,6 +143,86 @@
         }
       },
       "additionalProperties": false
+    },
+    "GatewaySuiteSpec": {
+      "description": "The Gateway behavior suite (ROADMAP Task 6.1): the Gateway API\nfixtures a lab persists in each side's cluster, plus the traffic\ncontract each route is expected to satisfy.\n\n# Why this type lives in `admissionlab-spec` and not `admissionlab-gateway`\n\nROADMAP Task 6.1 lists `crates/admissionlab-gateway/src/model.rs` as\nthis type's file, but §1.2's cross-task type registry *also* freezes\n[`crate::ResolvedLab::gateway`] as an `Option<GatewaySuiteSpec>`.\nThose two statements can only both hold if exactly one crate defines\nthe type and the other names it — and the direction is forced:\n`admissionlab-gateway` depends on `admissionlab-core`, which depends\non this crate, so a `spec -> gateway` edge would be a dependency\ncycle Cargo rejects outright. The canonical definition therefore\nlives here, next to every other type a user hand-writes in\n`admissionlab.yaml`, and `admissionlab_gateway::model` **re-exports\nthis exact type** rather than declaring a second one — §1.2's \"these\nnames are canonical\" rule forbids a synonym, and a parallel\n`GatewayRouteContract`-style twin is exactly the drift that rule\nexists to prevent. Everything Phase 6 adds that a *user never writes*\n(observed conditions, reconciliation evidence, probe results) is\ndeclared in `admissionlab-gateway` itself; only the hand-written\nconfiguration surface is here. That is the same split this workspace\nalready uses between [`ComponentSpec`] (hand-written) and\n[`crate::ResolvedComponent`] (runtime).\n\n# One type for both the raw and the resolved stage\n\nUnlike [`EnvironmentSpec`]/[`crate::ResolvedEnvironment`], there is\nno separate resolved twin, because §1.2 freezes the single name\n`GatewaySuiteSpec` on [`crate::ResolvedLab`]. The two stages are\ndistinguished by *where the value is read from*, and the difference\nis confined to one field:\n\n- in [`LabSpec::gateway`], every [`GatewaySuiteSpec::manifests`] path\n  is exactly as the user wrote it (possibly relative);\n- in [`crate::ResolvedLab::gateway`], every path has been joined onto\n  the configuration file's own directory by [`crate::resolve_lab`].\n\nNothing else changes between the stages: [`RouteContract`] and\n[`HttpProbeContract`] contain no filesystem paths at all, and\n[`crate::resolve_lab`] validates them in place rather than rewriting\nthem.\n\n# Traffic expectations are not regression policy\n\n[`HttpProbeContract::expected_status`] and\n[`HttpProbeContract::expected_backend`] say what a route *should do*.\nThey deliberately carry no severity, no `failOn` category, and no\n\"expected regression\" marker: Global Constraint 6 keeps\nclassification out of vendor-supplied metadata, and this project\nalready has exactly one place where a behavioral difference is graded\n([`PolicySpec`], evaluated by `admissionlab-policy`) and exactly one\nplace where a known-and-accepted difference is recorded (the\nexpectations file, [`LabSpec::expectations_file`]). A severity field\nhere would be a second, competing grader whose answer could disagree\nwith the first for the same run — see [`PolicyOverrideSpec`] for the\nvocabulary that already exists for \"this difference is acceptable\".",
+      "type": "object",
+      "properties": {
+        "manifests": {
+          "description": "Kubernetes manifest files defining the Gateway API fixture:\nnamespaces, backends, `GatewayClass`, `Gateway`, `HTTPRoute`, and\nanything else the suite needs. Resolved against the configuration\nfile's own directory by [`crate::resolve_lab`], the same as every\nother path in the document (see [`crate::resolve::config_directory`]).\nMust not be empty — validated by [`crate::resolve_lab`], for the\nsame reason [`ManifestsInstallSpec::paths`] must not be: a suite\nthat installs nothing and calls that success is a quiet no-op.\n\n**These manifests are persisted, not dry-run.** Global Constraint\n16 makes server-side dry-run the authoritative *admission*\nfixture mode; ROADMAP Phase 6's own execution note carves out\nGateway fixtures explicitly, because controller reconciliation\nand data-plane programming require durable resources. The\nisolation that makes that safe is the disposable cluster itself —\nsee `admissionlab_gateway::apply`'s module documentation, which\nis where that statement is enforced rather than merely repeated.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "reconciliationTimeout": {
+          "description": "How long to wait for a route to reach a stable, current status on\neach side before recording it as unconverged.\n\nWritten in YAML as a plain integer number of milliseconds\n(`reconciliationTimeout: 120000`), matching\n[`LatencyPolicy::absolute_increase`]'s established style rather\nthan serde's default `{secs, nanos}` object shape. Defaults to\n[`DEFAULT_RECONCILIATION_TIMEOUT`] when omitted, and must be\nnon-zero — a zero timeout could never observe the two-poll\nstability window `admissionlab_gateway::reconcile` requires, so\nit would report every route as unconverged without ever having\nlooked.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 120000,
+          "minimum": 0
+        },
+        "routes": {
+          "description": "The routes this suite observes and probes. Must not be empty, and\nevery [`RouteContract::id`] must be unique within the suite —\nboth validated by [`crate::resolve_lab`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteContract"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "manifests",
+        "routes"
+      ]
+    },
+    "HttpProbeContract": {
+      "description": "One HTTP request to send through a reconciled route, and what the\nresponse is expected to look like.\n\nSee [`GatewaySuiteSpec`]'s \"Traffic expectations are not regression\npolicy\" section for why nothing here grades a mismatch.",
+      "type": "object",
+      "properties": {
+        "expectedBackend": {
+          "description": "Which backend the request is expected to reach, as that backend\nreports itself (ROADMAP Task 6.5's deterministic echo server\nanswers with its own identity). `None` means the contract does\nnot constrain *which* backend answered, only the status — a real\nand sometimes correct answer for a probe asserting a 404 or a\n403, where no backend was reached at all.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "expectedStatus": {
+          "description": "The HTTP status code the response is expected to carry. Must be a\nreal HTTP status code (`100..=599`) — validated by\n[`crate::resolve_lab`]; see [`is_valid_http_status`].",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "headers": {
+          "description": "Extra request headers to send, beyond `Host` (which is `host`\nabove). A [`BTreeMap`] rather than a `Vec` of pairs so the\nserialized/schema order is deterministic and a repeated header\nname cannot silently mean two different things. Empty by\ndefault.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "host": {
+          "description": "The `Host` header to send, which is what a Gateway API listener's\n`hostname` and an `HTTPRoute`'s `hostnames` are matched against.\nRequired and non-empty: a Gateway that routes purely on path\nstill needs *some* authority in the request, and leaving it\nimplicit would make the probe's meaning depend on whatever\naddress the data plane happened to be reached at.",
+          "type": "string"
+        },
+        "method": {
+          "description": "The HTTP method, uppercase, from [`ALLOWED_HTTP_METHODS`].\nValidated by [`crate::resolve_lab`]; see that constant for why\nthe list is closed and why case matters.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The request path, which must begin with `/` — the same shape an\n`HTTPRoute`'s `matches[].path.value` takes. Validated by\n[`crate::resolve_lab`].",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "path",
+        "method",
+        "expectedStatus"
+      ]
     },
     "InstallMethodSpec": {
       "description": "The user-facing YAML form of a component's install method.\n\nThis is intentionally minimal: enough to express the two Alpha\ninstallers — a Helm chart, or a fixed set of raw manifests — exactly\nas a user would write them by hand. [`crate::InstallMethod`] is the\nseparate *resolved* form the installer actually consumes; the two are\ndistinct types by design and must not be merged or aliased.\n\nRepresented as an internally tagged enum (a `type` discriminant field\nalongside the variant's own fields), not the more common\nexternally-tagged `{helm: {...}}` shape: `serde_yaml`/`serde_norway`\nonly support externally tagged enums via an explicit YAML type tag\n(`!Helm ...`), not a wrapping single-key mapping, so external tagging\ncannot represent this the way a hand-written YAML config wants to.\nInternally tagged enums use a format-agnostic buffering strategy that\nworks with a plain mapping, giving both a natural YAML shape:\n\n```yaml\ninstall:\n  type: helm\n  chart: cert-manager\n  repo: https://charts.jetstack.io\n```\n\nand a strict one: an unrecognized `type` or a misspelled field inside\nthe variant is still a loud, named error.",
@@ -466,6 +557,55 @@
             "status"
           ]
         }
+      ]
+    },
+    "RouteContract": {
+      "description": "One route's reconciliation and traffic contract: which `HTTPRoute`,\nattached to which `Gateway`, and what requests through it are\nexpected to do.\n\n# Gateway identity is always explicit\n\n`gateway_namespace`/`gateway_name` are required fields with no\ndefault and no inference (ROADMAP Task 6.1 Step 2). Admission Lab\nnever guesses the target `Gateway` from \"the first `Gateway` in the\nmanifest directory\", from the route's own `parentRefs`, or from a\nsingle-Gateway fixture happening to be unambiguous. Two reasons, both\nload-bearing: a fixture that installs two Gateways (the realistic\nmigration case Phase 7 exists for) has no defensible \"first\"; and a\ncontract that reads its target out of the fixture it is testing can\nnever detect the fixture pointing at the wrong Gateway, because it\nwould follow the fixture there. The contract states the expectation;\nthe cluster supplies the observation.",
+      "type": "object",
+      "properties": {
+        "gatewayName": {
+          "description": "The name of the `Gateway` this route attaches to. Explicit and\nrequired — see this type's documentation.",
+          "type": "string"
+        },
+        "gatewayNamespace": {
+          "description": "The namespace of the `Gateway` this route attaches to. Explicit\nand required — see this type's documentation.",
+          "type": "string"
+        },
+        "id": {
+          "description": "A stable identifier for this contract, unique within the suite.\nUsed to correlate the same contract's baseline and candidate\nresults (see `GatewayCaseComparison` in §1.2's registry), so it\nplays the role [`ComponentSpec::name`] plays for components and\nmust not be empty.",
+          "type": "string"
+        },
+        "listenerName": {
+          "description": "Which of the `Gateway`'s listeners this contract is about, by the\nlistener's `name` — Gateway API's `parentRef.sectionName`.\n\n`None` means \"whichever listener the route attached to\", which is\nunambiguous only while the route reports exactly one parent\nstatus entry for this Gateway. `admissionlab_gateway::conditions`\nreports an ambiguous match as ambiguous rather than picking one\n(Global Constraint 15), so a multi-listener Gateway needs this\nfield set.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "probes": {
+          "description": "The HTTP probes to send through this route once it reconciles.\nMay be empty: a contract that only asserts the route reconciles\n(its `Accepted`/`ResolvedRefs` conditions) is a meaningful,\nself-contained test, unlike an empty `manifests` list which\ninstalls nothing at all.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HttpProbeContract"
+          }
+        },
+        "routeName": {
+          "description": "The name of the `HTTPRoute` under contract.",
+          "type": "string"
+        },
+        "routeNamespace": {
+          "description": "The namespace of the `HTTPRoute` under contract.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "gatewayNamespace",
+        "gatewayName",
+        "routeNamespace",
+        "routeName"
       ]
     }
   }

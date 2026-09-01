@@ -66,9 +66,10 @@ pub struct LoadedLab {
 /// on [`crate::PolicyOverrideSpec`] names a location *within* a compared
 /// object, not on disk), so there is nothing for this step to resolve.
 ///
-/// `gateway` and `migration` are always `None` today: [`LabSpec`] has no
-/// YAML section feeding them yet. See [`crate::GatewaySuiteSpec`] and
-/// [`crate::MigrationSuiteSpec`] for why the fields exist regardless.
+/// `migration` is always `None` today: [`LabSpec`] has no YAML section
+/// feeding it yet. See [`crate::MigrationSuiteSpec`] for why the field
+/// exists regardless. `gateway` is real as of ROADMAP Task 6.1 and is
+/// `Some` exactly when the document has a `gateway:` section.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLab {
     /// The path this configuration was loaded from, exactly as
@@ -86,8 +87,11 @@ pub struct ResolvedLab {
     /// The expectations file path, resolved against the configuration
     /// file's directory if it was written as a relative path.
     pub expectations_file: Option<PathBuf>,
-    /// Reserved for Phase 6's gateway conformance suite; always `None`
-    /// until that phase adds a YAML section to populate it.
+    /// The Gateway behavior suite, if the document declared one, with
+    /// every [`GatewaySuiteSpec::manifests`] path resolved against the
+    /// configuration file's own directory. `None` for an admission-only
+    /// lab. See [`GatewaySuiteSpec`] for why the raw and resolved
+    /// stages share one type.
     pub gateway: Option<GatewaySuiteSpec>,
     /// Reserved for Phase 6's migration test suite; always `None` until
     /// that phase adds a YAML section to populate it.
@@ -151,6 +155,10 @@ pub fn resolve_lab(loaded: LoadedLab) -> Result<ResolvedLab, SpecError> {
     let expectations_file = raw
         .expectations_file
         .map(|path| resolve_relative(&config_dir, path));
+    let gateway = raw
+        .gateway
+        .map(|gateway| resolve_gateway(gateway, &config_dir, &source_path))
+        .transpose()?;
 
     Ok(ResolvedLab {
         source_path,
@@ -159,7 +167,7 @@ pub fn resolve_lab(loaded: LoadedLab) -> Result<ResolvedLab, SpecError> {
         fixtures,
         policy: raw.policy,
         expectations_file,
-        gateway: None,
+        gateway,
         migration: None,
     })
 }
@@ -228,6 +236,37 @@ fn resolve_environment(
     Ok(ResolvedEnvironment {
         kubernetes,
         components,
+    })
+}
+
+/// Validates a [`GatewaySuiteSpec`] and resolves its manifest paths
+/// against the configuration file's own directory (ROADMAP Task 6.1).
+///
+/// Consumes `raw` and returns the same type with `manifests` rewritten —
+/// see [`GatewaySuiteSpec`]'s "One type for both the raw and the
+/// resolved stage" section for why there is no separate resolved twin.
+/// Validation runs *before* path resolution so an error message quotes
+/// the manifest list the user actually wrote rather than a joined
+/// absolute path they never typed.
+fn resolve_gateway(
+    raw: GatewaySuiteSpec,
+    config_dir: &Path,
+    source_path: &Path,
+) -> Result<GatewaySuiteSpec, SpecError> {
+    validate::gateway_suite(&raw, source_path)?;
+
+    let GatewaySuiteSpec {
+        manifests,
+        routes,
+        reconciliation_timeout,
+    } = raw;
+    Ok(GatewaySuiteSpec {
+        manifests: manifests
+            .into_iter()
+            .map(|path| resolve_relative(config_dir, path))
+            .collect(),
+        routes,
+        reconciliation_timeout,
     })
 }
 

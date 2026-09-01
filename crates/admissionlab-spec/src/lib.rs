@@ -15,6 +15,17 @@
 //! - [`v1alpha1_json_schema`] generates the JSON Schema checked in at
 //!   `schemas/admissionlab-v1alpha1.json`.
 //!
+//! # The `gateway` section lives here, but Gateway *behavior* does not
+//!
+//! [`GatewaySuiteSpec`], [`RouteContract`], and [`HttpProbeContract`]
+//! (ROADMAP Task 6.1) are defined in [`model`] alongside every other
+//! hand-written configuration type, and `admissionlab_gateway::model`
+//! re-exports them rather than declaring twins. See
+//! [`GatewaySuiteSpec`]'s own documentation for why the definition has
+//! to live on this side of the dependency graph, and for the line
+//! between "what a user writes" (here) and "what a cluster was observed
+//! to do" (`admissionlab-gateway`).
+//!
 //! This crate defines the configuration *contract* only. It does not
 //! implement recipe resolution, installers, fixture discovery, policy
 //! evaluation, or expectations loading — those belong to the later tasks
@@ -50,10 +61,11 @@ pub use component::{
 pub use error::SpecError;
 pub use load::load_lab;
 pub use model::{
-    ComponentSpec, CustomResourceConditionSpec, EnvironmentSpec, FixtureSelectionSpec,
-    GatewaySuiteSpec, HelmInstallSpec, InstallMethodSpec, LabSpec, LatencyPolicy,
+    ALLOWED_HTTP_METHODS, ComponentSpec, CustomResourceConditionSpec,
+    DEFAULT_RECONCILIATION_TIMEOUT, EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec,
+    HelmInstallSpec, HttpProbeContract, InstallMethodSpec, LabSpec, LatencyPolicy,
     ManifestsInstallSpec, MigrationSuiteSpec, NamedObjectSpec, NamespacedObjectSpec,
-    PolicyOverrideSpec, PolicySpec, ReadinessCheckSpec,
+    PolicyOverrideSpec, PolicySpec, ReadinessCheckSpec, RouteContract, is_valid_http_status,
 };
 pub use resolve::{
     LoadedLab, ResolvedEnvironment, ResolvedFixtureSelection, ResolvedLab, resolve_lab,

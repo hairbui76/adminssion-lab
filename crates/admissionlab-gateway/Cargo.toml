@@ -7,3 +7,39 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+[dependencies]
+# `model.rs` (Task 6.1) re-exports `admissionlab_spec::GatewaySuiteSpec`,
+# `RouteContract`, and `HttpProbeContract` rather than declaring twins:
+# §1.2's registry freezes `GatewaySuiteSpec` on
+# `admissionlab_spec::ResolvedLab`, and a `spec -> gateway` edge would be
+# a cycle (this crate depends on `admissionlab-core`, which depends on
+# `admissionlab-spec`), so the canonical definition has to live in
+# `admissionlab-spec` and be named from here. §1.1 draws this crate's
+# edges as `gateway -> cluster/fixtures/core domain types` and does not
+# list `spec` -- but `spec` is already in this crate's graph transitively
+# through `core`, so this promotes an existing transitive dependency to a
+# direct one rather than adding a new arrow to the graph. See
+# `admissionlab_spec::GatewaySuiteSpec`'s own documentation for the
+# ownership argument in full.
+admissionlab-spec = { workspace = true }
+# `model.rs` uses no `admissionlab-core` type yet; Tasks 6.2/6.4 do
+# (`ClusterHandle` and `Diagnostic` are both in their roadmap-frozen
+# signatures). The edge is declared here, with Task 6.1, because it is
+# the edge §1.1 draws for this crate (`gateway -> cluster/fixtures/core
+# domain types`) and because it is what makes `admissionlab-spec`, above,
+# an already-transitive dependency rather than a new one.
+#
+# §1.1 *also* lists `core -> gateway  # only used after Gateway feature
+# is enabled`, which cannot coexist with this edge -- Cargo rejects the
+# cycle outright. This workspace has already resolved exactly that shape
+# once, in the same direction: `admissionlab-core`'s own `run.rs`
+# documents why the compare-and-report half of the pipeline is assembled
+# in `admissionlab-cli` rather than in `core`, and
+# `admissionlab_core::FixtureCapture` is the pattern for the case where
+# `core` genuinely must drive a higher crate -- a trait declared in
+# `core` using only core-visible types and implemented in the higher
+# crate. Whoever integrates the Gateway suite into an orchestrated run
+# (Task 6.10 and later) must use that shape. A literal `core -> gateway`
+# dependency must never be added.
+admissionlab-core = { workspace = true }
