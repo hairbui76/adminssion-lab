@@ -29,6 +29,10 @@ RUST_LOG=debug admissionlab test admissionlab.yaml   # RUST_LOG always wins over
 
 ## Exit code quick reference
 
+**This table is frozen for v1.** Every `admissionlab` command answers with one
+of these seven codes and no others, the meanings will not be reassigned, and no
+eighth code will be added. Write your CI gate against it.
+
 | Code | Meaning |
 | ---: | --- |
 | `0` | Passed. Warnings still exit `0`. |
@@ -41,6 +45,35 @@ RUST_LOG=debug admissionlab test admissionlab.yaml   # RUST_LOG always wins over
 
 Everything in the `2` class is checked **before any cluster is created**, so
 those failures are fast and cost nothing.
+
+Four rules go with the table, and each one is deliberate:
+
+- **A usage error is exit `2`.** An unknown flag, a missing `<CONFIG>`, or
+  `admissionlab` with no subcommand at all prints usage on stderr and exits `2`
+  — the same code as any other invalid input. A script that forgot an argument
+  fails; it never looks like a passing run.
+- **`--help` and `--version` always exit `0`**, on `admissionlab` itself and on
+  every subcommand (`admissionlab test --version` answers, it does not error).
+- **`--keep-clusters` never changes an exit code.** It changes what is left
+  running afterwards and nothing else, so adding it to collect a failing
+  cluster for debugging cannot change the verdict your gate reads.
+- **A failed cleanup is the one thing that downgrades a pass.** A run that
+  could not delete its clusters exits `3` instead of `0`; a run that had
+  already failed keeps its more specific code. See
+  [Exit 3 — cleanup failed](#cleanup-failed).
+
+The full command surface these codes come from is frozen for v1 too — three
+commands and exactly these flags, none of which will be renamed or removed
+(`crates/admissionlab-cli/src/main.rs` carries the same list, and
+`tests/exit_codes.rs` fails if it drifts):
+
+```text
+admissionlab [-v|--verbose] doctor    [--deep]
+admissionlab [-v|--verbose] test      <CONFIG> [--keep-clusters] [--report-dir DIR]
+                                      [--github-summary FILE]
+admissionlab [-v|--verbose] reproduce <MANIFEST> [--source-root DIR] [--config FILE]
+                                      [--keep-clusters] [--report-dir DIR]
+```
 
 ---
 

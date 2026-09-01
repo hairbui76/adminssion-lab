@@ -125,6 +125,14 @@ tokio = { workspace = true, features = ["rt", "fs"] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
+# `tests/exit_codes.rs` (Task 9.2) freezes every typed failure to its
+# exit code by constructing one value of each variant, and
+# `SpecError::InvalidGlob` carries a `globset::Error` that has no public
+# constructor other than a real rejected pattern. Already resolved in
+# `Cargo.lock` at this version through `admissionlab-spec`, so this is a
+# promotion of an existing transitive dependency to a direct dev one
+# rather than a new crate in the graph.
+globset = { workspace = true }
 predicates = { workspace = true }
 # `tests/diff_benchmark.rs` (Task 5.7) synthesizes 100 pre-captured
 # fixture outcome pairs whose webhook traces carry real RFC 6902 patches,

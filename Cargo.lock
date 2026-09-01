@@ -48,6 +48,7 @@ dependencies = [
  "assert_cmd",
  "async-trait",
  "clap",
+ "globset",
  "json-patch",
  "predicates",
  "serde",
