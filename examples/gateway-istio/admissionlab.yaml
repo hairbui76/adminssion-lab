@@ -1,0 +1,402 @@
+# Admission Lab's canonical Gateway regression demonstration: two real
+# Kubernetes clusters, each running a real Istio serving the Gateway API,
+# told apart by one line of YAML in a `ReferenceGrant` the candidate
+# stack gets wrong.
+#
+#     ./scripts/build-test-images.sh
+#     admissionlab test examples/gateway-istio/admissionlab.yaml
+#
+# It creates both clusters, side-loads the echo backend into each,
+# installs both four-component stacks, replays one admission fixture
+# through each, applies the same Gateway suite to each, waits for the
+# route to reconcile on each, sends a real HTTP request through the
+# baseline's Envoy, prints a PASS/WARN/FAIL summary, writes
+# `result.json` and `report.html`, deletes both clusters, and exits `1`
+# -- because the candidate's route stopped resolving its backend:
+#
+#     backend_resolution_changed  [echo-route]
+#       HTTPRoute admissionlab-gateway-demo-route/echo-route
+#         via admissionlab-gateway-demo-route/lab-gateway#http
+#       baseline ResolvedRefs=True (ResolvedRefs)
+#         -> candidate ResolvedRefs=False (RefNotPermitted)
+#
+#     traffic_status_changed  [echo-route]
+#       baseline HTTP 200 from echo-b -> candidate answered nothing
+#
+# `crates/admissionlab-cli/tests/gateway_demo.rs` runs exactly this
+# configuration end to end against real clusters, twice, and asserts
+# both findings and that the two runs produce the identical set.
+#
+# # What the two sides are
+#
+# Identical, except for one file:
+#
+# | | baseline | candidate |
+# | --- | --- | --- |
+# | Kubernetes | 1.36.4 | 1.36.4 |
+# | Gateway API | v1.5.1 (vendored bundle) | v1.5.1 (vendored bundle) |
+# | Istio (istiod) | chart 1.30.4 | chart 1.30.4 |
+# | Gateway suite | `gateway/suite.yaml` | `gateway/suite.yaml` |
+# | permissions | `stacks/baseline/reference-grant.yaml` | `stacks/candidate/reference-grant.yaml` |
+#
+# Holding the vendor versions equal is deliberate, exactly as it is in
+# `examples/kyverno-istio-upgrade`. A demo that also bumped Istio would
+# produce a report in which the finding that matters is buried among a
+# dozen that do not, and would rot the moment Istio changed anything.
+# The single-variable design means every line of the report traces back
+# to a diff a reader can hold in their head -- and the *mechanism* (a
+# cross-namespace reference that is no longer permitted) is the same one
+# a real platform regression presents through.
+#
+# # Why the difference lives in a component, not in the Gateway suite
+#
+# A lab has one `gateway:` section, and its manifests are applied to
+# *both* sides -- that is what makes the two sides' route results
+# comparable at all. So the per-side difference cannot live there, and
+# it is expressed the way `examples/kyverno-istio-upgrade` already
+# expresses its own: as a component installed from a per-side directory,
+# with the two directories differing in exactly one object.
+#
+# # What the candidate actually breaks, and what it does not
+#
+# `stacks/candidate/reference-grant.yaml` grants `HTTPRoute`s in the
+# route namespace access to a Service named `echo-legacy`. The route
+# references `echo-b`. Gateway API requires the implementation to report
+#
+#     ResolvedRefs=False, reason RefNotPermitted
+#
+# on that route's parent, and requires the rule to return HTTP 500. The
+# `Gateway` itself is unaffected -- it is still `Accepted` and
+# `Programmed` on both sides, its data plane still exists, and the route
+# is still `Accepted`. That narrowness is the point: the report names
+# the one condition that moved, and the reader is not left guessing
+# which of six changes mattered.
+#
+# The candidate's probe is *skipped*, not failed, and the report says so
+# with the condition that caused it. Sending the request anyway would
+# record Envoy's own 500 -- a status invented by the broken state -- and
+# then compare it against the baseline's real 200 as though it were a
+# second, independent finding. What is claimed instead is that the
+# baseline answered a probe the candidate did not, which is true.
+#
+# # Why the probes and conditions are stable across runs
+#
+# The comparator compares condition *states* and *backends*, never
+# reasons, never messages, and never patch operation order -- so the
+# Phase 4 lesson about Istio's non-deterministic patch ordering does not
+# reach this demo at all. `gateway.readiness` below closes the one real
+# timing window that remains: a route can be fully `Programmed` while no
+# pod behind it is ready, and a request sent into that window is
+# answered by the data plane rather than by a backend.
+apiVersion: admissionlab.io/v1alpha1
+kind: Lab
+
+baseline:
+  kubernetes: "1.36.4"
+  # The deterministic echo backend, built from this repository and never
+  # pushed to a registry. `gateway/suite.yaml` references it with
+  # `imagePullPolicy: IfNotPresent`, so the node has to already have it:
+  # `admissionlab test` side-loads it into this side's cluster right
+  # after creating it and before the first component is installed.
+  #
+  # Build it into your own Docker image store first:
+  #
+  #     ./scripts/build-test-images.sh
+  #
+  images:
+    - admissionlab-echo:dev
+  components:
+    # 1. The two namespaces everything below lives in. First, because
+    #    component 4 puts a ReferenceGrant in one of them, and a
+    #    namespace that does not exist yet cannot hold one.
+    #
+    #    No `readiness`: `kubectl apply` returning means these objects
+    #    exist, and a Namespace has no readiness to wait for beyond that.
+    - name: demo-namespaces
+      version: "1"
+      install:
+        type: manifests
+        paths:
+          - gateway/namespaces.yaml
+
+    # 2. The Gateway API itself, exactly as
+    #    `recipes/istio-gateway/gateway-api-crds.yaml` certifies it: the
+    #    vendored v1.5.1 standard-channel bundle, byte-identical to the
+    #    upstream release (its digest is pinned by
+    #    `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs`).
+    #
+    #    `Established` is the condition that means the API server is
+    #    actually serving a resource, not merely that the CRD object was
+    #    accepted. One check per kind this demo creates.
+    - name: gateway-api-crds
+      version: "1.5.1"
+      install:
+        type: manifests
+        paths:
+          - ../../recipes/istio-gateway/gateway-api/standard-install-v1.5.1.yaml
+      readiness:
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: gatewayclasses.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: gateways.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: httproutes.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: referencegrants.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+
+    # 3. Istio, exactly as `recipes/istio-gateway/recipe.yaml` certifies
+    #    it: same chart, same repository, same pinned version, same
+    #    namespace, and the same `repoName` (required here -- `chart`'s
+    #    own `istio/istiod` prefix names the alias `helm repo add`
+    #    registers, and the default would be the component's name).
+    #
+    #    The second readiness check is the strongest and the reason the
+    #    first is not enough on its own: `GatewayClass/istio` reaching
+    #    `Accepted=True` proves istiod's Gateway controller is running
+    #    and reconciling Gateway API objects on this cluster, which no
+    #    Deployment condition can establish.
+    - name: istio-gateway
+      install:
+        type: helm
+        chart: istio/istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        repoName: istio
+        version: "1.30.4"
+        namespace: istio-system
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+        - type: customResourceCondition
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: GatewayClass
+          name: istio
+          conditionType: Accepted
+          status: "True"
+
+    # 4. The one thing that differs between the two sides, and the last
+    #    thing installed -- after the Gateway API CRDs, because a
+    #    `ReferenceGrant` is one of the kinds they add.
+    #
+    #    `version` is required because a manifests install carries no
+    #    implicit version of its own; it names this permission set's
+    #    revision, not any vendor's release. The two sides carry
+    #    different revisions because they install different content, and
+    #    saying so in the configuration is the point.
+    - name: gateway-permissions
+      version: "1"
+      install:
+        type: manifests
+        paths:
+          - stacks/baseline/reference-grant.yaml
+
+candidate:
+  kubernetes: "1.36.4"
+  # The deterministic echo backend, built from this repository and never
+  # pushed to a registry. `gateway/suite.yaml` references it with
+  # `imagePullPolicy: IfNotPresent`, so the node has to already have it:
+  # `admissionlab test` side-loads it into this side's cluster right
+  # after creating it and before the first component is installed.
+  #
+  # Build it into your own Docker image store first:
+  #
+  #     ./scripts/build-test-images.sh
+  #
+  images:
+    - admissionlab-echo:dev
+  components:
+    # 1. The two namespaces everything below lives in. First, because
+    #    component 4 puts a ReferenceGrant in one of them, and a
+    #    namespace that does not exist yet cannot hold one.
+    #
+    #    No `readiness`: `kubectl apply` returning means these objects
+    #    exist, and a Namespace has no readiness to wait for beyond that.
+    - name: demo-namespaces
+      version: "1"
+      install:
+        type: manifests
+        paths:
+          - gateway/namespaces.yaml
+
+    # 2. The Gateway API itself, exactly as
+    #    `recipes/istio-gateway/gateway-api-crds.yaml` certifies it: the
+    #    vendored v1.5.1 standard-channel bundle, byte-identical to the
+    #    upstream release (its digest is pinned by
+    #    `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs`).
+    #
+    #    `Established` is the condition that means the API server is
+    #    actually serving a resource, not merely that the CRD object was
+    #    accepted. One check per kind this demo creates.
+    - name: gateway-api-crds
+      version: "1.5.1"
+      install:
+        type: manifests
+        paths:
+          - ../../recipes/istio-gateway/gateway-api/standard-install-v1.5.1.yaml
+      readiness:
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: gatewayclasses.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: gateways.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: httproutes.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: referencegrants.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+
+    # 3. Istio, exactly as `recipes/istio-gateway/recipe.yaml` certifies
+    #    it: same chart, same repository, same pinned version, same
+    #    namespace, and the same `repoName` (required here -- `chart`'s
+    #    own `istio/istiod` prefix names the alias `helm repo add`
+    #    registers, and the default would be the component's name).
+    #
+    #    The second readiness check is the strongest and the reason the
+    #    first is not enough on its own: `GatewayClass/istio` reaching
+    #    `Accepted=True` proves istiod's Gateway controller is running
+    #    and reconciling Gateway API objects on this cluster, which no
+    #    Deployment condition can establish.
+    - name: istio-gateway
+      install:
+        type: helm
+        chart: istio/istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        repoName: istio
+        version: "1.30.4"
+        namespace: istio-system
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+        - type: customResourceCondition
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: GatewayClass
+          name: istio
+          conditionType: Accepted
+          status: "True"
+
+    # 4. The one thing that differs between the two sides, and the last
+    #    thing installed -- after the Gateway API CRDs, because a
+    #    `ReferenceGrant` is one of the kinds they add.
+    #
+    #    `version` is required because a manifests install carries no
+    #    implicit version of its own; it names this permission set's
+    #    revision, not any vendor's release. The two sides carry
+    #    different revisions because they install different content, and
+    #    saying so in the configuration is the point.
+    - name: gateway-permissions
+      version: "2"
+      install:
+        type: manifests
+        paths:
+          - stacks/candidate/reference-grant.yaml
+
+fixtures:
+  # Rooted at this file's own directory, and matched only inside
+  # `fixtures/`. `gateway/` and `stacks/` are therefore structurally
+  # unreachable from here -- which matters: a Gateway suite manifest
+  # discovered as an admission fixture would be replayed through a
+  # server-side dry-run CREATE, which is exactly the execution mode
+  # Phase 6 exists to *not* use for these objects.
+  include:
+    - "fixtures/*.yaml"
+
+gateway:
+  # Applied to both sides, identically. See `gateway/suite.yaml`.
+  manifests:
+    - gateway/suite.yaml
+
+  # Where Istio's provisioned data plane is, so a probe can be sent
+  # through it. This is the same block `recipes/istio-gateway/recipe.yaml`
+  # declares, parsed by the same validator: `admissionlab.yaml` has no
+  # recipe resolution, so a lab that hand-writes how Istio is installed
+  # spells out where its data plane is too.
+  #
+  # `portName` is required rather than omitted: the provisioned Service
+  # exposes two ports (`http` 80 and Istio's own `status-port` 15021),
+  # and with neither `portName` nor `port` set Admission Lab reports the
+  # port as unresolvable rather than picking one.
+  gatewayEndpoint:
+    type: serviceBySelector
+    namespace: "{gatewayNamespace}"
+    selector:
+      # Gateway API's own documented "gateway infrastructure label",
+      # which Istio applies because upstream specifies it. Selecting on
+      # the standard label rather than on Istio's `<gateway>-<class>`
+      # name convention is the more durable of the two.
+      gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+    portName: http
+
+  # Waited out after the suite is applied and before any route is
+  # observed. Two Deployments, and they are two different kinds of wait.
+  #
+  # `echo-b` is this suite's OWN backend: applying its manifest returns
+  # when the object exists, and a request routed to a backend with no
+  # ready pod is answered by Envoy's 503 -- a statement about this run's
+  # timing, not about the route.
+  #
+  # `lab-gateway-istio` is the data plane Istio PROVISIONS from the
+  # `Gateway`. Gating on it is a real trade, and it is taken here
+  # deliberately: it exchanges "reported as a behavior difference" for
+  # "fails the run", which is only acceptable because this demo's
+  # regression is a `ReferenceGrant` and the data plane comes up
+  # identically on both sides. Without it, the port-forward this run
+  # opens can race a Service with no ready endpoint and fail for a
+  # reason that has nothing to do with the finding.
+  readiness:
+    - type: deploymentAvailable
+      namespace: admissionlab-gateway-demo-backend
+      name: echo-b
+    - type: deploymentAvailable
+      namespace: admissionlab-gateway-demo-route
+      name: lab-gateway-istio
+
+  routes:
+    - id: echo-route
+      gatewayNamespace: admissionlab-gateway-demo-route
+      gatewayName: lab-gateway
+      routeNamespace: admissionlab-gateway-demo-route
+      routeName: echo-route
+      # Named, not left to default: the Gateway declares exactly one
+      # listener today, and stating it means adding a second one later
+      # cannot silently make this contract's parent lookup ambiguous.
+      listenerName: http
+      probes:
+        - host: demo.gateway.admissionlab.test
+          # Any path under the route's `/` PathPrefix match. A non-root
+          # path makes the echo response's own `path` field meaningful
+          # evidence that the request arrived intact.
+          path: /gateway-demo
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-b

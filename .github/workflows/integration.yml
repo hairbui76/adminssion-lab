@@ -118,7 +118,17 @@ jobs:
     # a generous shared ceiling
     # costs nothing when a job ends the moment it completes rather than
     # waiting out the timeout.
-    timeout-minutes: 30
+    # `matrix.timeout` overrides it per entry, and exactly one entry sets
+    # it: `gateway_demo` (Task 6.12) runs the whole canonical Gateway
+    # lab four times over -- once for the finding, twice more for the
+    # determinism check, once for the message-preservation check -- and
+    # each run creates two clusters and installs two full Istio stacks.
+    # Measured at 204.5 s per run on the reference machine with a warm
+    # cache; four of those plus the image build is already ~15 minutes
+    # before any runner slowness, which leaves too little of a 30-minute
+    # ceiling to be honest about. An expression rather than a second job:
+    # every other step in this job is identical for that entry.
+    timeout-minutes: ${{ matrix.timeout || 30 }}
     strategy:
       fail-fast: false
       matrix:
@@ -152,6 +162,27 @@ jobs:
             test: kind_capture
           - package: admissionlab-cli
             test: alpha_e2e
+          # Task 6.11. `admissionlab test` driving the whole Gateway
+          # engine against two real clusters: two identical
+          # `recipes/istio-gateway` stacks, the echo backend side-loaded
+          # by the run itself through the configuration's `images:`
+          # list, one route contract observed on each side, and one real
+          # HTTP request through Envoy. Measured end to end at 156.1 s on
+          # the reference machine with a warm node-image and Docker layer
+          # cache.
+          - package: admissionlab-cli
+            test: gateway_e2e
+          # Task 6.12, and the Phase 6 exit gate's own second command.
+          # The canonical Gateway regression demonstration: the same lab
+          # with one line of a `ReferenceGrant` changed on the candidate
+          # side, asserted to exit 1 with the route, the changed
+          # condition, its reason and the skipped traffic behavior in the
+          # first user-facing failure -- and run twice over to prove the
+          # finding is identical both times. See `matrix.timeout` above
+          # for why this entry gets a larger ceiling than the rest.
+          - package: admissionlab-cli
+            test: gateway_demo
+            timeout: 60
     steps:
       - name: Check out repository
         # v7.0.1: verified against the GitHub API

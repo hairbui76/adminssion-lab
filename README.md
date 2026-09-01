@@ -438,6 +438,13 @@ complete lab configuration with its fixture corpus, both stack definitions, and
 an `expectations.yaml`, reproducing a real admission regression end to end.
 Start there if you would rather read a working lab than a reference.
 
+[`examples/gateway-istio/`](examples/gateway-istio/) is its Gateway
+counterpart: two identical real Istio installs serving the Gateway API, told
+apart by one line of a `ReferenceGrant`. It exits `1` naming the route, the
+condition that changed (`ResolvedRefs`), the reason Gateway API specifies for
+it (`RefNotPermitted`), and the traffic probe that was skipped because of it.
+Build the echo backend first with `./scripts/build-test-images.sh`.
+
 `PRODUCT.md` is the product specification, `ROADMAP.md` the implementation
 plan, and `CONTRIBUTING.md` explains how to propose changes and run the
 verification suite.

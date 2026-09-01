@@ -1,0 +1,20 @@
+# One admission fixture, because a lab always has an admission half.
+#
+# `fixtures.include` is required and must match at least one document: a
+# run that replayed nothing has nothing to compare, and that rule is not
+# relaxed by a `gateway:` section being present. This ConfigMap is
+# deliberately the most boring object in Kubernetes -- no webhook in this
+# demo's stack touches it, both sides admit it unchanged, and it is
+# counted `identical` in every run.
+#
+# Its purpose is to make the report honest about what this lab *is*: two
+# clusters, one admission corpus and one Gateway suite, with the
+# regression on the Gateway side. A reader who sees only Gateway entries
+# might reasonably wonder whether the admission half ran at all.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-demo-settings
+  namespace: default
+data:
+  mode: demo

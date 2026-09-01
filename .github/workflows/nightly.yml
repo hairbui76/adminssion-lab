@@ -6,12 +6,13 @@ name: Nightly reliability
 # reliability is more important than optimizing a few seconds of runtime"
 # — makes the point of.
 #
-# Seven jobs, in three groups.
+# Eight jobs, in three groups.
 #
 #   Repetition (does the happy path stay the happy path?)
 #     cluster-cycles           100 kind create/delete cycles
 #     dogfood-basic            50 full lab runs of examples/admission-basic
 #     dogfood-regression        5 full lab runs of examples/kyverno-istio-upgrade
+#     dogfood-gateway           3 full lab runs of examples/gateway-istio
 #
 #   Forced failure (does the unhappy path fail the way it promises to?)
 #     forced-install-timeout   a component that can never become ready
@@ -22,13 +23,13 @@ name: Nightly reliability
 # Every job ends with `./scripts/verify-cleanup.sh --check-only`, under
 # `if: always()`, so no job can pass while having leaked an `adlab-*`
 # cluster (Task 5.9 step 1). That is one script with one implementation
-# rather than a grep snippet pasted seven times — and pasted, in
+# rather than a grep snippet pasted eight times — and pasted, in
 # practice, with the `2>/dev/null ... || true` defect that makes such a
 # check incapable of failing.
 #
 # # Kubernetes version
 #
-# Six of the seven jobs run against **1.36.4, Tier 1's primary supported
+# Seven of the eight jobs run against **1.36.4, Tier 1's primary supported
 # Kubernetes version** (`compatibility/kubernetes.yaml`), which is
 # ROADMAP Task 5.9's "supported primary Kubernetes minor" entry:
 # `examples/admission-basic` pins it, `scripts/verify-cleanup.sh` pins
@@ -446,6 +447,128 @@ jobs:
         uses: actions/upload-artifact@v4.6.2
         with:
           name: nightly-dogfood-regression-diagnostics
+          path: nightly-diagnostics
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  dogfood-gateway:
+    name: 3 dogfood runs (examples/gateway-istio, expect exit 1)
+    runs-on: ubuntu-latest
+    # Kubernetes 1.36.4, the primary: `examples/gateway-istio` pins it,
+    # and `compatibility/recipes.yaml` certifies the `istio-gateway`
+    # recipe on it.
+    #
+    # The Gateway counterpart of `dogfood-regression`, and it exists for
+    # a reason that job's admission regression does not cover: this one's
+    # finding is produced by a *controller* reconciling asynchronously
+    # and by a real HTTP request through a data plane, which is a much
+    # larger surface for a run-to-run difference than a dry-run admission
+    # decision is. `crates/admissionlab-cli/tests/gateway_demo.rs`
+    # already asserts two consecutive runs claim the identical change
+    # set on every pull request; this asks the same question again, on a
+    # cold runner, every night.
+    #
+    # Three, not five: each run creates two clusters and installs two
+    # full Istio stacks, and the candidate side additionally spends its
+    # whole 120-second reconciliation budget re-observing a route that
+    # has settled on refusing its backend. Measured at 204.5 s per run on
+    # a warm reference machine.
+    timeout-minutes: 120
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: nightly-dogfood-gateway
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind v0.33.0
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64"
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Build the echo backend image
+        # No cluster name: the clusters do not exist yet, because
+        # `admissionlab test` creates them itself. This puts the image in
+        # the runner's local Docker store, and the example's own
+        # `images:` list is what side-loads it into each cluster after
+        # creation (ROADMAP Task 6.11).
+        run: ./scripts/build-test-images.sh
+
+      - name: Build admissionlab (release)
+        run: cargo build --release -p admissionlab-cli --bin admissionlab
+
+      - name: Run examples/gateway-istio 3 times
+        # Exit 1 is the pass condition, exactly as it is for
+        # `dogfood-regression`: the candidate's `ReferenceGrant` names a
+        # Service the route does not reference, the route stops resolving
+        # its backend, and the default severity table grades that
+        # critical. Exit 0 would mean Admission Lab stopped detecting it;
+        # any other code means the run never reached a verdict, which is
+        # a different failure and is reported as such.
+        run: |
+          set -euo pipefail
+          runs=3
+          binary="${GITHUB_WORKSPACE}/target/release/admissionlab"
+          diagnostics="${GITHUB_WORKSPACE}/nightly-diagnostics"
+          mkdir -p "${diagnostics}"
+          failures=0
+
+          for i in $(seq 1 "${runs}"); do
+            workspace="${RUNNER_TEMP}/gateway-${i}"
+            reports="${workspace}/reports"
+            mkdir -p "${reports}"
+
+            status=0
+            TMPDIR="${workspace}" "${binary}" test \
+              examples/gateway-istio/admissionlab.yaml \
+              --report-dir "${reports}" \
+              >"${workspace}/console.log" 2>&1 || status=$?
+
+            if [ "${status}" -eq 1 ]; then
+              echo "run ${i}/${runs}: exit 1 (expected — the broken ReferenceGrant was detected)"
+              rm -rf "${workspace}"
+            elif [ "${status}" -eq 0 ]; then
+              failures=$(( failures + 1 ))
+              echo "::error::run ${i}/${runs}: exit 0 — the known Gateway regression was NOT detected (product regression)"
+              mv "${workspace}" "${diagnostics}/gateway-run-${i}"
+            else
+              failures=$(( failures + 1 ))
+              echo "::error::run ${i}/${runs}: exit ${status} — the run never reached a verdict"
+              tail -n 40 "${workspace}/console.log" || true
+              mv "${workspace}" "${diagnostics}/gateway-run-${i}"
+            fi
+          done
+
+          echo "gateway-istio: ${runs} runs, ${failures} unexpected exit code(s)"
+          if [ "${failures}" -ne 0 ]; then
+            echo "::error::${failures} of ${runs} gateway-istio runs did not exit 1"
+            exit 1
+          fi
+
+      - name: Strip kubeconfigs from the collected diagnostics
+        if: failure()
+        run: |
+          set -euo pipefail
+          find nightly-diagnostics -type d -name kubeconfigs -prune -exec rm -rf {} + 2>/dev/null || true
+
+      - name: Upload diagnostics from failed runs
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: nightly-dogfood-gateway-diagnostics
           path: nightly-diagnostics
           if-no-files-found: ignore
           retention-days: 14

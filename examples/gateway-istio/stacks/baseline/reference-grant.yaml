@@ -1,0 +1,23 @@
+# The baseline's cross-namespace permission: the whole of this demo's
+# difference, and the only file that differs from
+# `stacks/candidate/reference-grant.yaml`.
+#
+# `admissionlab-gateway-demo-backend` owns `echo-b`, so it is the only
+# namespace whose owner can grant access to it -- which is why this
+# object lives here and not beside the route.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-route-to-echo
+  namespace: admissionlab-gateway-demo-backend
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: admissionlab-gateway-demo-route
+  to:
+    - group: ""
+      kind: Service
+      # The Service the route actually references. This one line is the
+      # regression: the candidate's copy names a different Service.
+      name: echo-b

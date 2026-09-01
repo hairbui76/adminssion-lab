@@ -130,4 +130,10 @@ json-patch = { workspace = true }
 # writes back as generic JSON (`LabResult` is emit-only by design, so
 # there is no typed reader to use instead).
 serde_json = { workspace = true }
+# `tests/gateway_demo.rs` parses the example's two `ReferenceGrant`
+# manifests to prove they differ in exactly one field. Parsed rather than
+# text-diffed so a comment change cannot fail the assertion; the same
+# YAML reader `admissionlab-spec` and `admissionlab-recipes` already use,
+# rather than a second one that could disagree about a document.
+serde_norway = { workspace = true }
 tokio = { workspace = true, features = ["rt", "fs", "time"] }

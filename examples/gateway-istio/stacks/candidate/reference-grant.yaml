@@ -1,0 +1,43 @@
+# The candidate's cross-namespace permission, and the deliberate
+# regression this demo exists to catch.
+#
+# Identical to `stacks/baseline/reference-grant.yaml` except for one
+# line: `to[0].name` is `echo-legacy` rather than `echo-b`. That is the
+# shape of a real, common mistake -- a grant left behind pointing at a
+# Service that was renamed, or narrowed to the wrong one during a
+# cleanup -- and it is entirely owned by this example. Nothing here
+# depends on an upstream bug, a version bump, or a timing window.
+#
+# `echo-legacy` deliberately does not exist. A grant naming a Service
+# that does exist would be a *different* experiment (two backends, and a
+# traffic result that reached the wrong one); this one is about the
+# reference not being permitted at all.
+#
+# What Gateway API requires as a result, and what this run therefore
+# observes on the candidate side:
+#
+#   HTTPRoute admissionlab-gateway-demo-route/echo-route
+#     ResolvedRefs = False (RefNotPermitted)
+#
+# and, because the route is no longer resolving its backend, no traffic
+# probe is sent through it at all -- recorded as an explicit skip rather
+# than as a probe that returned nothing.
+#
+# The grant is still *installed*, and still valid: this is not a missing
+# file or a failed apply. Both sides run the same four components, in
+# the same order, with the same readiness gates. Exactly one line of
+# YAML is different, and the report traces the failure back to it.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-route-to-echo
+  namespace: admissionlab-gateway-demo-backend
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: admissionlab-gateway-demo-route
+  to:
+    - group: ""
+      kind: Service
+      name: echo-legacy

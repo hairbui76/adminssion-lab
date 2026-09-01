@@ -1,0 +1,30 @@
+# The two namespaces this demo's Gateway suite lives in.
+#
+# Installed as an ordinary component, not as part of the Gateway suite
+# manifests beside them, and the reason is ordering: `stacks/<side>/
+# reference-grant.yaml` -- the one file that differs between the two
+# sides -- is a `ReferenceGrant` in the *backend* namespace, and a
+# component's manifests are applied while the Gateway suite has not run
+# yet. A namespace that does not exist yet cannot hold a grant.
+#
+# `admissionlab test` installs components in the order this file's
+# configuration lists them, fully waiting out each one's readiness, so
+# "namespaces, then the Gateway API CRDs, then Istio, then the grant" is
+# expressed by the list rather than by hope.
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Namespace A: the route's namespace, and the Gateway's.
+  name: admissionlab-gateway-demo-route
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Namespace B: the backend's namespace, and the only namespace whose
+  # owner can legitimately grant access to what is in it -- which is why
+  # the per-side `ReferenceGrant` lives here.
+  name: admissionlab-gateway-demo-backend
+  labels:
+    app.kubernetes.io/part-of: admission-lab

@@ -1,0 +1,182 @@
+# The Gateway API objects this demo persists in BOTH clusters, byte for
+# byte identical on each side.
+#
+# Everything that makes the two sides differ is deliberately *not* here:
+# it is the `ReferenceGrant` in `stacks/baseline/reference-grant.yaml`
+# and `stacks/candidate/reference-grant.yaml`, installed as a per-side
+# component. `admissionlab.yaml`'s own header explains why the difference
+# has to live there rather than in this file (one lab has one Gateway
+# suite, and it is applied to both sides), and why one object is the
+# whole diff.
+#
+# The two namespaces these objects live in are created by the
+# `demo-namespaces` component, not here -- see
+# `gateway/namespaces.yaml` for the ordering argument.
+#
+# These manifests are applied for real, not dry-run. A controller cannot
+# reconcile an object that was never persisted, and a `Gateway` with no
+# status has nothing to compare. What makes that safe is the disposable
+# cluster.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Istio's own documented per-Gateway infrastructure override, named
+  # from `Gateway.spec.infrastructure.parametersRef` below.
+  #
+  # Without it, Istio provisions the Gateway's data-plane `Service` as
+  # `type: LoadBalancer`; a bare `kind` cluster has no load-balancer
+  # controller, so the address is never assigned and Istio reports --
+  # correctly, and permanently -- `Programmed=False (AddressNotAssigned)`.
+  # That is a terminal state, not a slow one, and it would make this
+  # demo's *baseline* fail to carry traffic, which would make the whole
+  # comparison meaningless. See `recipes/istio-gateway/README.md` for
+  # the measurement.
+  name: gateway-infrastructure
+  namespace: admissionlab-gateway-demo-route
+data:
+  service: |
+    spec:
+      type: ClusterIP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: admissionlab-gateway-demo-backend
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  # The deterministic echo backend from `crates/admissionlab-echo`,
+  # which answers with its own identity so a probe can say *which*
+  # workload served it rather than only that something did. Built and
+  # loaded from the local image store -- see `admissionlab.yaml`'s
+  # `images:` list.
+  name: echo-b
+  namespace: admissionlab-gateway-demo-backend
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-b
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-gateway-demo-route
+spec:
+  gatewayClassName: istio
+  infrastructure:
+    parametersRef:
+      group: ""
+      kind: ConfigMap
+      name: gateway-infrastructure
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          # `Same`, unchanged: what crosses a namespace boundary in this
+          # demo is the BACKEND reference, not the route attachment. The
+          # route lives beside its Gateway, so the listener never has to
+          # permit a foreign route -- which keeps exactly one permission
+          # in play and makes the finding unambiguous.
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: admissionlab-gateway-demo-route
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - demo.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # The explicit `namespace` is what makes this a cross-namespace
+        # reference at all, and what a `ReferenceGrant` in
+        # `admissionlab-gateway-demo-backend` must permit. Gateway API
+        # requires `ResolvedRefs=False` with reason `RefNotPermitted`
+        # here when no grant covers it -- and requires the rule to
+        # return HTTP 500, which is why this run's probe is *skipped*
+        # rather than sent (a status invented by the broken state is not
+        # a second, independent finding).
+        - name: echo-b
+          namespace: admissionlab-gateway-demo-backend
+          port: 80
