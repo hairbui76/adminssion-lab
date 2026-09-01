@@ -65,7 +65,12 @@
 //!   features an author has accepted in writing. Read that module before
 //!   assuming this project converts anything -- it does not, on purpose,
 //!   and the module explains why a self-converting suite could not
-//!   detect its own converter's mistakes.
+//!   detect its own converter's mistakes. Task 8.5 added the observed
+//!   half beside it: [`compare_migration_case`] classifies what an
+//!   `Ingress` and its replacement `HTTPRoute` really did with the same
+//!   requests, in [`MigrationBehaviorKind`]'s own vocabulary -- which is
+//!   deliberately *not* `admissionlab_diff::SemanticChangeKind`, for
+//!   reasons that module states in full.
 //! - [`ingress`] (Task 8.4) is the *baseline* half of a migration
 //!   comparison: it persists one migration case's `Ingress` manifests,
 //!   records a validating webhook's refusal as admission evidence rather
@@ -141,8 +146,12 @@ pub use ingress::{
     run_ingress_case_with_resolver,
 };
 pub use migration::{
-    MigrationCaseSpec, MigrationSuiteSpec, NonPortableFeatureExpectation,
-    expected_nonportable_features,
+    MigrationBehaviorChange, MigrationBehaviorKind, MigrationCaseSpec, MigrationComparability,
+    MigrationComparison, MigrationSuiteSpec, NONPORTABLE_INGRESS_ANNOTATIONS,
+    NonPortableAnnotation, NonPortableFeatureExpectation, compare_migration_case,
+    compare_migration_traffic, expected_nonportable_features, migration_comparability,
+    nonportable_annotation, nonportable_changes, observed_nonportable_annotations,
+    unmatched_nonportable_expectations,
 };
 pub use port_forward::{
     KUBECTL_PROGRAM, LOCAL_ADDRESS, PORT_FORWARD_READY_TIMEOUT, PortForwardHandle,
