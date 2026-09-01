@@ -731,6 +731,15 @@ fn reexported_types_are_the_spec_crate_types() {
             reason: "r".to_owned(),
         }],
     };
-    let suite: MigrationSuiteSpec = admissionlab_spec::MigrationSuiteSpec { cases: vec![case] };
+    let suite: MigrationSuiteSpec = admissionlab_spec::MigrationSuiteSpec {
+        cases: vec![case],
+        // ROADMAP Task 8.8's per-side data-plane blocks, both `None`
+        // here: they are optional in the type so that a document written
+        // before they existed still parses, and this assertion is about
+        // the re-export naming the same type rather than about a
+        // runnable suite.
+        baseline: None,
+        candidate: None,
+    };
     let _: admissionlab_spec::MigrationSuiteSpec = suite;
 }

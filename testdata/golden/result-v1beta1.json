@@ -705,6 +705,81 @@
       }
     }
   ],
+  "migration": [
+    {
+      "caseId": "legacy-echo",
+      "comparability": "comparable",
+      "comparabilityReason": "both sides answered the case's probes, so a difference and an absence of differences are both evidence",
+      "changes": [
+        {
+          "kind": "backend_changed",
+          "detail": "probe 1 (GET http://migrate.ingress.admissionlab.test/legacy/reports): the Ingress reached backend \"echo-b\" and the Gateway reached \"echo-a\"",
+          "expected": false,
+          "severity": "critical"
+        },
+        {
+          "kind": "non_portable_feature",
+          "detail": "nginx.ingress.kubernetes.io/limit-rps on Ingress admissionlab-migration-demo/echo-ingress has no portable Gateway API equivalent: per-client request rate limiting in the data plane.",
+          "expected": true,
+          "severity": "info"
+        }
+      ],
+      "probes": [
+        {
+          "index": 0,
+          "baseline": {
+            "status": 200,
+            "backend": "echo-a",
+            "responseHeaders": {
+              "content-type": "application/json"
+            },
+            "responseBodySha256": "000000000000000000000000000000000000000000000000000000000000000c",
+            "elapsed": 12,
+            "attempts": 1
+          },
+          "candidate": {
+            "status": 200,
+            "backend": "echo-a",
+            "responseHeaders": {
+              "content-type": "application/json"
+            },
+            "responseBodySha256": "0000000000000000000000000000000000000000000000000000000000000009",
+            "elapsed": 9,
+            "attempts": 1
+          }
+        },
+        {
+          "index": 1,
+          "baseline": {
+            "status": 200,
+            "backend": "echo-b",
+            "responseHeaders": {
+              "content-type": "application/json"
+            },
+            "responseBodySha256": "000000000000000000000000000000000000000000000000000000000000000e",
+            "elapsed": 14,
+            "attempts": 1
+          },
+          "candidate": {
+            "status": 200,
+            "backend": "echo-a",
+            "responseHeaders": {
+              "content-type": "application/json"
+            },
+            "responseBodySha256": "0000000000000000000000000000000000000000000000000000000000000008",
+            "elapsed": 8,
+            "attempts": 1
+          }
+        }
+      ],
+      "unmatchedExpectations": [
+        {
+          "feature": "nginx.ingress.kubernetes.io/canary",
+          "reason": "the canary Ingress was deleted before this migration; kept here until the rollout is confirmed"
+        }
+      ]
+    }
+  ],
   "timings": {
     "clusterCreation": {
       "wallMs": 43512,

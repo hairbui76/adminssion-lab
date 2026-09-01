@@ -66,14 +66,34 @@ fn xss_result() -> LabResult {
     result
 }
 
+/// The page must open with no server and no network.
+///
+/// # What is checked, and what stopped being checked at Task 8.8
+///
+/// Every construct below is one a browser *fetches through*: a script or
+/// stylesheet element, a `src`/`href` attribute, a CSS `@import` or
+/// `url(...)`, or an embedded document. Absent all of them, the page has
+/// no way to reach the network, which is the property this test exists
+/// to hold.
+///
+/// The list used to also forbid the bare strings `http://`, `https://`
+/// and `//cdn`. Those were proxies for the constructs above and are
+/// strictly weaker than them -- a URI inside escaped text content is
+/// inert, because nothing fetches it -- and ROADMAP Task 8.8 made them
+/// wrong as well as redundant: a migration finding's `detail` is written
+/// by `admissionlab_gateway::describe_probe_request`, whose whole
+/// rendering of a probe is `GET http://<the user's own host><path>`. A
+/// report of a real migration therefore *contains* a URI, as data, and
+/// must. The fetch vectors are still all forbidden, and
+/// [`a_script_tag_in_a_vendor_string_is_escaped_never_raw`] separately
+/// proves that data cannot become one.
 #[test]
 fn the_page_loads_nothing_from_outside_itself() {
     let page = render_html(&canonical_result());
     let lowered = page.to_lowercase();
 
     for forbidden in [
-        "<script", "<link", "src=", "href=", "@import", "url(", "http://", "https://", "//cdn",
-        "<iframe", "<object", "<embed",
+        "<script", "<link", "src=", "href=", "@import", "url(", "<iframe", "<object", "<embed",
     ] {
         assert!(
             !lowered.contains(forbidden),

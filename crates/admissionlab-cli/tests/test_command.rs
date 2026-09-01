@@ -32,8 +32,9 @@ use std::time::Duration;
 
 use admissionlab_admission::{AdmissionDecision, AdmissionOutcome, AdmissionTrace, TraceEvidence};
 use admissionlab_cli::pipeline::{
-    Console, GatewaySuiteError, GatewaySuiteRunner, LabBackend, OutcomeCapture, RunRequest,
-    SideGatewayOutcome, run_lab,
+    Console, GatewaySuiteError, GatewaySuiteRunner, LabBackend, MigrationRunOutcome,
+    MigrationSuiteError, MigrationSuiteRunner, OutcomeCapture, RunRequest, SideGatewayOutcome,
+    run_lab,
 };
 use admissionlab_core::{
     ArtifactStore, CapturedFixture, ClusterDiagnostics, ClusterError, ClusterHandle,
@@ -45,9 +46,11 @@ use admissionlab_fixtures::FixtureSource;
 use admissionlab_gateway::{
     CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionState,
     GatewayCaseResult, GatewayClassEvidence, GatewayEvidence, GatewayIdentity, HttpProbeResult,
-    ObservedCondition, ParentIdentity, ReconciliationEvidence, RouteEvidence, RouteParentStatus,
+    MigrationBehaviorChange, MigrationBehaviorKind, MigrationComparability, ObservedCondition,
+    ParentIdentity, ReconciliationEvidence, RouteEvidence, RouteParentStatus,
 };
-use admissionlab_report::TerminalOptions;
+use admissionlab_policy::Severity;
+use admissionlab_report::{GradedMigrationChange, MigrationCaseComparison, TerminalOptions};
 use admissionlab_spec::{GatewaySuiteSpec, ResolvedComponent};
 use async_trait::async_trait;
 
@@ -579,6 +582,7 @@ struct FakeBackend {
     capture_behavior: CaptureBehavior,
     gateway_behavior: GatewayBehavior,
     gateway_runs: Arc<Mutex<Vec<Side>>>,
+    migration_behavior: MigrationBehavior,
     prerequisites_met: bool,
 }
 
@@ -590,12 +594,18 @@ impl FakeBackend {
             capture_behavior: behavior,
             gateway_behavior: GatewayBehavior::Identical,
             gateway_runs: Arc::new(Mutex::new(Vec::new())),
+            migration_behavior: MigrationBehavior::Preserved,
             prerequisites_met: true,
         }
     }
 
     fn with_gateway(mut self, behavior: GatewayBehavior) -> Self {
         self.gateway_behavior = behavior;
+        self
+    }
+
+    fn with_migration(mut self, behavior: MigrationBehavior) -> Self {
+        self.migration_behavior = behavior;
         self
     }
 
@@ -626,6 +636,7 @@ impl LabBackend for FakeBackend {
     type Installer = FakeStackInstaller;
     type Capture = FakeCapture;
     type Gateway = FakeGatewaySuite;
+    type Migration = FakeMigrationSuite;
 
     async fn doctor_report(&self) -> DoctorReport {
         DoctorReport {
@@ -658,6 +669,17 @@ impl LabBackend for FakeBackend {
             suite,
             behavior: self.gateway_behavior,
             ran: Arc::clone(&self.gateway_runs),
+        }
+    }
+
+    fn migration_suite(
+        &self,
+        suite: admissionlab_spec::MigrationSuiteSpec,
+        _store: ArtifactStore,
+    ) -> Self::Migration {
+        FakeMigrationSuite {
+            suite,
+            behavior: self.migration_behavior,
         }
     }
 
@@ -1962,4 +1984,324 @@ impl std::fmt::Debug for RunOutput {
             self.disposition, self.stdout, self.stderr
         )
     }
+}
+
+// ---------------------------------------------------------------------
+// The Ingress-to-Gateway migration suite (ROADMAP Task 8.8)
+// ---------------------------------------------------------------------
+
+/// The migration case `write_migration_lab` declares.
+const MIGRATION_CASE: &str = "legacy-echo";
+
+/// What the fake migration suite scripts.
+///
+/// Both arms are shapes `admissionlab_gateway::compare_migration_case`
+/// really produces; what the fake replaces is the two clusters, not the
+/// comparator's vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MigrationBehavior {
+    /// The migration preserved every behavior the case contracts, and
+    /// its one non-portable feature was declared in writing.
+    Preserved,
+    /// The candidate's route reached a different backend, undeclared --
+    /// the regression `examples/ingress-to-gateway/` demonstrates for
+    /// real.
+    BackendRegression,
+    /// The suite could not be run at all.
+    Fails,
+}
+
+/// A `MigrationSuiteRunner` that touches no cluster and returns scripted
+/// comparisons for the suite it was handed.
+struct FakeMigrationSuite {
+    suite: admissionlab_spec::MigrationSuiteSpec,
+    behavior: MigrationBehavior,
+}
+
+#[async_trait]
+impl MigrationSuiteRunner for FakeMigrationSuite {
+    async fn run(
+        &self,
+        _baseline: &ClusterHandle,
+        _candidate: &ClusterHandle,
+        _paths: &RunPaths,
+    ) -> Result<MigrationRunOutcome, MigrationSuiteError> {
+        if self.behavior == MigrationBehavior::Fails {
+            return Err(MigrationSuiteError {
+                case: Some(MIGRATION_CASE.to_owned()),
+                message: "fake migration failure".to_owned(),
+            });
+        }
+
+        let case = self
+            .suite
+            .cases
+            .first()
+            .expect("the lab declares one migration case");
+        // Always present, always declared, always `info`: the shape a
+        // real run produces for an `expectedNonportable` entry the
+        // baseline manifests really carry.
+        let mut changes = vec![GradedMigrationChange {
+            change: MigrationBehaviorChange {
+                kind: MigrationBehaviorKind::NonPortableFeature,
+                detail: "nginx.ingress.kubernetes.io/limit-rps on Ingress lab/echo-ingress has \
+                         no portable Gateway API equivalent"
+                    .to_owned(),
+                expected: true,
+            },
+            severity: Severity::Info,
+        }];
+        if self.behavior == MigrationBehavior::BackendRegression {
+            changes.push(GradedMigrationChange {
+                change: MigrationBehaviorChange {
+                    kind: MigrationBehaviorKind::BackendChanged,
+                    detail: "probe 0 (GET http://echo.admissionlab.test/reports): the Ingress \
+                             reached backend \"echo-b\" and the Gateway reached \"echo-a\""
+                        .to_owned(),
+                    expected: false,
+                },
+                severity: Severity::Critical,
+            });
+        }
+
+        Ok(MigrationRunOutcome {
+            cases: vec![MigrationCaseComparison {
+                case_id: case.id.clone(),
+                comparability: MigrationComparability::Comparable,
+                changes,
+                probes: Vec::new(),
+                unmatched_expectations: Vec::new(),
+            }],
+            diagnostics: Vec::new(),
+        })
+    }
+}
+
+/// A `v1beta1` lab declaring one migration case with both per-side
+/// endpoint blocks.
+///
+/// `v1beta1` and not `v1alpha1`: `migration:` is a v1beta1-only section
+/// (an Alpha document always resolves to `migration: None`), so a lab
+/// written at the older version would exercise nothing.
+fn write_migration_lab(dir: &Path) -> PathBuf {
+    write_migration_lab_with_sides(dir, MIGRATION_BOTH_SIDES)
+}
+
+/// Both per-side endpoint blocks, as a runnable suite declares them.
+const MIGRATION_BOTH_SIDES: &str = r#"  baseline:
+    gatewayEndpoint:
+      type: serviceByName
+      namespace: ingress-nginx-legacy
+      name: ingress-nginx-legacy-controller
+      portName: http
+  candidate:
+    gatewayEndpoint:
+      type: serviceBySelector
+      namespace: "{gatewayNamespace}"
+      selector:
+        gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+"#;
+
+/// The candidate block alone -- a suite that could probe only one side.
+const MIGRATION_CANDIDATE_ONLY: &str = r#"  candidate:
+    gatewayEndpoint:
+      type: serviceBySelector
+      namespace: "{gatewayNamespace}"
+      selector:
+        gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+"#;
+
+/// [`write_migration_lab`] with the per-side endpoint blocks supplied.
+fn write_migration_lab_with_sides(dir: &Path, sides: &str) -> PathBuf {
+    let config = write_lab(dir, "");
+    let text = std::fs::read_to_string(&config)
+        .expect("the lab must have been written")
+        .replace("admissionlab.io/v1alpha1", "admissionlab.io/v1beta1");
+    let migration = format!(
+        r"migration:
+{sides}  cases:
+    - id: {MIGRATION_CASE}
+      baselineIngressManifests:
+        - migration/ingress.yaml
+      candidateGatewayManifests:
+        - migration/gateway.yaml
+      probes:
+        - host: echo.admissionlab.test
+          path: /reports
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-b
+      expectedNonportable:
+        - feature: nginx.ingress.kubernetes.io/limit-rps
+          reason: rate limiting moves to the platform's edge proxy
+"
+    );
+    std::fs::write(&config, format!("{text}{migration}"))
+        .expect("failed to write the migration lab configuration");
+    config
+}
+
+/// A migration whose candidate reproduces the baseline's behavior passes
+/// and still reports what it accounted for.
+#[test]
+fn a_preserved_migration_passes_and_still_reports_its_declared_nonportability() {
+    let dir = unique_dir("migration-preserved");
+    let config = write_migration_lab(&dir);
+    let reports = dir.join("reports");
+    let backend =
+        FakeBackend::new(CaptureBehavior::Identical).with_migration(MigrationBehavior::Preserved);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    assert_eq!(output.disposition, RunDisposition::Passed, "{output:?}");
+    let result = read_result(&reports.join("result.json"));
+    assert_eq!(result["policy"]["disposition"], "pass");
+    let case = &result["migration"][0];
+    assert_eq!(case["caseId"], MIGRATION_CASE);
+    assert_eq!(case["changes"][0]["kind"], "non_portable_feature");
+    assert_eq!(
+        case["changes"][0]["severity"], "info",
+        "a declared non-portability is visible and accounted for, and must not warn: {case}"
+    );
+    assert!(
+        output
+            .stdout
+            .contains("Migration  1 Ingress-to-Gateway case(s)"),
+        "the terminal report names the suite even when nothing regressed:\n{output:?}"
+    );
+}
+
+/// An undeclared traffic regression fails the run, and the report
+/// explains it with the two observed backends.
+///
+/// This is the unit-level twin of `tests/migration_demo.rs`, which
+/// proves the same three facts against two real clusters. Having both is
+/// deliberate: this one runs in milliseconds on every commit and pins
+/// the *wiring* (the verdict join, the document section, the terminal
+/// section), while the demo proves the wiring is fed by real traffic.
+#[test]
+fn an_undeclared_migration_regression_fails_the_run_and_names_the_observed_backends() {
+    let dir = unique_dir("migration-regression");
+    let config = write_migration_lab(&dir);
+    let reports = dir.join("reports");
+    let backend = FakeBackend::new(CaptureBehavior::Identical)
+        .with_migration(MigrationBehavior::BackendRegression);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    assert_eq!(
+        output.disposition,
+        RunDisposition::PolicyFailed,
+        "a migration behavior change no expectation accounts for must fail the run: {output:?}"
+    );
+    let result = read_result(&reports.join("result.json"));
+    assert_eq!(
+        result["policy"]["disposition"], "fail",
+        "the run's verdict is the join of the policy verdict and the migration verdict"
+    );
+    assert!(
+        result["policy"]["changes"]
+            .as_array()
+            .expect("changes is an array")
+            .is_empty(),
+        "and it is a join, not a rewrite: no migration finding is smuggled into the graded \
+         SemanticChange list: {result}"
+    );
+
+    let regression = &result["migration"][0]["changes"][1];
+    assert_eq!(regression["kind"], "backend_changed");
+    assert_eq!(regression["severity"], "critical");
+    assert_eq!(regression["expected"], false);
+    let detail = regression["detail"].as_str().expect("a detail");
+    assert!(
+        detail.contains("echo-b") && detail.contains("echo-a"),
+        "ROADMAP Task 8.8 step 2: the report explains the observed traffic difference, not an \
+         annotation mismatch: {detail}"
+    );
+    assert!(
+        output.stdout.contains("backend_changed") && output.stdout.contains("echo-b"),
+        "the terminal report a human reads carries the same evidence:\n{output:?}"
+    );
+}
+
+/// A migration suite that cannot be run ends the run with no verdict.
+#[test]
+fn a_migration_suite_failure_ends_the_run_as_a_fixture_failure() {
+    let dir = unique_dir("migration-fails");
+    let config = write_migration_lab(&dir);
+    let reports = dir.join("reports");
+    let backend =
+        FakeBackend::new(CaptureBehavior::Identical).with_migration(MigrationBehavior::Fails);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    assert_eq!(
+        output.disposition,
+        RunDisposition::FixtureFailed,
+        "{output:?}"
+    );
+    assert!(
+        !reports.join("result.json").exists(),
+        "a run that could not observe a migration has earned no verdict to write"
+    );
+    assert!(reports.join("diagnostics.json").exists());
+}
+
+/// A migration suite with no per-side endpoint block is refused before
+/// any cluster exists.
+///
+/// The check that `admissionlab-spec` deliberately cannot make: the
+/// fields are optional in the schema so older documents stay valid, and
+/// a suite that omits one is refused here instead. Exit 2, and the
+/// cluster manager is never called.
+#[test]
+fn a_migration_suite_with_no_endpoint_is_refused_before_any_cluster_exists() {
+    let dir = unique_dir("migration-no-endpoint");
+    let config = write_migration_lab_with_sides(&dir, MIGRATION_CANDIDATE_ONLY);
+    let reports = dir.join("reports");
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    assert_eq!(
+        output.disposition,
+        RunDisposition::InvalidInput,
+        "{output:?}"
+    );
+    assert!(
+        output.stderr.contains("migration.baseline.gatewayEndpoint"),
+        "the message names the field that is missing:\n{output:?}"
+    );
+    assert!(
+        backend.clusters.created_sides().is_empty(),
+        "nothing may be provisioned for a configuration that cannot produce evidence"
+    );
 }

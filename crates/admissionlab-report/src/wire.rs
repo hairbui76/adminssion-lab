@@ -89,7 +89,8 @@ use admissionlab_diff::{
 };
 use admissionlab_gateway::{
     GatewayCaseComparison, GatewayComparability, GatewayEvidenceLevel, HttpProbeResult,
-    ReconciliationEvidence, gateway_evidence_level,
+    MigrationBehaviorChange, MigrationBehaviorKind, MigrationComparability,
+    NonPortableFeatureExpectation, ReconciliationEvidence, gateway_evidence_level,
 };
 use admissionlab_policy::{
     ClassifiedChange, PolicyDisposition, PolicyResult, Severity, StaleExpectation,
@@ -100,7 +101,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::model::{
-    AdmissionComparison, EnvironmentSummary, FixtureComparison, LabResult, RunSummary,
+    AdmissionComparison, EnvironmentSummary, FixtureComparison, GradedMigrationChange, LabResult,
+    MigrationCaseComparison, RunSummary,
 };
 
 /// One comparison run, as `result.json` writes it.
@@ -132,6 +134,31 @@ pub struct ResultDocument<'a> {
     /// produced them.
     #[serde(rename = "diagnostics")]
     pub diagnostics: &'a [Diagnostic],
+    /// Every Ingress-to-Gateway migration case the run compared
+    /// (ROADMAP Task 8.8), or **omitted entirely** for a lab with no
+    /// `migration:` section.
+    ///
+    /// # Why this key is omitted rather than written as `null`
+    ///
+    /// The three *evidence sections* inside a fixture are always
+    /// written, because each one's absence would otherwise have to be
+    /// interpreted (see this module's Global Constraint 15 section).
+    /// This key is different in kind: it is an **optional addition to a
+    /// frozen document**, and `docs/schema-migrations.md`'s first
+    /// obligation is that an addition must leave every document written
+    /// before it existed still valid. Omitting it means a `result.json`
+    /// from an admission-only or Gateway-only lab is byte-identical to
+    /// what this crate wrote before Task 8.8 — which is exactly the
+    /// property "additive" is supposed to name. The same reasoning, and
+    /// the same treatment, [`Self::timings`] already carries.
+    ///
+    /// Where a claim *could* be misread the section states it inside
+    /// itself instead: [`MigrationSection::comparability`] says whether
+    /// an empty `changes` list is agreement or ignorance, and
+    /// [`MigrationSection::comparabilityReason`](MigrationSection::comparability_reason)
+    /// says it in prose.
+    #[serde(rename = "migration", skip_serializing_if = "Option::is_none")]
+    pub migration: Option<Vec<MigrationSection<'a>>>,
     /// How long each stage took, when the producer measured.
     ///
     /// The one key in this document that is *omitted* rather than
@@ -158,6 +185,7 @@ impl<'a> From<&'a LabResult> for ResultDocument<'a> {
             fixtures,
             policy,
             diagnostics,
+            migration,
             timings,
         } = result;
 
@@ -169,6 +197,9 @@ impl<'a> From<&'a LabResult> for ResultDocument<'a> {
             fixtures: fixtures.iter().map(FixtureDocument::from).collect(),
             policy: PolicyDocument::from(policy),
             diagnostics,
+            migration: migration
+                .as_ref()
+                .map(|cases| cases.iter().map(MigrationSection::from).collect()),
             timings: timings.as_ref(),
         }
     }
@@ -492,6 +523,148 @@ pub struct ProbeExchange<'a> {
     /// probe.
     #[serde(rename = "candidate")]
     pub candidate: &'a HttpProbeResult,
+}
+
+/// What one Ingress-to-Gateway migration case did on both sides
+/// (ROADMAP Task 8.8).
+///
+/// A sibling of [`FixtureDocument`] rather than a section inside one —
+/// see [`crate::model::LabResult::migration`] for the argument, which is
+/// about vocabularies rather than about layout.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct MigrationSection<'a> {
+    /// The migration case both sides are about.
+    #[serde(rename = "caseId")]
+    pub case_id: &'a str,
+    /// Whether the two sides were comparable at all.
+    #[serde(rename = "comparability")]
+    pub comparability: MigrationComparability,
+    /// The same answer in prose —
+    /// `admissionlab_gateway::MigrationComparability::reason`'s own
+    /// words, carried because "the variant name alone would leave
+    /// 'incomparable' unexplained" and because a `result.json` is read
+    /// by people as well as by programs.
+    #[serde(rename = "comparabilityReason")]
+    pub comparability_reason: &'static str,
+    /// Every observed difference, in the Gateway engine's own
+    /// deterministic order, each with the severity the run graded it.
+    #[serde(rename = "changes")]
+    pub changes: Vec<MigrationChangeDocument<'a>>,
+    /// Every probe both sides answered, paired by index — the same
+    /// pairing, and the same [`ProbeExchange`] shape, the Gateway
+    /// traffic section uses, because it is the same question asked of a
+    /// differently-shaped pair of stacks.
+    #[serde(rename = "probes")]
+    pub probes: Vec<ProbeExchange<'a>>,
+    /// Non-portable features declared for this case that its baseline
+    /// manifests do not carry. Reported, never graded — see
+    /// [`crate::model::MigrationCaseComparison::unmatched_expectations`].
+    #[serde(rename = "unmatchedExpectations")]
+    pub unmatched_expectations: Vec<NonPortableExpectationDocument<'a>>,
+}
+
+impl<'a> From<&'a MigrationCaseComparison> for MigrationSection<'a> {
+    fn from(case: &'a MigrationCaseComparison) -> Self {
+        let MigrationCaseComparison {
+            case_id,
+            comparability,
+            changes,
+            probes,
+            unmatched_expectations,
+        } = case;
+
+        Self {
+            case_id: case_id.as_str(),
+            comparability: *comparability,
+            comparability_reason: comparability.reason(),
+            changes: changes.iter().map(MigrationChangeDocument::from).collect(),
+            probes: probes
+                .iter()
+                .enumerate()
+                .map(|(index, pair)| ProbeExchange {
+                    index,
+                    baseline: &pair.baseline,
+                    candidate: &pair.candidate,
+                })
+                .collect(),
+            unmatched_expectations: unmatched_expectations
+                .iter()
+                .map(NonPortableExpectationDocument::from)
+                .collect(),
+        }
+    }
+}
+
+/// One migration behavior change, graded.
+///
+/// Carries no `id`: [`semantic_change_id`] exists because a
+/// `SemanticChange` appears *twice* in this document (per fixture and
+/// run-wide) and the two lists need a join key. A migration change
+/// appears exactly once, under the case that observed it, so an
+/// identifier here would be a key with nothing to join to.
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
+pub struct MigrationChangeDocument<'a> {
+    /// Which routing behavior moved, in
+    /// `admissionlab_gateway::MigrationBehaviorKind`'s own vocabulary —
+    /// deliberately *not* a `SemanticChangeKind`.
+    #[serde(rename = "kind")]
+    pub kind: MigrationBehaviorKind,
+    /// What was observed, in full enough detail to check the claim.
+    /// Written by the Gateway engine and deterministic.
+    #[serde(rename = "detail")]
+    pub detail: &'a str,
+    /// Whether the case's author declared this difference in writing.
+    /// Only a `non_portable_feature` change can be `true`.
+    #[serde(rename = "expected")]
+    pub expected: bool,
+    /// How much the run says it matters. Decided by
+    /// `admissionlab_cli::pipeline::migration`, never here.
+    #[serde(rename = "severity")]
+    pub severity: Severity,
+}
+
+impl<'a> From<&'a GradedMigrationChange> for MigrationChangeDocument<'a> {
+    fn from(graded: &'a GradedMigrationChange) -> Self {
+        let GradedMigrationChange { change, severity } = graded;
+        let MigrationBehaviorChange {
+            kind,
+            detail,
+            expected,
+        } = change;
+
+        Self {
+            kind: *kind,
+            detail: detail.as_str(),
+            expected: *expected,
+            severity: *severity,
+        }
+    }
+}
+
+/// One declared non-portability that the baseline manifests do not
+/// actually carry.
+///
+/// A projection rather than the configuration type itself:
+/// `admissionlab_spec::NonPortableFeatureExpectation` derives
+/// `Deserialize` (a user writes it) and not `Serialize`, and this
+/// document owns its own `camelCase` keys — see this module's "Casing".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
+pub struct NonPortableExpectationDocument<'a> {
+    /// The feature the case declared, verbatim.
+    #[serde(rename = "feature")]
+    pub feature: &'a str,
+    /// The author's written justification, verbatim.
+    #[serde(rename = "reason")]
+    pub reason: &'a str,
+}
+
+impl<'a> From<&'a NonPortableFeatureExpectation> for NonPortableExpectationDocument<'a> {
+    fn from(expectation: &'a NonPortableFeatureExpectation) -> Self {
+        Self {
+            feature: expectation.feature.as_str(),
+            reason: expectation.reason.as_str(),
+        }
+    }
 }
 
 /// The run's verdict and every graded change.

@@ -170,6 +170,7 @@ impl LabBackend for ReproduceBackend {
     type Installer = <KindBackend as LabBackend>::Installer;
     type Capture = <KindBackend as LabBackend>::Capture;
     type Gateway = <KindBackend as LabBackend>::Gateway;
+    type Migration = <KindBackend as LabBackend>::Migration;
 
     async fn doctor_report(&self) -> DoctorReport {
         self.inner.doctor_report().await
@@ -189,6 +190,14 @@ impl LabBackend for ReproduceBackend {
         store: ArtifactStore,
     ) -> Self::Gateway {
         self.inner.gateway_suite(suite, store)
+    }
+
+    fn migration_suite(
+        &self,
+        suite: admissionlab_spec::MigrationSuiteSpec,
+        store: ArtifactStore,
+    ) -> Self::Migration {
+        self.inner.migration_suite(suite, store)
     }
 
     fn fixture_capture(&self, fixtures: Vec<FixtureSource>, store: ArtifactStore) -> Self::Capture {

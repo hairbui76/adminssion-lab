@@ -411,3 +411,91 @@ fn a_missing_parent_directory_is_a_reported_error() {
         "the message must name what was attempted; got `{error}`"
     );
 }
+
+/// The optional `migration` section is present, `camelCase`, and states
+/// its own comparability (ROADMAP Task 8.8).
+///
+/// Three properties, and each is a decision the section was designed
+/// around rather than an incidental fact about the fixture:
+///
+/// - every key this crate owns is `camelCase`, per the freeze's own
+///   casing rule, and the embedded `HttpProbeResult`s keep
+///   `admissionlab-gateway`'s already-pinned spellings;
+/// - each change carries a `severity`, because a migration finding never
+///   passes through `admissionlab-policy` and would otherwise reach a
+///   `fail` verdict with nothing explaining it;
+/// - `comparability` and `comparabilityReason` are both written, so an
+///   empty `changes` list is never read as "the migration preserved
+///   everything" (Global Constraint 15).
+#[test]
+fn the_migration_section_is_camel_case_and_states_its_comparability() {
+    let document: Value =
+        serde_json::from_str(&render_json(&canonical_result()).expect("serializes"))
+            .expect("valid JSON");
+
+    let cases = document["migration"]
+        .as_array()
+        .expect("`migration` is an array when the lab declared a suite");
+    assert_eq!(cases.len(), 1);
+    let case = &cases[0];
+
+    assert_eq!(case["caseId"], "legacy-echo");
+    assert_eq!(case["comparability"], "comparable");
+    assert!(
+        case["comparabilityReason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("both sides answered")),
+        "the prose reason is written, not left to a reader to derive: {case}"
+    );
+
+    let regression = &case["changes"][0];
+    assert_eq!(regression["kind"], "backend_changed");
+    assert_eq!(regression["severity"], "critical");
+    assert_eq!(regression["expected"], false);
+    assert!(
+        regression["detail"]
+            .as_str()
+            .is_some_and(|detail| detail.contains("echo-b") && detail.contains("echo-a")),
+        "ROADMAP Task 8.8 step 2: the report must explain the observed traffic difference, so \
+         the change's detail carries both observed backends: {regression}"
+    );
+
+    let declared = &case["changes"][1];
+    assert_eq!(declared["kind"], "non_portable_feature");
+    assert_eq!(declared["expected"], true);
+    assert_eq!(
+        declared["severity"], "info",
+        "a difference the author accounted for in writing is visible and accounted for, never a \
+         warning"
+    );
+
+    assert_eq!(case["probes"][1]["index"], 1);
+    assert_eq!(case["probes"][1]["baseline"]["backend"], "echo-b");
+    assert_eq!(case["probes"][1]["candidate"]["backend"], "echo-a");
+    assert_eq!(
+        case["unmatchedExpectations"][0]["feature"],
+        "nginx.ingress.kubernetes.io/canary"
+    );
+}
+
+/// A lab with no `migration:` section writes no `migration` key at all.
+///
+/// The addition is *optional*, which `docs/schema-migrations.md` defines
+/// as "every document written before it existed is still a valid
+/// document". Omitting the key rather than writing `null` is what makes
+/// an admission-only run's `result.json` byte-identical to what this
+/// crate wrote before Task 8.8 -- the property "additive" is supposed to
+/// name.
+#[test]
+fn a_lab_with_no_migration_suite_writes_no_migration_key() {
+    let mut result = canonical_result();
+    result.migration = None;
+
+    let document: Value =
+        serde_json::from_str(&render_json(&result).expect("serializes")).expect("valid JSON");
+
+    assert!(
+        document.get("migration").is_none(),
+        "an absent suite omits the key entirely: {document}"
+    );
+}

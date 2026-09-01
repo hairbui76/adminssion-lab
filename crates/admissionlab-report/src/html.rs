@@ -140,6 +140,7 @@ pub fn render_html(result: &LabResult) -> String {
         ("SUMMARY_COUNTS", render_summary_counts(&result.summary)),
         ("ENVIRONMENTS", render_environments(result)),
         ("FIXTURES", render_fixtures(result)),
+        ("MIGRATION", render_migration(result)),
         ("STALE_EXPECTATIONS", render_stale_expectations(result)),
         ("DIAGNOSTICS", render_diagnostics(&result.diagnostics)),
     ]);
@@ -803,6 +804,102 @@ fn render_raw_availability(admission: &AdmissionComparison) -> String {
                            so no raw object diff is available.</p>"
             .to_owned(),
     }
+}
+
+/// Every Ingress-to-Gateway migration case, as a compact table per case
+/// (ROADMAP Task 8.8).
+///
+/// Unlike the terminal renderer, the HTML section's *heading* is always
+/// in the page (it is part of the compiled-in template) and this
+/// function fills it with a sentence saying the lab declared no
+/// migration suite. That difference is deliberate and is the same one
+/// the Stale expectations and Diagnostics sections already make: a
+/// terminal report is read once and scrolls away, so an empty section is
+/// noise; a page is navigated, so a section that vanishes leaves a
+/// reader wondering whether the tool looked.
+///
+/// Every difference's `detail` -- the observed statuses, backends and
+/// redirect targets -- is rendered in full. ROADMAP Task 8.8 step 2
+/// requires a migration report to explain the observed traffic
+/// difference rather than an annotation mismatch, and this is where a
+/// reader of the HTML artifact finds it.
+fn render_migration(result: &LabResult) -> String {
+    let Some(cases) = &result.migration else {
+        return "<p class=\"empty\">This lab declares no <code>migration:</code> suite, so no \
+                Ingress-to-Gateway comparison was performed.</p>"
+            .to_owned();
+    };
+    if cases.is_empty() {
+        return "<p class=\"empty\">The migration suite compared no cases.</p>".to_owned();
+    }
+
+    let mut out = String::new();
+    for case in cases {
+        let _ = write!(
+            out,
+            "<h3><code>{case_id}</code></h3><p class=\"note\">{reason}</p>",
+            case_id = escape_html(&case.case_id),
+            reason = escape_html(case.comparability.reason()),
+        );
+
+        if case.changes.is_empty() {
+            out.push_str(
+                "<p class=\"empty\">No behavioral difference was observed for this case.</p>",
+            );
+        } else {
+            out.push_str(
+                "<table><tr><th>severity</th><th>behavior</th><th>declared</th>\
+                 <th>what was observed</th></tr>",
+            );
+            for graded in &case.changes {
+                let _ = write!(
+                    out,
+                    // The same `badge badge-<severity>` markup a graded
+                    // admission change already renders with, so one
+                    // severity reads identically wherever it appears on
+                    // the page.
+                    "<tr><td><span class=\"badge badge-{severity}\">{severity}</span></td>\
+                     <td><code>{kind}</code></td><td>{declared}</td><td>{detail}</td></tr>",
+                    severity = severity_label(graded.severity),
+                    kind = escape_html(graded.change.kind.as_str()),
+                    declared = if graded.change.expected {
+                        "expected"
+                    } else {
+                        "not declared"
+                    },
+                    detail = escape_html(&graded.change.detail),
+                );
+            }
+            out.push_str("</table>");
+        }
+
+        if !case.probes.is_empty() {
+            out.push_str(
+                "<table><tr><th>probe</th><th>Ingress (baseline)</th>\
+                 <th>Gateway (candidate)</th></tr>",
+            );
+            for (index, pair) in case.probes.iter().enumerate() {
+                let _ = write!(
+                    out,
+                    "<tr><td>#{index}</td><td>{baseline}</td><td>{candidate}</td></tr>",
+                    baseline = probe_text(Some(&pair.baseline)),
+                    candidate = probe_text(Some(&pair.candidate)),
+                );
+            }
+            out.push_str("</table>");
+        }
+
+        for expectation in &case.unmatched_expectations {
+            let _ = write!(
+                out,
+                "<p class=\"note\">Declared non-portable but not carried by this case's baseline \
+                 manifests: <code>{feature}</code> &mdash; {reason}</p>",
+                feature = escape_html(&expectation.feature),
+                reason = escape_html(&expectation.reason),
+            );
+        }
+    }
+    out
 }
 
 /// Expectations that matched nothing.

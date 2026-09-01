@@ -370,7 +370,11 @@ fn resolve_migration(
 ) -> Result<MigrationSuiteSpec, SpecError> {
     validate::migration_suite(&raw, source_path)?;
 
-    let MigrationSuiteSpec { cases } = raw;
+    let MigrationSuiteSpec {
+        cases,
+        baseline,
+        candidate,
+    } = raw;
     let cases = cases
         .into_iter()
         .map(|case| {
@@ -401,7 +405,19 @@ fn resolve_migration(
         })
         .collect();
 
-    Ok(MigrationSuiteSpec { cases })
+    // The two per-side blocks carry no filesystem path -- a
+    // `GatewayEndpointSpec` is a namespace, a name or a selector, and a
+    // port -- so they are carried through unchanged, exactly as
+    // `resolve_gateway` carries the Gateway suite's own
+    // `gateway_endpoint` through. Their *content* is validated where
+    // every other endpoint block's is, by
+    // `crate::resolve_gateway_endpoint`, at the moment a runner turns
+    // one into a strategy.
+    Ok(MigrationSuiteSpec {
+        cases,
+        baseline,
+        candidate,
+    })
 }
 
 fn resolve_fixtures(

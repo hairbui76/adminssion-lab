@@ -526,3 +526,45 @@ fn result_with_change_payload(payload: Value) -> LabResult {
     result.policy.changes = vec![change];
     result
 }
+
+/// The migration section is walked by the redaction pass (ROADMAP Task
+/// 8.8).
+///
+/// [`every_sentinel_is_absent_after_redaction`] already scans the whole
+/// serialized document, so a pass that skipped `LabResult::migration`
+/// would fail it -- but it would fail it with a message naming a
+/// sentinel rather than naming the section, and the two sentinels this
+/// one plants (a `Set-Cookie` on a probe response, and a PEM private key
+/// inside a user-written `reason`) are exactly the two channels that
+/// section carries. Asserting on them here means a regression says
+/// *which* new payload stopped being walked.
+#[test]
+fn the_migration_section_is_redacted_in_both_of_its_channels() {
+    let redacted = redact_result(&sentinel_result(), &rules());
+    let migration = redacted
+        .migration
+        .as_ref()
+        .expect("the sentinel result carries a migration case");
+
+    let cookie = migration[0].probes[0]
+        .candidate
+        .response_headers
+        .get("set-cookie")
+        .expect("the sentinel result plants a Set-Cookie on a migration probe");
+    assert_eq!(
+        cookie, REDACTED,
+        "rule 2's object-key form must blank a data plane's Set-Cookie value while keeping the \
+         header name, so a header appearing on one side and not the other stays visible"
+    );
+
+    let reason = &migration[0].unmatched_expectations[0].reason;
+    assert!(
+        reason.contains(REDACTED_PRIVATE_KEY),
+        "a private key pasted into a user-written non-portability reason must be replaced: \
+         {reason}"
+    );
+    assert!(
+        reason.starts_with("kept until the rollout is confirmed"),
+        "and only the key block goes -- the sentence around it is what a reader needs: {reason}"
+    );
+}

@@ -460,6 +460,70 @@ pub struct MigrationSuiteSpec {
     /// [`GatewaySuiteSpec::manifests`] would be: it would install
     /// nothing, probe nothing, and report success.
     pub cases: Vec<MigrationCaseSpec>,
+    /// Where the **legacy** side's data plane is: the one shared
+    /// `Service` an `Ingress` controller serves every `Ingress` on the
+    /// cluster through.
+    ///
+    /// See [`MigrationSideSpec`] for why this is per side, why it is
+    /// `Option` in the type but required in practice, and where the
+    /// requirement is enforced.
+    #[serde(default)]
+    pub baseline: Option<MigrationSideSpec>,
+    /// Where the **Gateway** side's data plane is: the `Service` the
+    /// implementation provisions for the case's own `Gateway`, usually
+    /// selected by Gateway API's `gateway.networking.k8s.io/gateway-name`
+    /// label with `"{gatewayName}"` substituted.
+    #[serde(default)]
+    pub candidate: Option<MigrationSideSpec>,
+}
+
+/// Where one side of a migration suite's data plane is (ROADMAP Task
+/// 8.8).
+///
+/// # Why a migration suite needs two of these and a Gateway suite needs
+/// # one
+///
+/// [`GatewaySuiteSpec::gatewayEndpoint`](GatewaySuiteSpec::gateway_endpoint)
+/// is a single block because a Gateway suite applies the *same*
+/// manifests to two clusters running the same implementation: one
+/// strategy locates both sides' data planes. A migration suite is the
+/// opposite by construction — its baseline is an `Ingress` controller
+/// and its candidate is a Gateway API implementation — and the two
+/// locate their data planes in structurally different ways.
+/// `recipes/ingress-nginx-legacy/recipe.yaml` says so in as many words:
+/// an `Ingress` controller is *one shared* `Service` in the controller's
+/// own namespace with no per-object substitution possible, while
+/// `recipes/nginx-gateway-fabric/recipe.yaml` must template
+/// `{gatewayNamespace}`/`{gatewayName}` because a Gateway API
+/// implementation provisions one `Service` per `Gateway`. A single
+/// strategy cannot be both, so there are two.
+///
+/// # Optional in the type, required to run
+///
+/// Both fields on [`MigrationSuiteSpec`] are `Option` with
+/// `#[serde(default)]`, so every document written before Task 8.8
+/// existed still parses — `docs/schema-migrations.md`'s first obligation
+/// ("additions are optional") applied literally, rather than a new
+/// required key inside an existing `admissionlab.io/v1beta1` section.
+///
+/// A suite that omits one is nonetheless unrunnable: with no strategy
+/// there is no `Service` to port-forward to and therefore no probe, and
+/// a migration case's probes are the *only* thing its two sides can be
+/// compared on ([`MigrationCaseSpec::probes`]). That is refused by
+/// `admissionlab_cli::pipeline`'s pre-flight validation, **before any
+/// cluster is created**, in exactly the place and for exactly the reason
+/// a Gateway route contract id that cannot be reported is refused there.
+/// The result is a load-time-quality error without a schema-level
+/// required field.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationSideSpec {
+    /// How to find this side's data-plane `Service`. The same block, in
+    /// the same shape, validated by the same
+    /// [`crate::resolve_gateway_endpoint`], that a recipe's own
+    /// `gatewayEndpoint:` and a lab's `gateway.gatewayEndpoint:` carry —
+    /// one vocabulary for "where does a request go in", not three.
+    pub gateway_endpoint: GatewayEndpointSpec,
 }
 
 /// One migration case: the `Ingress` manifests that define today's

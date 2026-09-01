@@ -522,41 +522,86 @@ impl KubeGatewaySuite {
         contract: &RouteContract,
         deadline: Instant,
     ) -> Result<ReconciliationEvidence, String> {
-        // The freshest observation that actually satisfied the
-        // convergence rule. Kept because the *last* observation need not
-        // have: once the deadline is close, an inner wait has no room
-        // left for the two-poll stability window, so it returns
-        // `converged: false` about a status that had already settled
-        // several observations ago. Reporting that would turn "the route
-        // settled on rejecting this backend" into "we could not tell",
-        // and would make the two sides incomparable for a reason that is
-        // an artefact of this loop rather than a fact about the cluster.
-        let mut settled: Option<ReconciliationEvidence> = None;
-        loop {
-            let evidence = wait_for_route_reconciliation(cluster, contract, deadline)
-                .await
-                .map_err(|error| error.to_string())?;
-            if probe_skip_reason(contract, &evidence).is_none() {
-                return Ok(evidence);
-            }
-            let out_of_time = Instant::now() + REOBSERVE_INTERVAL >= deadline;
-            match (evidence.converged, out_of_time) {
-                // Settled, but not on a state that carries traffic. Keep
-                // it as the best answer so far and look again: Istio's
-                // first settled status routinely is a transient one.
-                (true, false) => settled = Some(evidence),
-                (true, true) => return Ok(evidence),
-                // Never settled, and the budget is gone. The honest
-                // answer is the freshest settled observation when there
-                // was one, and this unconverged one otherwise -- which
-                // the comparator is the only thing allowed to interpret.
-                (false, true) => return Ok(settled.unwrap_or(evidence)),
-                (false, false) => {}
-            }
-            tokio::time::sleep(REOBSERVE_INTERVAL).await;
-        }
+        observe_route(cluster, contract, deadline).await
     }
 
+    /// Writes one JSON artifact into `directory`, creating it first.
+    ///
+    /// [`ArtifactStore`] never creates directories (its own
+    /// documentation is explicit), so the `create_dir_all` here is the
+    /// same one `admissionlab_admission::capture::write_evidence`
+    /// performs for the admission bundle beside this one.
+    async fn write_artifact<T: Serialize + Sync>(
+        &self,
+        directory: &std::path::Path,
+        name: &str,
+        value: &T,
+    ) -> Result<(), String> {
+        write_artifact(&self.store, directory, name, value).await
+    }
+}
+
+/// Observes one route until it is carrying traffic, or until `deadline`
+/// — the loop [`KubeGatewaySuite::observe_route`] documents, as a free
+/// function so ROADMAP Task 8.8's migration runner drives the *same*
+/// one.
+///
+/// A free function rather than a second copy for the reason §1.2 gives
+/// for refusing competing synonyms: the argument for this loop's
+/// existence (Istio publishes a stable, current, settled
+/// `Programmed: False (AddressNotAssigned)` within ~270 ms of a
+/// `Gateway` being applied, and taking that first answer would report
+/// the middle of reconciliation as the route's behavior) is the same
+/// argument on either side of a migration comparison, and two
+/// implementations of it would be free to answer differently about the
+/// same cluster.
+///
+/// # Errors
+///
+/// Returns the rendered [`GatewayError`] if the route's status could not
+/// be read at all. A route that reconciled to a `False` condition is
+/// **not** an error — that is the evidence.
+pub async fn observe_route(
+    cluster: &ClusterHandle,
+    contract: &RouteContract,
+    deadline: Instant,
+) -> Result<ReconciliationEvidence, String> {
+    // The freshest observation that actually satisfied the
+    // convergence rule. Kept because the *last* observation need not
+    // have: once the deadline is close, an inner wait has no room
+    // left for the two-poll stability window, so it returns
+    // `converged: false` about a status that had already settled
+    // several observations ago. Reporting that would turn "the route
+    // settled on rejecting this backend" into "we could not tell",
+    // and would make the two sides incomparable for a reason that is
+    // an artefact of this loop rather than a fact about the cluster.
+    let mut settled: Option<ReconciliationEvidence> = None;
+    loop {
+        let evidence = wait_for_route_reconciliation(cluster, contract, deadline)
+            .await
+            .map_err(|error| error.to_string())?;
+        if probe_skip_reason(contract, &evidence).is_none() {
+            return Ok(evidence);
+        }
+        let out_of_time = Instant::now() + REOBSERVE_INTERVAL >= deadline;
+        match (evidence.converged, out_of_time) {
+            // Settled, but not on a state that carries traffic. Keep
+            // it as the best answer so far and look again: Istio's
+            // first settled status routinely is a transient one.
+            (true, false) => settled = Some(evidence),
+            (true, true) => return Ok(evidence),
+            // Never settled, and the budget is gone. The honest
+            // answer is the freshest settled observation when there
+            // was one, and this unconverged one otherwise -- which
+            // the comparator is the only thing allowed to interpret.
+            (false, true) => return Ok(settled.unwrap_or(evidence)),
+            (false, false) => {}
+        }
+        tokio::time::sleep(REOBSERVE_INTERVAL).await;
+    }
+}
+
+impl KubeGatewaySuite {
     /// Waits out the suite's own `readiness:` gate, if it declared one.
     ///
     /// After the manifests are applied and before any route is observed:
@@ -594,32 +639,43 @@ impl KubeGatewaySuite {
         }
         Ok(())
     }
+}
 
-    /// Writes one JSON artifact into `directory`, creating it first.
-    ///
-    /// [`ArtifactStore`] never creates directories (its own
-    /// documentation is explicit), so the `create_dir_all` here is the
-    /// same one `admissionlab_admission::capture::write_evidence`
-    /// performs for the admission bundle beside this one.
-    async fn write_artifact<T: Serialize + Sync>(
-        &self,
-        directory: &std::path::Path,
-        name: &str,
-        value: &T,
-    ) -> Result<(), String> {
-        tokio::fs::create_dir_all(directory)
-            .await
-            .map_err(|error| {
-                format!(
-                    "its evidence directory {} could not be created: {error}",
-                    directory.display()
-                )
-            })?;
-        self.store
-            .write_json_atomic(&directory.join(name), value)
-            .await
-            .map_err(|error| format!("{name} could not be written: {error}"))
-    }
+/// Writes one JSON artifact into `directory`, creating it first.
+///
+/// [`ArtifactStore`] never creates directories (its own documentation is
+/// explicit), so the `create_dir_all` here is the same one
+/// `admissionlab_admission::capture::write_evidence` performs for the
+/// admission bundle beside this one.
+///
+/// A free function taking the store for the reason [`observe_route`]
+/// gives for being one: ROADMAP Task 8.8's migration runner writes its
+/// evidence into the same `raw/<side>/` tree with the same atomicity and
+/// the same "create the directory, then write" order, and two copies of
+/// four lines is two places for that order to change.
+///
+/// # Errors
+///
+/// Returns a rendered message naming either the directory that could not
+/// be created or the file that could not be written.
+pub async fn write_artifact<T: Serialize + Sync>(
+    store: &ArtifactStore,
+    directory: &std::path::Path,
+    name: &str,
+    value: &T,
+) -> Result<(), String> {
+    tokio::fs::create_dir_all(directory)
+        .await
+        .map_err(|error| {
+            format!(
+                "its evidence directory {} could not be created: {error}",
+                directory.display()
+            )
+        })?;
+    store
+        .write_json_atomic(&directory.join(name), value)
+        .await
+        .map_err(|error| format!("{name} could not be written: {error}"))
 }
 
 #[async_trait]

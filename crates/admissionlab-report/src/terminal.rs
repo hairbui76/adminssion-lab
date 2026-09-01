@@ -142,6 +142,7 @@ pub fn render_terminal(result: &LabResult, options: &TerminalOptions) -> String 
         &palette,
     );
     render_gateway(&mut out, result, &palette);
+    render_migration(&mut out, result, &palette);
     render_inconclusive(&mut out, result, &palette);
     render_stale_expectations(&mut out, result, &palette);
     render_diagnostics(&mut out, result, &palette);
@@ -747,6 +748,130 @@ fn parent_text(parent: &ParentIdentity) -> String {
 /// `admissionlab_core::StageTimings` publishes.
 fn format_millis(elapsed: std::time::Duration) -> String {
     format!("{}ms", elapsed.as_millis())
+}
+
+/// Every Ingress-to-Gateway migration case the run compared, with each
+/// difference it observed and each probe both sides answered (ROADMAP
+/// Task 8.8).
+///
+/// Omitted entirely for a lab with no `migration:` section, for the
+/// reason [`render_gateway`] gives for doing the same: "how many
+/// migration cases" is not a question an admission-only run answers, and
+/// an empty heading claiming zero would answer it wrongly.
+///
+/// # Why this section is not folded into Critical/Warnings
+///
+/// Those two sections iterate [`LabResult::policy`]`.changes`, which is
+/// `admissionlab-policy`'s graded list of
+/// `admissionlab_diff::SemanticChange`s. A migration finding is not one
+/// (see [`crate::model::LabResult::migration`]), so it is not in that
+/// list and cannot be rendered from it. It gets its own section, its
+/// severity printed on each line, and — because a migration regression
+/// *does* move the run's verdict — it is printed unconditionally and in
+/// full, never summarized to a count. That is the same "nothing is
+/// hidden" rule this module opens with, applied to the one finding class
+/// that would otherwise reach a `Result: fail` line with no explanation
+/// above it.
+fn render_migration(out: &mut String, result: &LabResult, palette: &Palette) {
+    let Some(cases) = &result.migration else {
+        return;
+    };
+    let _ = writeln!(
+        out,
+        "{bold}Migration{reset}  {count} Ingress-to-Gateway case(s)",
+        bold = palette.bold,
+        reset = palette.reset,
+        count = cases.len(),
+    );
+    for case in cases {
+        let _ = writeln!(
+            out,
+            "  {bold}{case_id}{reset}  {dim}{reason}{reset}",
+            bold = palette.bold,
+            dim = palette.dim,
+            reset = palette.reset,
+            case_id = case.case_id,
+            reason = case.comparability.reason(),
+        );
+        if case.changes.is_empty() {
+            // Never "no behavior changed" on its own: whether that is a
+            // finding or an absence of evidence is what the
+            // comparability line above says, and this one deliberately
+            // states only what was observed.
+            let _ = writeln!(
+                out,
+                "    {dim}no behavioral difference was observed{reset}",
+                dim = palette.dim,
+                reset = palette.reset,
+            );
+        }
+        for graded in &case.changes {
+            let (label, color) = match graded.severity {
+                Severity::Critical => ("critical", palette.red),
+                Severity::Warning => ("warning", palette.yellow),
+                Severity::Info => ("info", palette.dim),
+            };
+            let expected = if graded.change.expected {
+                " (expected)"
+            } else {
+                ""
+            };
+            let _ = writeln!(
+                out,
+                "    {color}{label:<8}{reset} {kind}{expected}",
+                reset = palette.reset,
+                kind = graded.change.kind.as_str(),
+            );
+            // The observed evidence, on its own line and never elided:
+            // ROADMAP Task 8.8 step 2 requires the report to explain the
+            // observed traffic difference rather than an annotation
+            // mismatch, and this string is where the two sides' statuses,
+            // backends and redirect targets actually are.
+            let _ = writeln!(
+                out,
+                "      {dim}{detail}{reset}",
+                dim = palette.dim,
+                reset = palette.reset,
+                detail = graded.change.detail,
+            );
+        }
+        for (index, pair) in case.probes.iter().enumerate() {
+            let _ = writeln!(
+                out,
+                "    {dim}probe #{index}:{reset} Ingress {baseline} {dim}->{reset} Gateway \
+                 {candidate}",
+                dim = palette.dim,
+                reset = palette.reset,
+                baseline = probe_text(&pair.baseline),
+                candidate = probe_text(&pair.candidate),
+            );
+        }
+        for expectation in &case.unmatched_expectations {
+            let _ = writeln!(
+                out,
+                "    {dim}declared non-portable but never observed:{reset} {feature} ({reason})",
+                dim = palette.dim,
+                reset = palette.reset,
+                feature = expectation.feature,
+                reason = expectation.reason,
+            );
+        }
+    }
+    out.push('\n');
+}
+
+/// One side of a migration probe pair, as `HTTP 200 from echo-a`.
+///
+/// The same wording [`render_gateway_side`] uses for a Gateway probe,
+/// including the refusal to soften an unidentified backend into a name.
+fn probe_text(probe: &admissionlab_gateway::HttpProbeResult) -> String {
+    match probe.backend.as_deref() {
+        Some(backend) => format!("HTTP {} from {backend}", probe.status),
+        None => format!(
+            "HTTP {} from a backend that did not identify itself",
+            probe.status
+        ),
+    }
 }
 
 /// Fixtures whose evidence does not support a comparison, with each

@@ -22,6 +22,16 @@
         "$ref": "#/$defs/FixtureDocument"
       }
     },
+    "migration": {
+      "description": "Every Ingress-to-Gateway migration case the run compared\n(ROADMAP Task 8.8), or **omitted entirely** for a lab with no\n`migration:` section.\n\n# Why this key is omitted rather than written as `null`\n\nThe three *evidence sections* inside a fixture are always\nwritten, because each one's absence would otherwise have to be\ninterpreted (see this module's Global Constraint 15 section).\nThis key is different in kind: it is an **optional addition to a\nfrozen document**, and `docs/schema-migrations.md`'s first\nobligation is that an addition must leave every document written\nbefore it existed still valid. Omitting it means a `result.json`\nfrom an admission-only or Gateway-only lab is byte-identical to\nwhat this crate wrote before Task 8.8 — which is exactly the\nproperty \"additive\" is supposed to name. The same reasoning, and\nthe same treatment, [`Self::timings`] already carries.\n\nWhere a claim *could* be misread the section states it inside\nitself instead: [`MigrationSection::comparability`] says whether\nan empty `changes` list is agreement or ignorance, and\n[`MigrationSection::comparabilityReason`](MigrationSection::comparability_reason)\nsays it in prose.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/MigrationSection"
+      }
+    },
     "policy": {
       "description": "The run's verdict and every graded change.",
       "$ref": "#/$defs/PolicyDocument"
@@ -897,6 +907,164 @@
       },
       "required": [
         "wallMs"
+      ]
+    },
+    "MigrationBehaviorKind": {
+      "description": "Which routing behavior moved between an `Ingress` and the Gateway API\nobjects meant to replace it.\n\n§1.2's canonical name, frozen at these seven variants by ROADMAP Task\n8.5. Deliberately *not* `admissionlab_diff::SemanticChangeKind` -- see\nthis module's \"A separate vocabulary from `SemanticChangeKind`\".\n\nThe wire tags are `snake_case`, matching every other change\nvocabulary in this workspace (`traffic_backend_changed`,\n`route_attached`, ...), and they are pinned by\n`tests/migration_diff.rs` rather than left to the derive: a rename\nhere would silently change a document a report renders.\n\n`Serialize` but not `Deserialize`: this is observation travelling\noutward, like every other evidence type in this crate.\n\n`JsonSchema` was deliberately absent until ROADMAP Task 8.8, because\nnothing embedded this in the frozen\n`admissionlab.io/result/v1beta1` document and a premature derive\nwould have frozen a shape nobody had chosen. Task 8.8 chose it: a\nresult document now carries an optional top-level `migration` array\n(`admissionlab_report::wire::MigrationSection`), so this type is part\nof a published schema and derives the schema that describes it, from\nthe same declaration that serializes it.",
+      "oneOf": [
+        {
+          "description": "Host-based routing behaves differently.\n\nTwo triggers, both evidence-first: the two sides redirected to\ndifferent *hosts*, or a probe whose request path is the bare root\n`/` got different statuses. A root-path probe carries no\npath-matching information at all -- the only thing distinguishing\nit from any other request to that data plane is its `Host` header\n-- so a status difference on one is a difference in what the\nstacks did with that host.",
+          "type": "string",
+          "const": "host_behavior_changed"
+        },
+        {
+          "description": "Path matching behaves differently: the two sides answered a\nprobe for a specific path differently, and nothing more specific\n(a redirect, a backend, a shared backend) accounts for it.\n\nThis is the residual arm of the status-difference rule, and it is\ndeliberately the residual one: a contract's `path` is the most\nspecific thing a routing rule matches on, and an `Ingress`\n`pathType` and an `HTTPRoute` `path.type` are the pair most\nlikely to have been translated wrongly by hand.",
+          "type": "string",
+          "const": "path_behavior_changed"
+        },
+        {
+          "description": "TLS behaves differently: the two sides redirected to different\nURI *schemes*.\n\nThe classic migration bug this catches is\n`nginx.ingress.kubernetes.io/ssl-redirect` (on by default once an\n`Ingress` has any TLS block) against an `HTTPRoute` whose\n`RequestRedirect` filter names no `scheme`: one side sends the\nclient to `https://`, the other to `http://`.\n\nA known limit, stated rather than hidden: probes reach a data\nplane through a plaintext `kubectl port-forward`, so a redirect's\nscheme is the *only* TLS evidence available today. When a probe\ncan itself speak TLS, a status difference on such a probe belongs\nhere too, and this variant is where that lands.",
+          "type": "string",
+          "const": "tls_behavior_changed"
+        },
+        {
+          "description": "A different workload answered.\n\nClaimed only when *both* sides identified their backend and the\nidentities differ. `backend: None` means \"which workload answered\nis unknown\", never \"a different one did\" -- the same rule\n[`crate::diff::diff_gateway`] applies to\n`traffic_backend_changed`, and for the same reason: a fabricated\nvalue here would fabricate a regression.",
+          "type": "string",
+          "const": "backend_changed"
+        },
+        {
+          "description": "The request the backend received differs, or the redirect target\nwas rewritten differently.\n\nTwo triggers. The two sides redirected to the same scheme and\nhost but a different *path* -- which is a rewrite of the target,\nnot a difference in whether to redirect. Or the same backend\nanswered both sides with different statuses: an identical\nworkload cannot answer differently unless what reached it\ndiffered, and for an echo backend the only thing that can differ\nis the request line the proxy forwarded.\n\nSee this module's \"What the evidence can and cannot show\" for the\nrewrite this cannot see at all.",
+          "type": "string",
+          "const": "rewrite_behavior_changed"
+        },
+        {
+          "description": "Whether, or how, the request is redirected differs: one side sent\na `Location` and the other did not, or both did to the same place\nwith different status codes (a `301` against a `308` is a\ndifferent instruction to a client about method rewriting and\ncacheability).",
+          "type": "string",
+          "const": "redirect_behavior_changed"
+        },
+        {
+          "description": "The baseline `Ingress` carries an `ingress-nginx` annotation with\nno portable Gateway API equivalent.\n\nThe one kind derived from the manifests rather than from traffic,\nand the only one whose `expected` flag can be `true`. See\n[`NONPORTABLE_INGRESS_ANNOTATIONS`] for the catalog and\n[`nonportable_changes`] for the rule.",
+          "type": "string",
+          "const": "non_portable_feature"
+        }
+      ]
+    },
+    "MigrationChangeDocument": {
+      "description": "One migration behavior change, graded.\n\nCarries no `id`: [`semantic_change_id`] exists because a\n`SemanticChange` appears *twice* in this document (per fixture and\nrun-wide) and the two lists need a join key. A migration change\nappears exactly once, under the case that observed it, so an\nidentifier here would be a key with nothing to join to.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "What was observed, in full enough detail to check the claim.\nWritten by the Gateway engine and deterministic.",
+          "type": "string"
+        },
+        "expected": {
+          "description": "Whether the case's author declared this difference in writing.\nOnly a `non_portable_feature` change can be `true`.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "Which routing behavior moved, in\n`admissionlab_gateway::MigrationBehaviorKind`'s own vocabulary —\ndeliberately *not* a `SemanticChangeKind`.",
+          "$ref": "#/$defs/MigrationBehaviorKind"
+        },
+        "severity": {
+          "description": "How much the run says it matters. Decided by\n`admissionlab_cli::pipeline::migration`, never here.",
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "kind",
+        "detail",
+        "expected",
+        "severity"
+      ]
+    },
+    "MigrationComparability": {
+      "description": "Whether one migration case's two sides can be compared at all.\n\nThis module's twin of [`crate::diff::GatewayComparability`]; see this\nmodule's \"An incomparable case\" for the argument, and\n[`MigrationComparability::reason`] for what each variant means in\nprose.\n\nDerives no `Default`, for the reason that type gives:\n`Comparable` is the flattering answer, and defaulting to it would\nturn \"we could not tell\" into \"we looked and it was fine\".",
+      "oneOf": [
+        {
+          "description": "Both sides produced traffic evidence for this case.",
+          "type": "string",
+          "const": "comparable"
+        },
+        {
+          "description": "The API server refused the baseline's own objects, so the legacy\nstack never served this case at all. The candidate's evidence, if\nany, stands on its own -- there is nothing to compare it against.",
+          "type": "string",
+          "const": "baseline_not_admitted"
+        },
+        {
+          "description": "The baseline was admitted but never served the case's probes as\ncontracted within its deadline, so it established no reference\nbehavior. See [`crate::ingress`]'s \"THE FINDING\" for why that is\nmeasured with traffic rather than with a status.",
+          "type": "string",
+          "const": "baseline_not_serving"
+        },
+        {
+          "description": "The baseline served the case and the candidate answered no probe\n-- a route that never reconciled, or a suite that skipped its\nprobes with a reason. What the candidate lost is\n[`crate::diff::diff_gateway`]'s claim to make about the Gateway\nside's own two runs; this comparator has nothing to pair.",
+          "type": "string",
+          "const": "candidate_not_serving"
+        }
+      ]
+    },
+    "MigrationSection": {
+      "description": "What one Ingress-to-Gateway migration case did on both sides\n(ROADMAP Task 8.8).\n\nA sibling of [`FixtureDocument`] rather than a section inside one —\nsee [`crate::model::LabResult::migration`] for the argument, which is\nabout vocabularies rather than about layout.",
+      "type": "object",
+      "properties": {
+        "caseId": {
+          "description": "The migration case both sides are about.",
+          "type": "string"
+        },
+        "changes": {
+          "description": "Every observed difference, in the Gateway engine's own\ndeterministic order, each with the severity the run graded it.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MigrationChangeDocument"
+          }
+        },
+        "comparability": {
+          "description": "Whether the two sides were comparable at all.",
+          "$ref": "#/$defs/MigrationComparability"
+        },
+        "comparabilityReason": {
+          "description": "The same answer in prose —\n`admissionlab_gateway::MigrationComparability::reason`'s own\nwords, carried because \"the variant name alone would leave\n'incomparable' unexplained\" and because a `result.json` is read\nby people as well as by programs.",
+          "type": "string"
+        },
+        "probes": {
+          "description": "Every probe both sides answered, paired by index — the same\npairing, and the same [`ProbeExchange`] shape, the Gateway\ntraffic section uses, because it is the same question asked of a\ndifferently-shaped pair of stacks.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProbeExchange"
+          }
+        },
+        "unmatchedExpectations": {
+          "description": "Non-portable features declared for this case that its baseline\nmanifests do not carry. Reported, never graded — see\n[`crate::model::MigrationCaseComparison::unmatched_expectations`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonPortableExpectationDocument"
+          }
+        }
+      },
+      "required": [
+        "caseId",
+        "comparability",
+        "comparabilityReason",
+        "changes",
+        "probes",
+        "unmatchedExpectations"
+      ]
+    },
+    "NonPortableExpectationDocument": {
+      "description": "One declared non-portability that the baseline manifests do not\nactually carry.\n\nA projection rather than the configuration type itself:\n`admissionlab_spec::NonPortableFeatureExpectation` derives\n`Deserialize` (a user writes it) and not `Serialize`, and this\ndocument owns its own `camelCase` keys — see this module's \"Casing\".",
+      "type": "object",
+      "properties": {
+        "feature": {
+          "description": "The feature the case declared, verbatim.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "The author's written justification, verbatim.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feature",
+        "reason"
       ]
     },
     "ObservedCondition": {

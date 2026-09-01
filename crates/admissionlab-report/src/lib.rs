@@ -18,7 +18,11 @@
 //!   [`AdmissionComparison`], and the reserved
 //!   [`GatewayCaseComparison`]). It also defines how a run's fixtures
 //!   are counted into five buckets -- see [`FixtureComparison::bucket`]
-//!   for the precedence rule and why *inconclusive* outranks everything.
+//!   for the precedence rule and why *inconclusive* outranks everything
+//!   -- and, from ROADMAP Task 8.8, [`MigrationCaseComparison`], which is
+//!   a *sibling* of the fixture list rather than an entry in it (see
+//!   [`model::LabResult::migration`] for why the two vocabularies are
+//!   kept apart).
 //! - [`redact`] holds [`redact_result`], the single chokepoint where
 //!   Global Constraint 14's redaction happens for every renderer at
 //!   once.
@@ -109,7 +113,8 @@ pub use html::{escape_html, render_html, write_html_report};
 pub use json::{render_json, write_json_report};
 pub use model::{
     AdmissionComparison, ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureBucket,
-    FixtureComparison, GatewayCaseComparison, LabResult, RunSummary, SCHEMA_VERSION,
+    FixtureComparison, GatewayCaseComparison, GradedMigrationChange, LabResult,
+    MigrationCaseComparison, RunSummary, SCHEMA_VERSION,
 };
 pub use redact::{
     DEFAULT_ENV_NAME_PATTERNS, REDACTED, REDACTED_PRIVATE_KEY, RedactionRules,
@@ -118,7 +123,8 @@ pub use redact::{
 pub use schema::result_v1beta1_json_schema;
 pub use terminal::{TerminalOptions, render_terminal};
 pub use wire::{
-    AdmissionSection, ChangeDocument, DivergenceAttribution, FixtureDocument, PolicyDocument,
+    AdmissionSection, ChangeDocument, DivergenceAttribution, FixtureDocument,
+    MigrationChangeDocument, MigrationSection, NonPortableExpectationDocument, PolicyDocument,
     ProbeExchange, ReconciliationSection, ResultDocument, SideEvidenceLevel, SideTraceEvidence,
     TrafficEvidence, TrafficSection, semantic_change_id,
 };

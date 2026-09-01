@@ -105,6 +105,40 @@ pub struct LabResult {
     /// to one fixture. Per-fixture diagnostics stay on that fixture's
     /// [`AdmissionOutcome::diagnostics`].
     pub diagnostics: Vec<Diagnostic>,
+    /// Every Ingress-to-Gateway migration case the run compared
+    /// (ROADMAP Task 8.8), in the order the suite declares them, or
+    /// `None` for a run whose lab declared no `migration:` section.
+    ///
+    /// # Why a top-level list and not a [`FixtureComparison`]
+    ///
+    /// A `FixtureComparison` is one *compared unit* whose findings are
+    /// `admissionlab_diff::SemanticChange`s, graded by
+    /// `admissionlab-policy` and counted into [`RunSummary`]'s five
+    /// buckets. A migration case's findings are
+    /// [`admissionlab_gateway::MigrationBehaviorChange`]s, which
+    /// `admissionlab_gateway::migration` documents at length as a
+    /// *separate vocabulary that never mixes* with `SemanticChangeKind`.
+    /// Forcing them into a `FixtureComparison` would mean either
+    /// inventing `SemanticChangeKind` variants for six routing
+    /// behaviors — the competing-synonym problem, on the one enum the
+    /// policy engine grades — or flattening all six into one kind and
+    /// throwing away exactly the classification Task 8.5 exists to
+    /// produce. Neither is acceptable, so a migration case is its own
+    /// row in its own list.
+    ///
+    /// The consequence is deliberate and is the honest one:
+    /// [`RunSummary`] does **not** count migration cases (its five
+    /// counts still partition [`Self::fixtures`] exactly), and no
+    /// migration change appears in [`Self::policy`]`.changes`. What a
+    /// migration case *does* reach is the run's verdict — see
+    /// [`MigrationCaseComparison::changes`] for how, and
+    /// `admissionlab_cli::pipeline::migration` for the grading rule
+    /// itself.
+    ///
+    /// `None` rather than an empty `Vec` because the two say different
+    /// things: "this lab is not migrating off `Ingress`" is not "this
+    /// lab is migrating and compared nothing".
+    pub migration: Option<Vec<MigrationCaseComparison>>,
     /// How long each stage of the run took (ROADMAP Task 5.7), or `None`
     /// for a result whose producer did not measure.
     ///
@@ -522,3 +556,78 @@ pub struct AdmissionComparison {
 /// registry name it always did, so no consumer of this crate's public
 /// surface had to change.
 pub use admissionlab_gateway::GatewayCaseComparison;
+
+/// One Ingress-to-Gateway migration case, as a report presents it
+/// (ROADMAP Task 8.8).
+///
+/// Assembled by `admissionlab_cli::pipeline::migration` out of what
+/// `admissionlab_gateway::compare_migration_case` observed plus the
+/// grade that pipeline assigned each change. Nothing here is decided in
+/// this crate: §1.1's "report rendering never decides severity" holds
+/// for migration findings exactly as it holds for admission ones, which
+/// is why [`GradedMigrationChange::severity`] arrives already attached
+/// rather than being derived at render time.
+///
+/// Derives no `Default`: it holds evidence about a real case.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationCaseComparison {
+    /// The [`admissionlab_gateway::MigrationCaseSpec::id`] this row is
+    /// about, copied verbatim.
+    pub case_id: String,
+    /// Whether the two sides could be compared at all —
+    /// `admissionlab_gateway::migration_comparability`'s answer, carried
+    /// so that an empty [`Self::changes`] is never read as "the
+    /// migration preserved every behavior" when the truth is "one side
+    /// never served this case" (Global Constraint 15). The same
+    /// discipline [`GatewayCaseComparison::comparability`] already
+    /// applies to a route contract.
+    pub comparability: MigrationComparability,
+    /// Every observed difference, in
+    /// `admissionlab_gateway::compare_migration_case`'s own
+    /// deterministic order, each with the severity the pipeline graded
+    /// it.
+    pub changes: Vec<GradedMigrationChange>,
+    /// Every probe both sides answered, paired by index. Empty when the
+    /// case was not comparable.
+    pub probes: Vec<ProbePair>,
+    /// Non-portable features the case's author declared that its
+    /// baseline manifests do not actually carry —
+    /// `admissionlab_gateway::unmatched_nonportable_expectations`'s
+    /// answer, and the migration analog of
+    /// `admissionlab_policy::StaleExpectation`.
+    ///
+    /// Reported, never graded: an expectation that matched nothing is a
+    /// statement about the configuration rather than something the run
+    /// observed, so it is shown for its author to delete and it does not
+    /// move the verdict — exactly what `admissionlab-policy` already
+    /// does with a stale `expectations.yaml` entry.
+    pub unmatched_expectations: Vec<NonPortableFeatureExpectation>,
+}
+
+/// One migration behavior change and how much the run says it matters.
+///
+/// The migration counterpart of `admissionlab_policy::ClassifiedChange`,
+/// and deliberately not that type: a `ClassifiedChange` wraps a
+/// `SemanticChange`, which a
+/// [`admissionlab_gateway::MigrationBehaviorChange`] is explicitly not
+/// (see `admissionlab_gateway::migration`'s "A separate vocabulary from
+/// `SemanticChangeKind`").
+///
+/// What *is* reused is [`Severity`] itself — the project's one
+/// three-word severity vocabulary. Reusing the words without reusing the
+/// engine is the whole of the arrangement: `admissionlab-policy` is
+/// untouched, it grades nothing here, and a reader comparing a migration
+/// row against a fixture row is reading one scale rather than two.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GradedMigrationChange {
+    /// What the run observed, verbatim from the Gateway engine.
+    pub change: MigrationBehaviorChange,
+    /// How much it matters, as
+    /// `admissionlab_cli::pipeline::migration::grade` decided. Never
+    /// decided here.
+    pub severity: Severity,
+}
+
+pub use admissionlab_gateway::{
+    MigrationBehaviorChange, MigrationComparability, NonPortableFeatureExpectation, ProbePair,
+};

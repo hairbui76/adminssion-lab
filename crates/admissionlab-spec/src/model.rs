@@ -66,7 +66,7 @@ use serde::Deserialize;
 
 pub use crate::v1alpha1::API_VERSION;
 pub use crate::v1beta1::{
-    GatewaySuiteSpec, LatencyPolicy, MigrationCaseSpec, MigrationSuiteSpec,
+    GatewaySuiteSpec, LatencyPolicy, MigrationCaseSpec, MigrationSideSpec, MigrationSuiteSpec,
     NonPortableFeatureExpectation, PolicySpec,
 };
 

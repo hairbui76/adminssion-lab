@@ -522,10 +522,46 @@
         "probes"
       ]
     },
+    "MigrationSideSpec": {
+      "description": "Where one side of a migration suite's data plane is (ROADMAP Task\n8.8).\n\n# Why a migration suite needs two of these and a Gateway suite needs\n# one\n\n[`GatewaySuiteSpec::gatewayEndpoint`](GatewaySuiteSpec::gateway_endpoint)\nis a single block because a Gateway suite applies the *same*\nmanifests to two clusters running the same implementation: one\nstrategy locates both sides' data planes. A migration suite is the\nopposite by construction — its baseline is an `Ingress` controller\nand its candidate is a Gateway API implementation — and the two\nlocate their data planes in structurally different ways.\n`recipes/ingress-nginx-legacy/recipe.yaml` says so in as many words:\nan `Ingress` controller is *one shared* `Service` in the controller's\nown namespace with no per-object substitution possible, while\n`recipes/nginx-gateway-fabric/recipe.yaml` must template\n`{gatewayNamespace}`/`{gatewayName}` because a Gateway API\nimplementation provisions one `Service` per `Gateway`. A single\nstrategy cannot be both, so there are two.\n\n# Optional in the type, required to run\n\nBoth fields on [`MigrationSuiteSpec`] are `Option` with\n`#[serde(default)]`, so every document written before Task 8.8\nexisted still parses — `docs/schema-migrations.md`'s first obligation\n(\"additions are optional\") applied literally, rather than a new\nrequired key inside an existing `admissionlab.io/v1beta1` section.\n\nA suite that omits one is nonetheless unrunnable: with no strategy\nthere is no `Service` to port-forward to and therefore no probe, and\na migration case's probes are the *only* thing its two sides can be\ncompared on ([`MigrationCaseSpec::probes`]). That is refused by\n`admissionlab_cli::pipeline`'s pre-flight validation, **before any\ncluster is created**, in exactly the place and for exactly the reason\na Gateway route contract id that cannot be reported is refused there.\nThe result is a load-time-quality error without a schema-level\nrequired field.",
+      "type": "object",
+      "properties": {
+        "gatewayEndpoint": {
+          "description": "How to find this side's data-plane `Service`. The same block, in\nthe same shape, validated by the same\n[`crate::resolve_gateway_endpoint`], that a recipe's own\n`gatewayEndpoint:` and a lab's `gateway.gatewayEndpoint:` carry —\none vocabulary for \"where does a request go in\", not three.",
+          "$ref": "#/$defs/GatewayEndpointSpec"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gatewayEndpoint"
+      ]
+    },
     "MigrationSuiteSpec": {
       "description": "The Ingress-to-Gateway migration suite (ROADMAP Task 8.3): a list of\ncases, each pairing the `Ingress` manifests a team runs today against\nthe Gateway API manifests they intend to replace them with, plus the\nprobes that decide whether the two really behave the same.\n\n# Admission Lab does not convert anything\n\n**Read this before writing a case.** v1 contains no\nIngress-to-Gateway converter, and adding one is explicitly out of\nscope. Both halves of every case are written by a human or produced\nby some *other* tool (`ingress2gateway`, a vendor migration guide, a\nhand edit), and this suite's entire job is to check that the\nconversion **that user already performed** preserves behavior.\n\nThat is not a temporary limitation waiting on a converter; it is the\nonly arrangement under which the answer means anything. A suite that\ngenerated the candidate manifests itself would be comparing its own\nconverter against its own converter: every rule the converter got\nwrong would be applied identically on both sides of the comparison,\nso the run would report \"no behavior change\" precisely for the\nmistakes it was supposed to catch. The pairing is required, and it is\nrequired *explicitly*, for the same reason\n[`RouteContract`]'s Gateway identity is: a contract that reads its\nexpectation out of the artifact under test can never contradict that\nartifact.\n\n# Where this type lives, and why not in `admissionlab-gateway`\n\nROADMAP Task 8.3 lists `crates/admissionlab-gateway/src/migration.rs`\nas this type's file, and §1.2's registry *also* freezes\n[`crate::ResolvedLab::migration`] as an `Option<MigrationSuiteSpec>`.\nExactly the situation [`GatewaySuiteSpec`] already resolved, with the\nsame forced answer: `admissionlab-gateway` depends (transitively) on\nthis crate, so a `spec -> gateway` edge would be a dependency cycle.\nThe hand-written configuration surface is defined here;\n`admissionlab_gateway::migration` **re-exports these exact types**\nrather than declaring twins, and owns what a user never writes.\n\n# One type for both the raw and the resolved stage\n\nAs with [`GatewaySuiteSpec`]: [`crate::resolve_lab`] rewrites\n[`MigrationCaseSpec::baseline_ingress_manifests`] and\n[`MigrationCaseSpec::candidate_gateway_manifests`] onto the\nconfiguration file's own directory and validates everything else in\nplace, so the raw and the resolved value differ in those two fields\nand nowhere else.",
       "type": "object",
       "properties": {
+        "baseline": {
+          "description": "Where the **legacy** side's data plane is: the one shared\n`Service` an `Ingress` controller serves every `Ingress` on the\ncluster through.\n\nSee [`MigrationSideSpec`] for why this is per side, why it is\n`Option` in the type but required in practice, and where the\nrequirement is enforced.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MigrationSideSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate": {
+          "description": "Where the **Gateway** side's data plane is: the `Service` the\nimplementation provisions for the case's own `Gateway`, usually\nselected by Gateway API's `gateway.networking.k8s.io/gateway-name`\nlabel with `\"{gatewayName}\"` substituted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MigrationSideSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "cases": {
           "description": "The migration cases. Must not be empty, and every\n[`MigrationCaseSpec::id`] must be unique within the suite — both\nvalidated by [`crate::resolve_lab`]. A `migration:` section\ndeclaring no cases is the same quiet no-op an empty\n[`GatewaySuiteSpec::manifests`] would be: it would install\nnothing, probe nothing, and report success.",
           "type": "array",

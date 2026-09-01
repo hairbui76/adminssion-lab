@@ -61,6 +61,7 @@ use clap::Args;
 use crate::exit;
 use crate::pipeline::gateway::KubeGatewaySuite;
 use crate::pipeline::install::KubeStackInstaller;
+use crate::pipeline::migration::KubeMigrationSuite;
 use crate::pipeline::{Console, LabBackend, RunRequest, run_lab};
 
 /// Arguments for `admissionlab test`.
@@ -178,6 +179,7 @@ impl LabBackend for KindBackend {
     type Installer = KubeStackInstaller;
     type Capture = KubeFixtureCapture;
     type Gateway = KubeGatewaySuite;
+    type Migration = KubeMigrationSuite;
 
     async fn doctor_report(&self) -> DoctorReport {
         // The same function `admissionlab doctor` calls, rather than a
@@ -201,6 +203,16 @@ impl LabBackend for KindBackend {
         // implements both, and which one an API takes is the whole of
         // the distinction (see `admissionlab_core::process`).
         KubeGatewaySuite::new(suite, store, Arc::clone(&self.port_forward_spawner))
+    }
+
+    fn migration_suite(
+        &self,
+        suite: admissionlab_spec::MigrationSuiteSpec,
+        store: ArtifactStore,
+    ) -> Self::Migration {
+        // The same spawner, for the same reason: a migration case opens
+        // a `kubectl port-forward` into each side's data plane.
+        KubeMigrationSuite::new(suite, store, Arc::clone(&self.port_forward_spawner))
     }
 
     fn fixture_capture(&self, fixtures: Vec<FixtureSource>, store: ArtifactStore) -> Self::Capture {

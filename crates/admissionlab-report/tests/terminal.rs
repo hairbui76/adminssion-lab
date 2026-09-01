@@ -21,16 +21,20 @@ use support::canonical_result;
 /// its semantic-change kind, its object path and its first divergence,
 /// two Gateway traffic findings in the warnings section (one of them a
 /// probe only the baseline answered), the Gateway route-contract section
-/// with both sides' conditions and probes, an inconclusive fixture with
-/// the candidate's own verbatim reason, a stale expectation,
-/// diagnostics, the one-line stage timings block, and the verdict.
+/// with both sides' conditions and probes, the Ingress-to-Gateway
+/// migration section (ROADMAP Task 8.8) with a `critical` backend
+/// regression carrying its observed evidence, an `info` declared
+/// non-portability, both paired probes and one declared-but-never-
+/// observed expectation, an inconclusive fixture with the candidate's
+/// own verbatim reason, a stale expectation, diagnostics, the one-line
+/// stage timings block, and the verdict.
 ///
 /// The timings line omits `report` and `cleanup`, and that is the point
 /// of having it in the golden: a `result.json` is written *during* the
 /// reporting stage and *before* cleanup, so neither stage can be inside
 /// the value this renders (see `admissionlab_core::timing`). They are
 /// absent, not zero.
-const GOLDEN: &str = r"Admission Lab result  run beta-demo-run
+const GOLDEN: &str = r#"Admission Lab result  run beta-demo-run
 schema admissionlab.io/result/v1beta1 (frozen; additive changes only)
 
 Environments
@@ -72,6 +76,16 @@ Gateway  1 route contract(s)
       HTTPRoute default/echo-route via default/lab-gateway#http  Accepted=True (Accepted) ResolvedRefs=True (Accepted)
       traffic: probe #0 -> HTTP 503 from echo-v1
 
+Migration  1 Ingress-to-Gateway case(s)
+  legacy-echo  both sides answered the case's probes, so a difference and an absence of differences are both evidence
+    critical backend_changed
+      probe 1 (GET http://migrate.ingress.admissionlab.test/legacy/reports): the Ingress reached backend "echo-b" and the Gateway reached "echo-a"
+    info     non_portable_feature (expected)
+      nginx.ingress.kubernetes.io/limit-rps on Ingress admissionlab-migration-demo/echo-ingress has no portable Gateway API equivalent: per-client request rate limiting in the data plane.
+    probe #0: Ingress HTTP 200 from echo-a -> Gateway HTTP 200 from echo-a
+    probe #1: Ingress HTTP 200 from echo-b -> Gateway HTTP 200 from echo-a
+    declared non-portable but never observed: nginx.ingress.kubernetes.io/canary (the canary Ingress was deleted before this migration; kept here until the rollout is confirmed)
+
 Inconclusive  1
   crd-custom-resource
     candidate: the candidate cluster's CRD does not accept server-side dry-run
@@ -87,7 +101,7 @@ Stage timings
   clusters 43.51s (baseline 41.20s, candidate 43.12s), install 96.40s, capture 6.12s (baseline 5.94s, candidate 6.11s) [4 fixture(s)/side], gateway 9.74s (baseline 9.40s, candidate 9.73s), compare 0.21s, elapsed 149.01s
 
 Result: fail
-";
+"#;
 
 /// Removes every ANSI escape sequence, so a colored render can be
 /// compared against a plain one.

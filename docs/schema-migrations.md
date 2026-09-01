@@ -273,6 +273,48 @@ stable `sc-<16hex>` semantic-change identifiers. From here the document grows by
 **addition** only. A consumer must tolerate fields it does not know; that is the
 whole of what the freeze asks of it.
 
+### Result: additions within `v1beta1` (Task 8.8)
+
+**No version bump. Two optional additions, and one existing document shape left
+byte-identical.**
+
+| Where | Addition | Absent means |
+| --- | --- | --- |
+| result, top level | `migration` — an array of Ingress-to-Gateway migration cases, each with its `caseId`, its `comparability` (and that answer in prose), its graded `changes`, its paired `probes`, and any `unmatchedExpectations` | the lab declared no `migration:` section |
+| configuration, `migration:` | `baseline` / `candidate`, each a `gatewayEndpoint:` block saying where that side's data plane is | the suite cannot be run; see below |
+
+**Why `migration` is a top-level array and not a `fixtures` entry.** A fixture's
+findings are `SemanticChange`s, graded by `admissionlab-policy` and counted into
+the five `summary` buckets. A migration case's findings are
+`MigrationBehaviorChange`s, which are a deliberately separate vocabulary
+(`admissionlab_gateway::migration` states why at length). Putting them in
+`fixtures` would have meant either inventing `SemanticChangeKind` variants for
+six routing behaviors or flattening all six into one — so they sit in their own
+list, with their own `severity` on each change. The consequence is stated rather
+than hidden: **`summary`'s five counts still partition `fixtures` exactly and do
+not count migration cases**, and no migration change appears in
+`policy.changes`. What a migration case *does* reach is `policy.disposition`,
+which is the run's verdict and what the exit code is derived from.
+
+**The key is omitted, not `null`, when there is no suite.** That is what keeps
+an admission-only or Gateway-only `result.json` byte-identical to what earlier
+builds wrote, which is the property "additive" is supposed to name. It is the
+same treatment `timings` already gets, and it does not weaken Global Constraint
+15: where a claim could be misread, the section states it *inside* itself
+(`comparability`, `comparabilityReason`), which is where the ambiguity actually
+lives.
+
+**The two configuration fields are optional in the schema and required to
+run.** Making them required would invalidate any document that already used the
+`migration:` section, which the compatibility rule forbids. Making them absent
+and harmless would let a lab install two stacks, probe nothing, and report
+success — a migration case's probes are the *only* thing its two sides can be
+compared on. So they are optional in
+[`schemas/admissionlab-v1beta1.json`](../schemas/admissionlab-v1beta1.json) and
+refused by `admissionlab test`'s own pre-flight validation, before any cluster is
+created, with a message naming the missing field. A document written before Task
+8.8 still parses; it simply cannot run a migration, which was already true.
+
 ### Run manifest: `v1alpha1` → `v1beta1` (Task 7.3)
 
 **Nothing was removed, renamed, or redefined.** Three optional fields were

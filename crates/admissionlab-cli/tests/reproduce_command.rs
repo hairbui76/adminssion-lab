@@ -22,8 +22,9 @@ use std::time::{Duration, SystemTime};
 
 use admissionlab_admission::{AdmissionDecision, AdmissionOutcome, AdmissionTrace, TraceEvidence};
 use admissionlab_cli::pipeline::{
-    Console, GatewaySuiteError, GatewaySuiteRunner, LabBackend, OutcomeCapture, RunRequest,
-    SideGatewayOutcome, run_lab,
+    Console, GatewaySuiteError, GatewaySuiteRunner, LabBackend, MigrationRunOutcome,
+    MigrationSuiteError, MigrationSuiteRunner, OutcomeCapture, RunRequest, SideGatewayOutcome,
+    run_lab,
 };
 use admissionlab_core::run_manifest::{SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS};
 use admissionlab_core::{
@@ -368,6 +369,29 @@ impl GatewaySuiteRunner for NoGatewaySuite {
     }
 }
 
+/// The never-constructed migration half of the seam, for the reason
+/// [`NoGatewaySuite`] gives for its own half: `admissionlab reproduce`
+/// reproduces whatever the recorded run did, migration suite included,
+/// and none of these tests configures one. Returning an error rather
+/// than an empty `MigrationRunOutcome` keeps "this ran and compared
+/// nothing" unrepresentable (Global Constraint 15).
+struct NoMigrationSuite;
+
+#[async_trait]
+impl MigrationSuiteRunner for NoMigrationSuite {
+    async fn run(
+        &self,
+        _baseline: &ClusterHandle,
+        _candidate: &ClusterHandle,
+        _paths: &RunPaths,
+    ) -> Result<MigrationRunOutcome, MigrationSuiteError> {
+        Err(MigrationSuiteError {
+            case: None,
+            message: "this test's lab declares no migration suite".to_owned(),
+        })
+    }
+}
+
 struct FakeBackend {
     clusters: Arc<RecordingClusterManager>,
     installed: Arc<Mutex<Vec<(String, String)>>>,
@@ -393,6 +417,7 @@ impl LabBackend for FakeBackend {
     // Gateway suite included; none of these tests configures one, so
     // this is the never-constructed half of the seam.
     type Gateway = NoGatewaySuite;
+    type Migration = NoMigrationSuite;
 
     async fn doctor_report(&self) -> DoctorReport {
         DoctorReport {
@@ -426,6 +451,14 @@ impl LabBackend for FakeBackend {
         _store: ArtifactStore,
     ) -> Self::Gateway {
         NoGatewaySuite
+    }
+
+    fn migration_suite(
+        &self,
+        _suite: admissionlab_spec::MigrationSuiteSpec,
+        _store: ArtifactStore,
+    ) -> Self::Migration {
+        NoMigrationSuite
     }
 
     fn fixture_capture(

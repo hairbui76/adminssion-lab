@@ -168,6 +168,7 @@ pub mod certification;
 pub mod compare;
 pub mod gateway;
 pub mod install;
+pub mod migration;
 pub mod provenance;
 pub mod report;
 
@@ -190,14 +191,15 @@ use admissionlab_policy::{
     ResolvedExpectations, ResolvedPolicy, evaluate_with_expectations, load_expectations,
     resolve_policy, validate_policy_spec,
 };
-use admissionlab_report::TerminalOptions;
+use admissionlab_report::{MigrationCaseComparison, TerminalOptions};
 use admissionlab_spec::{
-    GatewaySuiteSpec, ResolvedLab, declared_api_version, load_any_supported_lab,
+    GatewaySuiteSpec, MigrationSuiteSpec, ResolvedLab, declared_api_version, load_any_supported_lab,
 };
 use async_trait::async_trait;
 
 pub use capture::OutcomeCapture;
 pub use gateway::{GatewaySuiteError, GatewaySuiteRunner, SideGatewayOutcome};
+pub use migration::{MigrationRunOutcome, MigrationSuiteError, MigrationSuiteRunner};
 
 /// How long each component gets to install *and* become ready before its
 /// side's stack is failed.
@@ -319,6 +321,9 @@ pub trait LabBackend: Send + Sync {
     /// through. Never constructed at all for a lab with no `gateway:`
     /// section.
     type Gateway: GatewaySuiteRunner;
+    /// The Ingress-to-Gateway migration suite runner (ROADMAP Task 8.8).
+    /// Never constructed at all for a lab with no `migration:` section.
+    type Migration: MigrationSuiteRunner;
 
     /// Probes host prerequisites, as `admissionlab doctor` does.
     async fn doctor_report(&self) -> DoctorReport;
@@ -348,6 +353,17 @@ pub trait LabBackend: Send + Sync {
     /// backend needs to construct an implementation is not available
     /// when the backend itself is constructed.
     fn gateway_suite(&self, suite: GatewaySuiteSpec, store: ArtifactStore) -> Self::Gateway;
+
+    /// Builds the migration suite runner for `suite`, writing evidence
+    /// bundles through `store`.
+    ///
+    /// Called only when the resolved configuration declares a
+    /// `migration:` section. Unlike [`Self::gateway_suite`]'s runner,
+    /// the one value returned here drives **both** clusters in a single
+    /// call rather than being called once per side -- see
+    /// [`migration`]'s "One call, two clusters" for why a migration
+    /// suite has no per-side shape to share.
+    fn migration_suite(&self, suite: MigrationSuiteSpec, store: ArtifactStore) -> Self::Migration;
 
     /// How long each component gets to install and become ready.
     /// Defaults to [`DEFAULT_COMPONENT_TIMEOUT`]; a test overrides it so
@@ -941,6 +957,7 @@ fn prepare_inputs(
         return Err(RunDisposition::InvalidInput);
     }
     validate_gateway_ids(&lab, &fixtures, console)?;
+    validate_migration_suite(&lab, console)?;
     console.say(&format!(
         "loaded {}; {} fixture(s), {} expectation(s).",
         request.config.display(),
@@ -1020,6 +1037,75 @@ fn validate_gateway_ids(
                  indistinguishable",
                 contract.id,
                 clash.path.display(),
+            ));
+            return Err(RunDisposition::InvalidInput);
+        }
+    }
+    Ok(())
+}
+
+/// Refuses a `migration:` suite that could not produce evidence
+/// (ROADMAP Task 8.8).
+///
+/// Two checks, both at exit 2 and both before any cluster is created —
+/// the same placement, and for the same reason, as
+/// [`validate_gateway_ids`]:
+///
+/// - **Every case id must parse as an
+///   [`admissionlab_core::FixtureId`].** A case's evidence is written to
+///   `raw/<side>/migration/<case-id>/`, so the id is a path segment;
+///   that grammar (lowercase ASCII, digits, `-`) is what makes it one
+///   safely. This does *not* also check for a collision with a fixture
+///   id, and that is the one place it differs from the Gateway check:
+///   a migration case is reported in its own top-level `migration` array
+///   rather than as a `FixtureComparison`, so two entries under one name
+///   are in two different lists and nothing is made ambiguous.
+/// - **Both per-side `gatewayEndpoint` blocks must be present and
+///   resolve.** `admissionlab-spec` cannot require them — they are an
+///   *optional* addition to an existing `admissionlab.io/v1beta1`
+///   section, and `docs/schema-migrations.md`'s first obligation is that
+///   an addition leaves older documents valid (see
+///   [`admissionlab_spec::MigrationSideSpec`]). But a suite with nowhere
+///   to send its probes would install two stacks, compare nothing, and
+///   report success, so it is refused here instead — which gives a
+///   load-time-quality error without a schema-level required field.
+fn validate_migration_suite(
+    lab: &ResolvedLab,
+    console: &mut Console<'_>,
+) -> Result<(), RunDisposition> {
+    let Some(suite) = &lab.migration else {
+        return Ok(());
+    };
+    for case in &suite.cases {
+        if admissionlab_core::FixtureId::parse(&case.id).is_err() {
+            console.problem(&format!(
+                "invalid lab configuration: migration case id {:?} cannot be reported: a case's \
+                 evidence is written under its own id, which must contain only lowercase letters, \
+                 digits, and `-`",
+                case.id
+            ));
+            return Err(RunDisposition::InvalidInput);
+        }
+    }
+    for (name, side) in [
+        ("baseline", suite.baseline.as_ref()),
+        ("candidate", suite.candidate.as_ref()),
+    ] {
+        let Some(side) = side else {
+            console.problem(&format!(
+                "invalid lab configuration: this lab declares migration cases but no \
+                 migration.{name}.gatewayEndpoint, so the {name} side's probes have no data-plane \
+                 Service to go through -- and a migration case's probes are the only thing its \
+                 two sides can be compared on"
+            ));
+            return Err(RunDisposition::InvalidInput);
+        };
+        if let Err((locator, message)) =
+            admissionlab_spec::resolve_gateway_endpoint(&side.gateway_endpoint)
+        {
+            console.problem(&format!(
+                "invalid lab configuration: migration.{name}.gatewayEndpoint.{locator} is \
+                 invalid: {message}"
             ));
             return Err(RunDisposition::InvalidInput);
         }
@@ -1188,12 +1274,13 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
     ));
     record_stage(outputs.manifest, RunStage::FixtureCapture, |_| {}, console).await;
 
-    let gateway =
-        match run_gateway_suite(backend, run, console, inputs, prepared, &mut outputs).await {
-            Ok(gateway) => gateway,
+    let (gateway, migration) =
+        match run_behavior_suites(backend, run, console, inputs, prepared, &mut outputs).await {
+            Ok(observed) => observed,
             Err(disposition) => return disposition,
         };
     diagnostics.extend(gateway.diagnostics.iter().cloned());
+    diagnostics.extend(migration.diagnostics.iter().cloned());
 
     compare_and_report(
         console,
@@ -1203,6 +1290,7 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
         Observations {
             outcomes: &capture.captured_outcomes(),
             gateway: &gateway,
+            migration: &migration,
         },
         &mut outputs,
         diagnostics,
@@ -1223,6 +1311,30 @@ struct Observations<'a> {
     /// Both sides' Gateway case results, empty for an admission-only
     /// lab.
     gateway: &'a GatewayRun,
+    /// Every Ingress-to-Gateway migration case the run compared, and the
+    /// run-level diagnostics the suite produced. Empty for a lab with no
+    /// `migration:` section.
+    migration: &'a MigrationRun,
+}
+
+/// What the migration suite produced, plus whether one ran at all.
+///
+/// The `declared` flag is what keeps "this lab is not migrating off
+/// `Ingress`" distinguishable from "this lab is migrating and compared
+/// nothing", which
+/// [`admissionlab_report::LabResult::migration`] represents as `None`
+/// against `Some(vec![])`. Deriving it from an empty case list instead
+/// would collapse the two, and a `migration:` section whose cases all
+/// failed to compare is exactly the case a reader must be able to tell
+/// apart from an admission-only run.
+#[derive(Debug, Default)]
+struct MigrationRun {
+    /// Whether the lab declared a `migration:` section at all.
+    declared: bool,
+    /// One comparison per case, in suite order.
+    cases: Vec<MigrationCaseComparison>,
+    /// Run-level findings, already tagged with their case and side.
+    diagnostics: Vec<Diagnostic>,
 }
 
 /// Both sides' Gateway case results, and the run-level diagnostics the
@@ -1356,6 +1468,107 @@ async fn run_gateway_suite<B: LabBackend>(
         baseline: baseline.cases,
         candidate: candidate.cases,
         diagnostics,
+    })
+}
+
+/// Runs both behavior suites, in order, or ends the run.
+///
+/// The two are driven together because they are one phase of a run --
+/// "what did these two stacks *do*", as opposed to "what did their API
+/// servers *decide*" -- and because a lab may declare either, both, or
+/// neither. Either one being absent is a zero-cost early return inside
+/// its own function, so this composition costs nothing for the
+/// admission-only lab that is still the common case.
+async fn run_behavior_suites<B: LabBackend>(
+    backend: &B,
+    run: &Run<'_>,
+    console: &mut Console<'_>,
+    inputs: &Inputs,
+    prepared: &PreparedLab,
+    outputs: &mut Outputs<'_>,
+) -> Result<(GatewayRun, MigrationRun), RunDisposition> {
+    let gateway = run_gateway_suite(backend, run, console, inputs, prepared, outputs).await?;
+    let migration = run_migration_suite(backend, run, console, inputs, prepared, outputs).await?;
+    Ok((gateway, migration))
+}
+
+/// Runs the configured Ingress-to-Gateway migration suite across both
+/// clusters, or reports the failure, records it, and ends the run
+/// (ROADMAP Task 8.8).
+///
+/// # Why after the Gateway suite
+///
+/// Both are persisted-object phases, and both leave their objects
+/// behind, so the ordering question is only "which of the two changes
+/// what the other observes". Running the migration suite *second* is the
+/// answer that keeps an existing lab unchanged: a `gateway:` suite that
+/// already ran a route contract in an empty cluster keeps doing so, and
+/// the new phase inherits whatever the old one left rather than the
+/// reverse. Neither suite's objects overlap in practice -- a migration
+/// case brings its own namespaces -- but "which phase is allowed to be
+/// affected by the other" should be a decision rather than an accident.
+///
+/// # Why this stage is neither timed nor recorded in the run manifest
+///
+/// See [`migration`]'s own "No stage timing, and no run-manifest stage":
+/// `RunStage` and `TimedStage` are the run manifest's frozen vocabulary,
+/// and adding a variant to them is a change to a different frozen
+/// document than the one this task owns.
+async fn run_migration_suite<B: LabBackend>(
+    backend: &B,
+    run: &Run<'_>,
+    console: &mut Console<'_>,
+    inputs: &Inputs,
+    prepared: &PreparedLab,
+    outputs: &mut Outputs<'_>,
+) -> Result<MigrationRun, RunDisposition> {
+    let Some(suite) = inputs.lab.migration.clone() else {
+        return Ok(MigrationRun::default());
+    };
+    let declared = suite.cases.len();
+    let runner = backend.migration_suite(suite, ArtifactStore::new(&run.request.run_root));
+
+    let started = std::time::Instant::now();
+    let outcome = runner
+        .run(&prepared.baseline, &prepared.candidate, &prepared.paths)
+        .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(failure) => {
+            console.problem(&format!("the migration suite failed: {failure}"));
+            write_failure(
+                &*outputs,
+                prepared,
+                "migration",
+                &failure.to_string(),
+                Vec::new(),
+                console,
+            )
+            .await;
+            // The same disposition a Gateway suite failure gets: both
+            // are "the run could not obtain the evidence it was asked
+            // for", which is what exit 5 means.
+            return Err(crate::exit::disposition_for_gateway_failure());
+        }
+    };
+
+    console.say(&format!(
+        "compared {declared} Ingress-to-Gateway migration case(s) in {:.1}s; raw evidence in {}.",
+        started.elapsed().as_secs_f64(),
+        prepared.paths.raw().display()
+    ));
+    for diagnostic in &outcome.diagnostics {
+        // A denied baseline, a legacy stack that never served, or a
+        // candidate route that carried no traffic is evidence a reader
+        // must see while the run is still on screen -- the same rule the
+        // Gateway suite's skipped probes get.
+        console.problem(&diagnostic.message);
+    }
+
+    Ok(MigrationRun {
+        declared: true,
+        cases: outcome.cases,
+        diagnostics: outcome.diagnostics,
     })
 }
 
@@ -1508,8 +1721,28 @@ async fn compare_and_report(
     // is `admissionlab-policy` deciding it (§1.1: report rendering never
     // grades). Expectations are applied here too, so an accounted-for
     // change stays visible and simply stops driving the verdict.
-    let policy =
+    let mut policy =
         evaluate_with_expectations(&inputs.policy, &inputs.expectations, &comparison.changes());
+
+    // The migration suite's contribution to the run's verdict (ROADMAP
+    // Task 8.8). `PolicyResult::disposition` is *the run's verdict* --
+    // it is what `crate::exit::disposition_for_policy` turns into an
+    // exit code and what `result.json`'s reader branches on -- so a
+    // migration regression that did not reach it would produce a run
+    // that exits 0 while its own report says a route now answers from a
+    // different backend.
+    //
+    // The join is a `max` over the same three-word scale, never a
+    // rewrite of what policy concluded: `policy.changes` is untouched,
+    // every admission and Gateway grade is exactly what
+    // `admissionlab-policy` assigned, and `migration_disposition`'s own
+    // reasoning is in `migration::grade` and `migration::case_disposition`.
+    // What a reader sees when the two disagree is a `fail` disposition
+    // whose explanation is in the document's `migration` array rather
+    // than in `policy.changes` -- which is why the terminal and HTML
+    // reports both render that array in full, unconditionally.
+    let migration_verdict = migration::migration_disposition(&observed.migration.cases);
+    policy.disposition = policy.disposition.max(migration_verdict);
     drop(comparison_stage);
     let result = report::build_result(
         &prepared.run_id,
@@ -1517,6 +1750,10 @@ async fn compare_and_report(
         &comparison,
         policy,
         diagnostics,
+        observed
+            .migration
+            .declared
+            .then(|| observed.migration.cases.clone()),
         Some(timings.snapshot()),
     );
 

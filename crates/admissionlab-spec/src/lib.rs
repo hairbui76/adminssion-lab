@@ -112,9 +112,9 @@ pub use model::{
     ALLOWED_HTTP_METHODS, ComponentSpec, CustomResourceConditionSpec,
     DEFAULT_RECONCILIATION_TIMEOUT, EnvironmentSpec, FixtureSelectionSpec, GatewayEndpointSpec,
     GatewaySuiteSpec, HelmInstallSpec, HttpProbeContract, InstallMethodSpec, LatencyPolicy,
-    ManifestsInstallSpec, MigrationCaseSpec, MigrationSuiteSpec, NamedObjectSpec,
-    NamespacedObjectSpec, NonPortableFeatureExpectation, PolicyOverrideSpec, PolicySpec,
-    ReadinessCheckSpec, RouteContract, is_valid_http_status,
+    ManifestsInstallSpec, MigrationCaseSpec, MigrationSideSpec, MigrationSuiteSpec,
+    NamedObjectSpec, NamespacedObjectSpec, NonPortableFeatureExpectation, PolicyOverrideSpec,
+    PolicySpec, ReadinessCheckSpec, RouteContract, is_valid_http_status,
 };
 pub use resolve::{
     LoadedLab, ResolvedEnvironment, ResolvedFixtureSelection, ResolvedLab, resolve_lab,

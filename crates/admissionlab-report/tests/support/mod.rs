@@ -39,6 +39,15 @@
 //!   from calling that comparator rather than from hand-written payloads,
 //!   so the example can never describe a shape the Gateway engine does
 //!   not actually produce;
+//! - an **Ingress-to-Gateway migration case** (ROADMAP Task 8.8) in the
+//!   three-behavior shape `examples/ingress-to-gateway/` demonstrates on
+//!   real clusters: a preserved behavior that produces no change at all,
+//!   a declared non-portable feature graded `info`, an undeclared
+//!   backend regression graded `critical` whose `detail` carries the two
+//!   observed backends, two paired probes, and one
+//!   declared-but-never-observed expectation -- so the frozen document's
+//!   optional `migration` array is exercised on an example that is not
+//!   degenerate;
 //! - a **stage timings** block shaped exactly as a real `result.json`'s
 //!   is: both sides of cluster creation, a per-component install
 //!   breakdown, a fixture count, a comparison duration -- and *no*
@@ -70,15 +79,16 @@ use admissionlab_diff::{
 use admissionlab_gateway::{
     CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionState,
     GatewayCaseComparison, GatewayCaseResult, GatewayClassEvidence, GatewayEvidence,
-    GatewayIdentity, HttpProbeResult, ObservedCondition, ParentIdentity, ReconciliationEvidence,
-    RouteEvidence, RouteParentStatus,
+    GatewayIdentity, HttpProbeResult, MigrationBehaviorChange, MigrationBehaviorKind,
+    MigrationComparability, NonPortableFeatureExpectation, ObservedCondition, ParentIdentity,
+    ProbePair, ReconciliationEvidence, RouteEvidence, RouteParentStatus,
 };
 use admissionlab_policy::{
     ClassifiedChange, PolicyDisposition, PolicyResult, Severity, StaleExpectation,
 };
 use admissionlab_report::{
     AdmissionComparison, ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureComparison,
-    LabResult, RunSummary, SCHEMA_VERSION,
+    GradedMigrationChange, LabResult, MigrationCaseComparison, RunSummary, SCHEMA_VERSION,
 };
 use serde_json::{Value, json};
 
@@ -181,7 +191,91 @@ pub fn canonical_result() -> LabResult {
                 ]),
             },
         ],
+        migration: Some(vec![migration_case()]),
         timings: Some(timings()),
+    }
+}
+
+/// The Ingress-to-Gateway migration case [`canonical_result`] carries
+/// (ROADMAP Task 8.8).
+///
+/// Deliberately the three-behavior shape `examples/ingress-to-gateway/`
+/// demonstrates on real clusters, so the frozen document's `migration`
+/// section is exercised on an example that is not degenerate:
+///
+/// - a **preserved** behavior (probe 0: the same status from the same
+///   backend on both sides), which contributes no change at all;
+/// - a **declared non-portable feature**, graded `info` because the case
+///   accounted for it in writing;
+/// - an **undeclared behavior regression** (probe 1 reached a different
+///   backend), graded `critical`, carrying the two observed backends in
+///   its `detail` -- which is the evidence ROADMAP Task 8.8 step 2 says a
+///   migration report must explain the difference with.
+///
+/// It also carries one `unmatchedExpectations` entry, so the
+/// declared-but-never-observed path has a value in the golden too.
+fn migration_case() -> MigrationCaseComparison {
+    MigrationCaseComparison {
+        case_id: "legacy-echo".to_owned(),
+        comparability: MigrationComparability::Comparable,
+        changes: vec![
+            GradedMigrationChange {
+                change: MigrationBehaviorChange {
+                    kind: MigrationBehaviorKind::BackendChanged,
+                    detail: "probe 1 (GET \
+                             http://migrate.ingress.admissionlab.test/legacy/reports): the \
+                             Ingress reached backend \"echo-b\" and the Gateway reached \
+                             \"echo-a\""
+                        .to_owned(),
+                    expected: false,
+                },
+                severity: Severity::Critical,
+            },
+            GradedMigrationChange {
+                change: MigrationBehaviorChange {
+                    kind: MigrationBehaviorKind::NonPortableFeature,
+                    detail: "nginx.ingress.kubernetes.io/limit-rps on Ingress \
+                             admissionlab-migration-demo/echo-ingress has no portable Gateway \
+                             API equivalent: per-client request rate limiting in the data plane."
+                        .to_owned(),
+                    expected: true,
+                },
+                severity: Severity::Info,
+            },
+        ],
+        probes: vec![
+            ProbePair {
+                contract_id: "legacy-echo".to_owned(),
+                baseline: migration_probe("echo-a", 12),
+                candidate: migration_probe("echo-a", 9),
+            },
+            ProbePair {
+                contract_id: "legacy-echo".to_owned(),
+                baseline: migration_probe("echo-b", 14),
+                candidate: migration_probe("echo-a", 8),
+            },
+        ],
+        unmatched_expectations: vec![NonPortableFeatureExpectation {
+            feature: "nginx.ingress.kubernetes.io/canary".to_owned(),
+            reason: "the canary Ingress was deleted before this migration; kept here until \
+                     the rollout is confirmed"
+                .to_owned(),
+        }],
+    }
+}
+
+/// One migration probe result: an ordinary `200` from a named echo
+/// backend.
+fn migration_probe(backend: &str, millis: u64) -> HttpProbeResult {
+    HttpProbeResult {
+        status: 200,
+        backend: Some(backend.to_owned()),
+        response_headers: [("content-type".to_owned(), "application/json".to_owned())]
+            .into_iter()
+            .collect(),
+        response_body_sha256: format!("{millis:064x}"),
+        elapsed: Duration::from_millis(millis),
+        attempts: 1,
     }
 }
 
@@ -276,6 +370,24 @@ pub fn sentinel_result() -> LabResult {
 
     result.diagnostics[0].message = format!(
         "webhook bootstrap wrote\n-----BEGIN RSA PRIVATE KEY-----\n{PEM_SENTINEL}\n-----END RSA PRIVATE KEY-----\nto the shared volume"
+    );
+
+    // The migration section is its own top-level list (ROADMAP Task
+    // 8.8), so a redaction pass that walks `fixtures` and `policy` and
+    // stops would miss it entirely. Salted through both of the channels
+    // it actually carries: a live response header map, which is the one
+    // realistic place a data plane's `Set-Cookie` reaches a report, and
+    // the user-written `reason` on a declared non-portability.
+    let migration = result
+        .migration
+        .as_mut()
+        .expect("the canonical result always carries a migration case");
+    migration[0].probes[0].candidate.response_headers.insert(
+        "set-cookie".to_owned(),
+        format!("session={HEADER_FIELD_SENTINEL}; Path=/"),
+    );
+    migration[0].unmatched_expectations[0].reason = format!(
+        "kept until the rollout is confirmed; the old key was\n-----BEGIN EC PRIVATE KEY-----\n{PEM_SENTINEL}\n-----END EC PRIVATE KEY-----"
     );
 
     // The policy section carries the same changes the fixtures do, so it

@@ -128,7 +128,8 @@ use serde_json::{Map, Value};
 
 use crate::model::{
     AdmissionComparison, ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureComparison,
-    GatewayCaseComparison, LabResult,
+    GatewayCaseComparison, GradedMigrationChange, LabResult, MigrationBehaviorChange,
+    MigrationCaseComparison, NonPortableFeatureExpectation, ProbePair,
 };
 
 /// The text every redacted value is replaced with.
@@ -298,6 +299,10 @@ pub fn redact_result(result: &LabResult, rules: &RedactionRules) -> LabResult {
             .collect(),
         policy: redact_policy(&result.policy, &context),
         diagnostics: result.diagnostics.iter().map(redact_diagnostic).collect(),
+        migration: result
+            .migration
+            .as_ref()
+            .map(|cases| cases.iter().map(redact_migration_case).collect()),
         timings: result.timings.as_ref().map(redact_timings),
     }
 }
@@ -550,6 +555,67 @@ fn redact_probe(probe: &HttpProbeResult) -> HttpProbeResult {
         response_body_sha256: probe.response_body_sha256.clone(),
         elapsed: probe.elapsed,
         attempts: probe.attempts,
+    }
+}
+
+/// Redacts one Ingress-to-Gateway migration case (ROADMAP Task 8.8).
+///
+/// Rebuilt field by field, for the reason [`redact_timings`] gives: a
+/// field added to any of these types later is a compile error here
+/// rather than an unredacted payload.
+///
+/// What genuinely needs the pass, and what does not:
+///
+/// - `case_id` is carried verbatim, exactly as `fixture_id` and
+///   `contract_id` are: it is the identifier the two sides are
+///   correlated by, and its grammar cannot hold a secret.
+/// - `comparability` and `severity` are enums with no payload.
+/// - A change's `detail` is prose the Gateway engine composes from
+///   observed values -- a backend name, a status pair, a redirect
+///   target, an annotation key and the objects carrying it. None of
+///   those is credential material today, and it goes through the string
+///   rules anyway, because "this crate wrote it" and "this contains no
+///   `Authorization:` header" are different claims and only the second
+///   one matters here.
+/// - `probes` are real HTTP responses from two data planes, so each half
+///   goes through the same [`redact_probe`] a Gateway traffic pair does.
+///   This is the one place a `Set-Cookie` could realistically appear.
+/// - An unmatched expectation's `feature` and `reason` are **user-written
+///   free text** from `admissionlab.yaml`, which is the strongest reason
+///   in this list to run the string rules over them.
+fn redact_migration_case(case: &MigrationCaseComparison) -> MigrationCaseComparison {
+    MigrationCaseComparison {
+        case_id: case.case_id.clone(),
+        comparability: case.comparability,
+        changes: case
+            .changes
+            .iter()
+            .map(|graded| GradedMigrationChange {
+                change: MigrationBehaviorChange {
+                    kind: graded.change.kind,
+                    detail: redact_string(&graded.change.detail),
+                    expected: graded.change.expected,
+                },
+                severity: graded.severity,
+            })
+            .collect(),
+        probes: case
+            .probes
+            .iter()
+            .map(|pair| ProbePair {
+                contract_id: pair.contract_id.clone(),
+                baseline: redact_probe(&pair.baseline),
+                candidate: redact_probe(&pair.candidate),
+            })
+            .collect(),
+        unmatched_expectations: case
+            .unmatched_expectations
+            .iter()
+            .map(|expectation| NonPortableFeatureExpectation {
+                feature: redact_string(&expectation.feature),
+                reason: redact_string(&expectation.reason),
+            })
+            .collect(),
     }
 }
 

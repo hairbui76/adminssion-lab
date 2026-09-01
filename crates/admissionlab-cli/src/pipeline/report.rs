@@ -58,8 +58,9 @@ use admissionlab_core::{Diagnostic, InstalledLab, PreparedLab, RunId, SideInstal
 use admissionlab_policy::PolicyResult;
 use admissionlab_report::{
     ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureComparison, LabResult,
-    RedactionRules, ReportError, RunSummary, SCHEMA_VERSION, TerminalOptions, escape_markdown,
-    redact_result, render_terminal, write_github_summary, write_html_report, write_json_report,
+    MigrationCaseComparison, RedactionRules, ReportError, RunSummary, SCHEMA_VERSION,
+    TerminalOptions, escape_markdown, redact_result, render_terminal, write_github_summary,
+    write_html_report, write_json_report,
 };
 use serde::Serialize;
 
@@ -111,6 +112,13 @@ pub struct WrittenReports {
 /// it or the cleanup that follows — see
 /// [`LabResult::timings`] for what that absence means and where those two
 /// stages are reported instead.
+///
+/// `migration` is every Ingress-to-Gateway case the run compared
+/// (ROADMAP Task 8.8), or `None` for a lab with no `migration:`
+/// section. Passed through rather than recomputed: the grading it
+/// carries is `crate::pipeline::migration`'s, and this function
+/// decides no severity for the same reason it decides none for an
+/// admission change.
 #[must_use]
 pub fn build_result(
     run_id: &RunId,
@@ -118,6 +126,7 @@ pub fn build_result(
     comparison: &Comparison,
     policy: PolicyResult,
     diagnostics: Vec<Diagnostic>,
+    migration: Option<Vec<MigrationCaseComparison>>,
     timings: Option<StageTimings>,
 ) -> LabResult {
     let fixtures: Vec<FixtureComparison> = comparison
@@ -146,6 +155,7 @@ pub fn build_result(
         fixtures,
         policy,
         diagnostics,
+        migration,
         timings,
     }
 }

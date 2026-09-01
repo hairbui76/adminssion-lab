@@ -102,8 +102,18 @@
 //!
 //! ROADMAP §1.2 freezes both names independently, which is the same
 //! answer. How a [`MigrationComparison`] is presented and whether it
-//! reaches a run's exit code is Task 8.8's decision, not this module's;
+//! reaches a run's exit code was Task 8.8's decision, not this module's;
 //! nothing here has a severity, and `admissionlab-policy` is untouched.
+//!
+//! Task 8.8 decided it in `admissionlab_cli::pipeline::migration`, and
+//! the shape of that decision is worth knowing from here: a
+//! [`MigrationBehaviorChange`] is graded there, by a small function over
+//! `(kind, expected)` that reuses `admissionlab_policy::Severity`'s
+//! three words without routing anything through
+//! `admissionlab_diff::SemanticChangeKind` or through the policy engine.
+//! So the two vocabularies still never mix, this crate still grades
+//! nothing, and `admissionlab-policy` is still untouched -- read that
+//! module for the rule and the argument for each arm.
 //!
 //! ## What is compared: evidence, never manifest syntax
 //!
@@ -142,10 +152,25 @@
 //!   hash comparison across two stacks would report a difference on
 //!   every single probe. `response_body_sha256` is never read here.
 //!
-//! Neither is worked around by guessing (Global Constraint 15). A later
-//! task that wants rewrite behavior directly needs the echoed path to
-//! reach the result type, which is a change to Task 6.8's frozen
-//! evidence shape and belongs to whoever makes it.
+//! Neither is worked around by guessing (Global Constraint 15).
+//!
+//! ROADMAP Task 8.7 landed [`crate::probe::EchoObservation`], which
+//! *does* carry the path the backend received -- and deliberately kept
+//! it **outside** [`HttpProbeResult`], because that type is embedded
+//! verbatim in the frozen `admissionlab.io/result/v1beta1` document and
+//! a sixth field on it would be a schema change. So the limit above is
+//! unchanged and this comparator is unchanged: an echoed path is not
+//! part of the evidence a [`MigrationComparison`] is computed from, and
+//! Task 8.8 did not add a second comparator entry point taking one.
+//!
+//! What that costs is stated rather than hidden, and it shaped
+//! `examples/ingress-to-gateway/`: a migration case whose only
+//! difference is a dropped rewrite to the *same* backend is invisible
+//! here, so that demo's regression is one this comparator can see --
+//! a request that reaches a *different* backend. A later task that wants
+//! rewrite behavior compared directly needs the echoed path to reach
+//! either the result type (a v1beta1 schema addition) or a new
+//! comparator input, and belongs to whoever makes that decision.
 //!
 //! ## How each kind is triggered
 //!
@@ -193,7 +218,7 @@ use crate::case::GatewayCaseResult;
 use crate::diff::ProbePair;
 use crate::ingress::IngressCaseResult;
 use crate::model::HttpProbeContract;
-use crate::probe::{HttpProbeResult, describe_probe_request};
+use crate::probe::{HttpProbeResult, describe_probe_request, redirect_location};
 
 /// The set of feature names a [`MigrationCaseSpec`] declares
 /// non-portable.
@@ -237,12 +262,20 @@ pub fn expected_nonportable_features(case: &MigrationCaseSpec) -> BTreeSet<&str>
 /// `tests/migration_diff.rs` rather than left to the derive: a rename
 /// here would silently change a document a report renders.
 ///
-/// `Serialize` but not `Deserialize`, and no `JsonSchema`: this is
-/// observation travelling outward, and nothing embeds it in the frozen
-/// `admissionlab.io/result/v1beta1` document yet -- Task 8.8 decides how
-/// a migration comparison is presented, and adding a schema derive now
-/// would freeze a shape that task has not chosen.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+/// `Serialize` but not `Deserialize`: this is observation travelling
+/// outward, like every other evidence type in this crate.
+///
+/// `JsonSchema` was deliberately absent until ROADMAP Task 8.8, because
+/// nothing embedded this in the frozen
+/// `admissionlab.io/result/v1beta1` document and a premature derive
+/// would have frozen a shape nobody had chosen. Task 8.8 chose it: a
+/// result document now carries an optional top-level `migration` array
+/// (`admissionlab_report::wire::MigrationSection`), so this type is part
+/// of a published schema and derives the schema that describes it, from
+/// the same declaration that serializes it.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationBehaviorKind {
     /// Host-based routing behaves differently.
@@ -357,7 +390,7 @@ impl std::fmt::Display for MigrationBehaviorKind {
 /// module produces is deterministic and names the probe index or the
 /// annotation, so two runs of the same comparison produce byte-identical
 /// text (Global Constraint 7).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct MigrationBehaviorChange {
     /// Which behavior moved.
@@ -421,7 +454,7 @@ pub struct MigrationComparison {
 /// Derives no `Default`, for the reason that type gives:
 /// `Comparable` is the flattering answer, and defaulting to it would
 /// turn "we could not tell" into "we looked and it was fine".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MigrationComparability {
     /// Both sides produced traffic evidence for this case.
@@ -669,8 +702,16 @@ fn compare_probe_pair(
         ));
     }
 
-    let baseline_location = redirect_target(baseline);
-    let candidate_location = redirect_target(candidate);
+    // One normalizer for redirect targets across the whole crate. This
+    // module carried a private twin of it until ROADMAP Task 8.8; that
+    // twin's own documentation said whichever of Tasks 8.7 and 8.8
+    // landed second should delete it and call
+    // [`crate::probe::redirect_location`] instead, which is exactly what
+    // happened here. The port decision, the query/fragment decision and
+    // the "not a URI is `None`, never a guess" rule are all documented
+    // once, on [`crate::probe::normalize_location`].
+    let baseline_location = redirect_location(baseline);
+    let candidate_location = redirect_location(candidate);
     let status_changed = baseline.status != candidate.status;
     if baseline_location == candidate_location && !status_changed {
         return changes;
@@ -783,70 +824,6 @@ fn describe_component(component: Option<&str>) -> String {
         || "(none: a relative Location)".to_owned(),
         |value| format!("{value:?}"),
     )
-}
-
-/// A response's `Location`, reduced to the three parts two
-/// implementations can be expected to agree on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RedirectTarget {
-    /// The URI scheme, lowercased, or `None` for a relative `Location`.
-    scheme: Option<String>,
-    /// The host, lowercased and **without** the port, or `None` for a
-    /// relative `Location`.
-    host: Option<String>,
-    /// The path component, verbatim.
-    path: String,
-}
-
-impl std::fmt::Display for RedirectTarget {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match (&self.scheme, &self.host) {
-            (Some(scheme), Some(host)) => write!(formatter, "{scheme}://{host}{}", self.path),
-            _ => write!(formatter, "{}", self.path),
-        }
-    }
-}
-
-/// The normalized `Location` of a response that carried one.
-///
-/// **The port is dropped deliberately, and it is the only interesting
-/// decision here.** A probe reaches a data plane through a `kubectl
-/// port-forward`, so the request arrives at `127.0.0.1:<an ephemeral
-/// local port>` while its `Host` header says something like
-/// `basic.ingress.admissionlab.test`. An implementation building an
-/// absolute redirect target may echo the authority it was given (no
-/// port), append its listener's port, or append the port it believes the
-/// client used -- all three are conforming answers to the same
-/// configuration. Comparing ports would therefore compare the
-/// port-forward rather than the migration, and would report a difference
-/// on every run, including two runs of the same stack (the kernel picks
-/// a different ephemeral port each time). The raw header is untouched in
-/// [`HttpProbeResult::response_headers`], so nothing is lost.
-///
-/// The query and fragment are dropped for the narrower reason that
-/// `admissionlab_echo::echo::EchoBody::path` already drops the query:
-/// one notion of "the path" across this project, not two.
-///
-/// `None` covers both "no `Location` header" and "a `Location` that is
-/// not a URI at all" -- never guessed, and never a fabricated target.
-/// The key lookup needs no lowercasing because
-/// [`HttpProbeResult::response_headers`] is already normalized to
-/// lowercase names.
-///
-/// Private, and small enough to stay so. ROADMAP Task 8.7 needs the
-/// same three parts for a *portable contract* assertion rather than for
-/// a cross-stack comparison, and is landing a public equivalent in
-/// [`crate::probe`] with the same port decision; whichever of the two
-/// lands second should delete this function and call that one, which is
-/// a change of an import and nothing else.
-fn redirect_target(result: &HttpProbeResult) -> Option<RedirectTarget> {
-    let value = result.response_headers.get("location")?;
-    let uri = value.trim().parse::<hyper::Uri>().ok()?;
-    Some(RedirectTarget {
-        scheme: uri.scheme_str().map(str::to_ascii_lowercase),
-        host: uri.host().map(str::to_ascii_lowercase),
-        path: uri.path().to_owned(),
-    })
 }
 
 /// One `ingress-nginx` annotation with no portable Gateway API
