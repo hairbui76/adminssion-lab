@@ -1,0 +1,209 @@
+# Istio Gateway API certified recipe (ROADMAP Task 6.10). See README.md
+# in this same directory for the full story this file only summarizes:
+# the two-component stack, the Gateway API CRD pin and its provenance,
+# the shared-version discipline with `recipes/istio/recipe.yaml`, the
+# live-cluster findings behind every readiness check below, and the
+# normalization question this recipe deliberately answers with "no rule".
+#
+# # This recipe is one half of a stack
+#
+# `gateway-api-crds.yaml`, in this same directory, installs the Gateway
+# API CustomResourceDefinitions and must be composed BEFORE this
+# component. This recipe installs the implementation (`istiod`) and
+# declares the `gatewayApi` capability; that one installs the API itself.
+# The split is forced by the schema (one `install:` per recipe, no shape
+# for two) and matches the discipline `recipes/istio/README.md` already
+# set down for exactly this situation. Read that file's header for the
+# rest.
+#
+# # Chart pin: the SAME chart, repo and version as `recipes/istio`
+#
+# `recipes/istio/recipe.yaml` is the source of truth for which Istio
+# release this project installs, and this recipe deliberately does not
+# introduce a second, independently-bumpable pin. It restates the same
+# three values (`chart`, `repo`, `version`) because the recipe schema is
+# YAML with no include, no anchor across files, and no variable -- there
+# is no mechanism by which one recipe document can reference another's
+# field.
+#
+# What makes that restatement safe is not a comment asking a reader to
+# keep them aligned: `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs`'s
+# `check_shared_istio_install` (reached from the plain, non-ignored
+# `the_checked_in_recipe_metadata_is_exactly_what_this_task_certified`)
+# loads BOTH recipes and fails if the chart, the repository URL, the
+# chart version, or the target namespace has drifted apart. It is not
+# `#[ignore]`d
+# -- it needs no cluster and runs under plain `cargo test --workspace` --
+# so bumping `recipes/istio/recipe.yaml` alone breaks the build in
+# seconds, naming both files. Duplication that a machine checks is a
+# different thing from duplication that a reviewer is asked to.
+#
+# The one field the two recipes deliberately do NOT share is the Helm
+# release name, which is left unset in both and therefore defaults to
+# each recipe's own name -- so `istio` and `istio-gateway` remain
+# distinguishable Helm releases if anything ever installs both onto one
+# cluster. Everything else about the install is identical by design and
+# by test.
+#
+# # Only `istiod` -- no `istio/base`, and no ambient/CNI component
+#
+# Verified on a live cluster while writing this recipe, not assumed: with
+# ONLY `istio/istiod` installed (no `istio/base`, so none of Istio's own
+# CRDs exist at all) plus the Gateway API CRDs, `istiod` creates
+# `GatewayClass/istio` (controller `istio.io/gateway-controller`) with
+# `Accepted=True`, provisions a data plane for a `Gateway`, and routes
+# real HTTP traffic through it to a backend. Neither `istio/base`,
+# `istio/cni`, `istio/ztunnel` nor the ambient profile is needed for any
+# of that -- Gateway API support lives entirely in `istiod`'s own
+# deployment controller. This is the same minimal-install finding
+# `recipes/istio/README.md` documents for sidecar injection, re-verified
+# for a different Istio feature rather than assumed to carry over.
+name: istio-gateway
+version: "1.30.4"
+install:
+  type: helm
+  chart: istio/istiod
+  repo: https://istio-release.storage.googleapis.com/charts
+  version: "1.30.4"
+  # REQUIRED here, unlike in `recipes/istio/recipe.yaml`, and not
+  # cosmetic: `admissionlab_installer::helm` runs `helm repo add
+  # <repoName> <repo>` and then installs the chart by the literal string
+  # `chart` above -- so the alias registered must be the one `chart`'s
+  # own `<repo>/<chart>` prefix names. `repoName` defaults to the
+  # RECIPE's name, which here is `istio-gateway`, and `istio/istiod`
+  # would then name an alias that was never added. Confirmed by reading
+  # `helm.rs`'s `repo_add_args`/`upgrade_args`, and this is exactly why
+  # `recipes/istio/recipe.yaml` can leave it unset (its recipe name
+  # already *is* `istio`) while this one cannot.
+  repoName: istio
+  namespace: istio-system
+readiness:
+  # 1. The control plane itself. Same check, same object, same reasoning
+  #    as `recipes/istio/recipe.yaml`'s -- see that file for the
+  #    live-cluster measurement behind it. Measured for this recipe on a
+  #    real `kind` cluster: `Available=True` about 12.5 seconds after
+  #    `helm upgrade --install` returned.
+  - type: deploymentAvailable
+    namespace: istio-system
+    name: istiod
+  # 2 & 3. The Gateway API itself is being served. `gateway-api-crds.yaml`
+  #    already asserts this for the four kinds it installs, and this
+  #    recipe restates it for the two its own capability is *about*
+  #    (`Gateway` and `HTTPRoute`) rather than trusting that another
+  #    component ran first. That is the difference between a recipe whose
+  #    readiness describes its own preconditions and one that is only
+  #    correct when composed exactly as its author imagined: composed
+  #    without `gateway-api-crds`, this component now fails readiness
+  #    naming the missing CRD, instead of installing "successfully" and
+  #    failing much later when a fixture's `Gateway` is rejected as an
+  #    unknown kind.
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: httproutes.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  # 4. The strongest of the four, and the reason the three above are not
+  #    the whole story: `GatewayClass/istio` reaching `Accepted=True`
+  #    proves `istiod`'s Gateway controller is *running and reconciling
+  #    Gateway API objects on this cluster*, which no amount of "the CRD
+  #    exists" and no Deployment condition can establish. `istiod` creates
+  #    this class for itself, but only once the Gateway API CRDs exist:
+  #    on a cluster where they do not, it never appears, and no `Gateway`
+  #    naming it could ever be Accepted.
+  #
+  #    The name `istio` is Istio's own default class, and is the class
+  #    `fixtures/gateway/istio/*.yaml` name in `spec.gatewayClassName`.
+  #    (`istio-remote`, the chart's other class, is an *unmanaged* class
+  #    -- controller `istio.io/unmanaged-gateway` -- that provisions
+  #    nothing; it is deliberately not gated on.)
+  - type: customResourceCondition
+    apiVersion: gateway.networking.k8s.io/v1
+    kind: GatewayClass
+    name: istio
+    conditionType: Accepted
+    status: "True"
+capabilities:
+  # This recipe's whole point. Note what is NOT here: `admission`.
+  # `istiod` installed this way does serve the sidecar-injection webhook,
+  # and `recipes/istio/recipe.yaml` is the recipe that certifies exactly
+  # that -- but a capability is a claim about what this recipe has been
+  # certified to do, and this one's fixtures and integration test
+  # exercise Gateway API behavior only. Claiming `admission` here would
+  # make a later task's fixture selection run admission fixtures against
+  # a recipe whose certification never covered them.
+  - gatewayApi
+# How Admission Lab finds the data plane for one `Gateway` installed
+# through this recipe (ROADMAP Task 6.6's `gatewayEndpoint` metadata).
+#
+# Every value below was read off a live cluster, not from documentation.
+# For `Gateway/lab-gateway` in namespace `admissionlab-istio-gateway-same`,
+# Istio provisioned:
+#
+#   Service/lab-gateway-istio  (= <gateway name>-<class name>)
+#     labels:
+#       gateway.networking.k8s.io/gateway-name: lab-gateway
+#       gateway.networking.k8s.io/gateway-class-name: istio
+#       gateway.istio.io/managed: istio.io-gateway-controller
+#     ports:
+#       - name: status-port  port: 15021
+#       - name: http         port: 80
+gatewayEndpoint:
+  # By selector, not by name -- even though the name is perfectly
+  # predictable (`<gateway>-<class>`). Two reasons, in order of weight:
+  # the derived name embeds the GatewayClass, so a fixture that used a
+  # second class (`istio-remote`, or a future one) would need a second
+  # recipe to find its Service; and the label is Gateway API's own
+  # documented "gateway infrastructure label", which Istio applies
+  # because upstream specifies it, whereas the name pattern is Istio's
+  # own convention. Selecting on the standard thing is the more durable
+  # of the two.
+  type: serviceBySelector
+  namespace: "{gatewayNamespace}"
+  selector:
+    # The one label key, and the only substitution: the Gateway's own
+    # name. Deliberately not also keyed on
+    # `gateway.networking.k8s.io/gateway-class-name`, which would pin
+    # this strategy to one class for no gain -- a Gateway's name is
+    # already unique within its namespace, so this selector can never
+    # match a second Gateway's data plane.
+    gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+  # REQUIRED, not optional-and-omitted: the provisioned Service exposes
+  # two ports (`http` 80 and `status-port` 15021, Istio's own readiness
+  # endpoint). With neither `portName` nor `port` set,
+  # `admissionlab_gateway::endpoint` would have two candidates and must
+  # report the port as unresolvable rather than pick one. `http` rather
+  # than a literal `80` so that a fixture whose listener binds a
+  # different port still resolves: the port NUMBER is the fixture's
+  # choice, the port NAME is Istio's.
+  portName: http
+# No `normalizeRules:`. Not an omission -- a finding.
+#
+# A recipe-level normalize rule exists to delete nondeterminism a vendor
+# stamps onto the objects Admission Lab compares. This recipe was checked
+# for that specifically, by reading back from a live cluster every object
+# its own fixtures create after Istio had reconciled them. What came back
+# carried no Istio-authored annotation, label or `spec` field at all. The
+# only additions to any fixture object were Gateway API's own CRD schema
+# defaults -- `parentRefs[].group`/`kind`, `backendRefs[].group`/`kind`/
+# `weight: 1` -- which are written by the API server from the CRD's own
+# schema, identical on every cluster serving the same bundle version, and
+# therefore not nondeterminism to normalize away. Istio's genuinely
+# nondeterministic output -- pod names, resource
+# versions, the `x-envoy-*`/`x-request-id` headers a probe's response
+# carries -- lives on objects Istio *creates* (which no fixture declares
+# and no comparison reads) and in HTTP responses, which
+# `admissionlab_gateway::probe` already normalizes on its own, in code
+# that applies to every implementation rather than to this one vendor.
+#
+# Adding a rule here anyway, "just in case", would be the failure mode
+# PRODUCT.md §14 warns about: a normalization rule deletes evidence, so
+# an unnecessary one silently narrows what a comparison can ever detect.
+# If a future Istio release does start stamping something, the evidence
+# for it belongs in this file next to the rule that removes it.

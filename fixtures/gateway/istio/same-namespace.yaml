@@ -1,0 +1,284 @@
+# Istio Gateway API fixture (a): a `Gateway`, an `HTTPRoute`, and the
+# backend the route resolves to, all in ONE namespace (ROADMAP Task 6.10
+# Step 3). Its counterweight is `cross-namespace.yaml`, which moves the
+# backend into a second namespace and adds the `ReferenceGrant` that
+# makes the reference legal; a diff of the two files is exactly the
+# cross-namespace machinery and nothing else.
+#
+# Applied by `admissionlab_gateway::apply::apply_gateway_manifests`, which
+# sorts every document into its own fixed category order
+# (`Namespace` -> `ConfigMap` -> `Service` -> `Deployment` -> `Gateway` ->
+# `ReferenceGrant` -> `HTTPRoute`) before applying any of them, so the
+# order documents appear in *this* file is for a human reader's benefit
+# only and changing it changes nothing about what reaches the cluster.
+#
+# # Self-contained, including a copy of the echo backend
+#
+# `fixtures/gateway/backends/echo-a.yaml` is the source of truth for what
+# an echo backend *is*, and it deliberately declares no namespace at all
+# (see its own header): the applying suite is expected to choose one with
+# `kubectl apply -n <namespace>`. `apply_gateway_manifests` has no such
+# parameter -- it applies each document to the namespace the document
+# itself names -- and a namespaced object that names none would land in
+# `default`, silently, in a fixture whose whole point is which namespace
+# each object is in.
+#
+# So the `Service`/`Deployment` below are a copy of that file's two
+# objects with `metadata.namespace` added and NOTHING else changed. This
+# is a deliberate choice between two imperfect options, taken with the
+# apply model as it exists:
+#
+#   - *Copy with namespace* (this file): every fixture is self-contained
+#     and readable in one place; the cost is that a change to the echo
+#     workload has to be mirrored into this file and `cross-namespace.yaml`
+#     by hand. `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs`
+#     closes that gap with a real test
+#     (`fixture_backends_match_the_shared_echo_backend_definition`) that
+#     parses `fixtures/gateway/backends/echo-{a,b}.yaml` and each copy
+#     below and fails if they have drifted apart in any field other than
+#     `metadata.namespace` -- so the duplication is machine-checked, not
+#     trusted to reviewers.
+#   - *Include by reference*: passing `fixtures/gateway/backends/echo-a.yaml`
+#     as a second manifest path to `apply_gateway_manifests`. Rejected:
+#     it applies to whatever namespace the document names, which is none,
+#     so the backend would land in `default` while the route looked for
+#     it beside the Gateway. The apply model would have to grow a
+#     per-file namespace override to make this work, which is a change to
+#     `admissionlab-gateway`, not to a fixture.
+#
+# # Why the `ConfigMap`, and the finding behind it
+#
+# Istio provisions one `Deployment` + `Service` per `Gateway`, and that
+# `Service` defaults to `type: LoadBalancer`. On a bare `kind` cluster
+# there is no load-balancer controller, so that `Service`'s external
+# address is never assigned -- and Istio, correctly, refuses to report
+# the Gateway as `Programmed`. Measured on a real cluster while writing
+# this fixture:
+#
+#     Programmed=False (AddressNotAssigned: Assigned to service(s)
+#     lab-gateway-istio.<ns>.svc.cluster.local:80, but failed to assign
+#     to all requested addresses: address pending for hostname
+#     "lab-gateway-istio.<ns>.svc.cluster.local")
+#
+# That is not a transient state that clears: it is the terminal state of
+# a LoadBalancer Service on a cluster with nothing to fulfil it, and it
+# would make every `Programmed` assertion in this fixture's test fail for
+# an environmental reason rather than a Gateway API one.
+#
+# The `ConfigMap` below, referenced from `Gateway.spec.infrastructure
+# .parametersRef`, is Istio's own documented per-Gateway override for
+# exactly this (the `istiod` chart's `values.yaml` names the same shape
+# under `gatewayClasses.<class>.service.spec.type` and states plainly:
+# "Per-Gateway configuration can also be set in the
+# `Gateway.spec.infrastructure.parametersRef` field"). With it, the
+# provisioned Service is `type: ClusterIP` and the same Gateway reached
+# `Programmed=True` within 2 seconds on the same cluster.
+#
+# It lives in the FIXTURE, not in `recipes/istio-gateway/recipe.yaml`, on
+# purpose: which Service type a Gateway wants is a property of the
+# environment the fixture runs in, and a recipe that forced `ClusterIP`
+# on every Gateway installed through it would be deciding a vendor
+# behavior question on the user's behalf (Global Constraint 6 -- a recipe
+# supplies install/readiness/normalization/capability metadata, not
+# behavior policy). A fixture that needs a routable address on a
+# LoadBalancer-capable cluster simply omits this `ConfigMap`.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-istio-gateway-same
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    # Deliberately NOT `istio-injection: enabled`. The Gateway data plane
+    # is a standalone Envoy that Istio provisions from the `Gateway`
+    # object itself; sidecar injection into the echo backend is a
+    # different Istio feature entirely (the one
+    # `recipes/istio/recipe.yaml` and `fixtures/istio/smoke/` certify),
+    # and mixing it in here would mean a traffic result that could not be
+    # attributed to the Gateway path alone.
+---
+# Istio's per-Gateway infrastructure override; see this file's header for
+# the live-cluster finding that makes it necessary on `kind`. Sorted into
+# the apply engine's `Configuration` category, which is applied before
+# `Gateway` -- so the override is always in place before Istio's
+# deployment controller first reads it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-infrastructure
+  namespace: admissionlab-istio-gateway-same
+data:
+  service: |
+    spec:
+      type: ClusterIP
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Service, with
+# --- metadata.namespace added. See this file's header ("Self-contained").
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: admissionlab-istio-gateway-same
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Deployment, with
+# --- metadata.namespace added. See this file's header ("Self-contained").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: admissionlab-istio-gateway-same
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-a
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The Gateway. `gatewayClassName: istio` is the class `istiod` creates
+# for itself the moment the Gateway API CRDs exist -- verified on a live
+# cluster with ONLY `istio/istiod` installed (no `istio/base`):
+# `GatewayClass/istio` (controller `istio.io/gateway-controller`) appears
+# with `Accepted=True`, alongside `istio-remote` (an unmanaged class this
+# fixture never uses).
+#
+# The provisioned data-plane `Service` is named `<gateway>-<class>` --
+# `lab-gateway-istio` here -- and carries
+# `gateway.networking.k8s.io/gateway-name: lab-gateway`, which is exactly
+# the label `recipes/istio-gateway/recipe.yaml`'s `gatewayEndpoint`
+# strategy selects on. Neither this fixture nor that recipe hardcodes the
+# derived name.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-istio-gateway-same
+spec:
+  gatewayClassName: istio
+  infrastructure:
+    parametersRef:
+      # An empty `group` is the core API group -- ConfigMap. Written out
+      # rather than omitted because the field is required by the Gateway
+      # API schema, not because the empty string means anything unusual.
+      group: ""
+      kind: ConfigMap
+      name: gateway-infrastructure
+  listeners:
+    # `name: http` is what a route's `parentRefs[].sectionName` and a
+    # `RouteContract`'s own `listenerName` both refer to. A single
+    # listener would make `sectionName` optional; it is written anyway so
+    # that adding a second listener later cannot silently make an
+    # existing contract ambiguous.
+    - name: http
+      protocol: HTTP
+      port: 80
+      # No `hostname` on the listener: the listener accepts any
+      # authority, and the ROUTE below is what narrows it. Keeping the
+      # hostname decision in one object means a probe that gets an
+      # unexpected 404 has exactly one place to look.
+      allowedRoutes:
+        namespaces:
+          # `Same` -- this fixture's entire point is that nothing crosses
+          # a namespace boundary. `cross-namespace.yaml` keeps this
+          # exactly as it is (its route is still beside the Gateway); it
+          # is the *backend* reference that crosses, which is what a
+          # `ReferenceGrant` governs and what `allowedRoutes` does not.
+          from: Same
+---
+# The route under contract. Its `Accepted`/`ResolvedRefs` parent
+# conditions and the Gateway's own `Accepted`/`Programmed` are what
+# `admissionlab_gateway::reconcile::wait_for_route_reconciliation`
+# observes; the probe that follows asserts a real 200 from `echo-a`.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: admissionlab-istio-gateway-same
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    # `.test` is reserved by RFC 6761 for exactly this: a name guaranteed
+    # never to resolve in the real DNS. The probe sends it as a `Host`
+    # header over a port-forward to 127.0.0.1, so it is never resolved by
+    # anything -- but a reserved suffix means a copy of this fixture that
+    # somehow escaped into an environment with real DNS still cannot
+    # reach a real service.
+    - same.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # No `namespace` -- the backend is in this route's own namespace,
+        # which needs no `ReferenceGrant`. That absence is the single
+        # difference this fixture is designed to demonstrate against
+        # `cross-namespace.yaml`.
+        - name: echo-a
+          port: 80

@@ -105,3 +105,56 @@ recipes:
         - "1.35.8"
         - "1.36.4"
         - "1.37.0"
+  # Task 6.10. `recipes/istio-gateway/` is a TWO-component stack -- the
+  # vendored Gateway API CRD bundle (`gateway-api-crds.yaml`, Gateway API
+  # v1.5.1) followed by `istiod` (`recipe.yaml`) -- and this single entry
+  # certifies the pair. There is deliberately no separate
+  # `gateway-api-crds` entry: that component installs
+  # CustomResourceDefinitions and nothing else, is never installed alone,
+  # and has no behavior of its own to certify against a Kubernetes
+  # version independently of the implementation that serves the API it
+  # adds. `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs`
+  # reads the `certified` list below at test time and installs BOTH
+  # components once per listed version, in that version's own disposable
+  # cluster.
+  #
+  # Same `version` as the `istio` entry above and for the same reason it
+  # is a chart version: both recipes install `istio/istiod` 1.30.4, and
+  # that shared pin is machine-checked (see
+  # `recipes/istio-gateway/recipe.yaml`'s own "Chart pin" note). The
+  # Gateway API bundle version this recipe additionally pins (v1.5.1) is
+  # carried by `gateway-api-crds.yaml`'s own `version` field, not here:
+  # this file's shape has one `version` per entry, and the entry is named
+  # for the component that carries the capability.
+  - name: istio-gateway
+    version: "1.30.4"
+    kubernetes:
+      # Two upstreams, neither of which states a Kubernetes support
+      # range for what this recipe installs:
+      #
+      #   - Istio: exactly as the `istio` entry above records -- no
+      #     `kubeVersion` in `Chart.yaml`, no vendor support statement
+      #     found.
+      #   - Gateway API v1.5.1: its own release notes state no supported
+      #     Kubernetes range at all (checked directly against the GitHub
+      #     release for that tag while writing this entry). The nearest
+      #     thing to a version statement anywhere in the v1.5 notes is
+      #     "TLSRoute's CEL validation requires Kubernetes 1.31 or
+      #     higher" -- about one kind this recipe never uses, and a floor
+      #     far below every version in Admission Lab's own matrix.
+      #
+      # Explicitly null rather than silently omitted, and not
+      # manufactured out of the TLSRoute floor: an absent constraint
+      # means "unknown," never "supported" (Global Constraint 15).
+      documentedRange: null
+      # The full Admission Lab supported set, matching the `istio` entry
+      # -- and, unlike that entry, every version listed here has actually
+      # been installed and traffic-tested end to end by
+      # `tests/istio_gateway_recipe.rs` (Gateway + HTTPRoute reconciled
+      # to Accepted/ResolvedRefs/Programmed, then a real HTTP 200 from
+      # the expected echo backend, in both the same-namespace and the
+      # cross-namespace/`ReferenceGrant` configuration).
+      certified:
+        - "1.35.8"
+        - "1.36.4"
+        - "1.37.0"

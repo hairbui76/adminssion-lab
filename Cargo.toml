@@ -53,6 +53,15 @@ admissionlab-diff = { path = "crates/admissionlab-diff" }
 # admission`, which `admissionlab-core/src/run.rs`'s own module
 # documentation already covers.
 admissionlab-fixtures = { path = "crates/admissionlab-fixtures" }
+# `admissionlab-recipes`' `tests/istio_gateway_recipe.rs` (Task 6.10) is
+# the first cross-crate consumer of this crate: the certified Istio
+# Gateway API recipe's own integration test drives the real apply/
+# reconcile/endpoint/port-forward/probe pipeline against a live cluster.
+# A *dev*-dependency edge only (`recipes -> gateway` exists in no
+# shipped code), and acyclic: `admissionlab-gateway` depends on `spec`,
+# `core`, `diff`, `fixtures` and `admission`, none of which reaches back
+# to `admissionlab-recipes`.
+admissionlab-gateway = { path = "crates/admissionlab-gateway" }
 # `admissionlab-test-webhook`'s `tests/kind_smoke.rs` (Task 2.7) is the
 # first cross-crate consumer of this crate — drives a resolved recipe's
 # component through the real Task 2.6 install-and-wait pipeline.

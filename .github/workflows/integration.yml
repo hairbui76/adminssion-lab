@@ -40,7 +40,10 @@ jobs:
     # Every `#[ignore]`d real-cluster test in this workspace runs here, one
     # matrix entry each -- `admissionlab-cluster`'s own `kind_smoke` (Task
     # 1.9), the Kyverno recipe certification test (Task 2.8), the Istio
-    # recipe certification test (Task 2.9), `admissionlab-test-webhook`'s
+    # recipe certification test (Task 2.9), the Istio *Gateway API*
+    # recipe certification test (`istio_gateway_recipe`, Task 6.10 -- a
+    # different Istio feature and a different recipe from Task 2.9's),
+    # `admissionlab-test-webhook`'s
     # `kind_smoke` (Task 2.7), the Phase 2 Exit Gate sample lab
     # (`exit_gate`, Task 2.11), the Phase 3 fixture capture pipeline
     # (`kind_capture`, Task 3.10), and the Public Alpha exit gate
@@ -51,9 +54,9 @@ jobs:
     # cluster creation, an upstream change to the audit annotations this
     # project reconstructs webhook traces from) would go undetected
     # forever. `fail-fast: false` so one matrix entry failing does not
-    # cancel the others -- with seven independent real-cluster tests,
+    # cancel the others -- with eight independent real-cluster tests,
     # losing signal on the rest the moment the first one fails would defeat
-    # the point of running all seven.
+    # the point of running all eight.
     #
     # Deliberately parallel *jobs* (via matrix), not sequential `run:`
     # steps in one job: each of these tests creates and tears down at least
@@ -126,6 +129,21 @@ jobs:
             test: kyverno_recipe
           - package: admissionlab-recipes
             test: istio_recipe
+          # Task 6.10. Like `istio_recipe`, this entry creates one
+          # disposable cluster per Kubernetes version
+          # `compatibility/recipes.yaml` certifies (today three), and it
+          # additionally runs `scripts/build-test-images.sh` once per
+          # cluster to load the echo backend the traffic probes reach.
+          # Measured end to end at 269.95 seconds (~4m30s) for all
+          # three certified-version iterations combined, on the
+          # reference machine with a warm node-image and Docker layer
+          # cache -- the same order as `istio_recipe`'s own 222 s, which
+          # is what the shared `timeout-minutes: 30` ceiling below was
+          # already sized against. See
+          # `recipes/istio-gateway/README.md`'s "What was measured" for
+          # the per-step figures.
+          - package: admissionlab-recipes
+            test: istio_gateway_recipe
           - package: admissionlab-recipes
             test: exit_gate
           - package: admissionlab-test-webhook

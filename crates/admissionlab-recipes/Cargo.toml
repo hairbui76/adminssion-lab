@@ -76,7 +76,21 @@ admissionlab-spec = { workspace = true }
 # `rt-multi-thread` is not needed since this test's only concurrency is
 # real child processes (`kind`, `helm`, `kubectl`) progressing
 # independently at the OS level, not multiple executor threads.
-tokio = { workspace = true, features = ["rt", "macros"] }
+# `time` was added by `tests/istio_gateway_recipe.rs` (Task 6.10), whose
+# `observe_until_reconciled` sleeps between re-observations of a route's
+# status -- see that file's "THE SECOND FINDING" for why re-observing is
+# necessary at all.
+tokio = { workspace = true, features = ["rt", "macros", "time"] }
+# `tests/istio_gateway_recipe.rs` (Task 6.10) drives the certified
+# `istio-gateway` recipe's own fixtures through the real Gateway
+# machinery: `apply_gateway_manifests` (Task 6.2),
+# `wait_for_route_reconciliation` (6.4), `KubeGatewayEndpointResolver`
+# (6.6), `start_service_port_forward` (6.7) and `execute_http_probe`
+# (6.8). Dev-only, and acyclic: `admissionlab-gateway` depends on
+# `spec`/`core`/`diff`/`fixtures`/`admission`, none of which reaches
+# back to this crate (verify with `cargo metadata`, the same way this
+# crate's other dev-dependency edges were checked).
+admissionlab-gateway = { workspace = true }
 # `tests/istio_recipe.rs` (Task 2.9) reads a fixture Pod back as
 # `kubectl get ... -o json` and parses its `spec.initContainers`/
 # `spec.containers`/`metadata.annotations` directly, rather than a

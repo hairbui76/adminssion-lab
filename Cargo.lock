@@ -216,6 +216,7 @@ version = "0.1.0"
 dependencies = [
  "admissionlab-cluster",
  "admissionlab-core",
+ "admissionlab-gateway",
  "admissionlab-installer",
  "admissionlab-spec",
  "async-trait",

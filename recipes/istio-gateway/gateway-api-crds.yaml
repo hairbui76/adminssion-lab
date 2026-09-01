@@ -1,0 +1,127 @@
+# Gateway API CustomResourceDefinitions, vendored (ROADMAP Task 6.10
+# Step 2). See README.md in this same directory for the full provenance,
+# the vendoring decision, and the client-side-apply headroom measurement
+# this file only summarizes.
+#
+# This is one of TWO recipe documents in this directory, and the first
+# half of one stack: `gateway-api-crds` installs the API, `recipe.yaml`'s
+# `istio-gateway` installs the implementation of it. They are two
+# components rather than one recipe because this crate's recipe schema
+# has exactly one `install:` block per recipe and no shape for "install
+# more than one thing" -- the same conclusion `recipes/istio/README.md`
+# already reached for `istio/base` ("a future task that needs Istio
+# custom resources should add [it] as its own, separate built-in recipe
+# and compose it ahead of this one in a stack, rather than this recipe
+# silently growing a second Helm install"). `admissionlab_installer::install_stack`
+# installs an ordered component list sequentially, fully waiting out each
+# component's readiness before the next one's install begins, so ordering
+# these two is all that "install the CRDs, then Istio" requires.
+#
+# Order matters and is asserted, not assumed: this component's readiness
+# checks below are what guarantee every CRD is `Established` -- served by
+# the API server, not merely accepted as an object -- before `istiod` is
+# installed at all.
+#
+# # Why the CRDs are vendored rather than fetched
+#
+# The bundle under `gateway-api/` is byte-identical to the upstream
+# release artifact:
+#
+#   url:    https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml
+#   sha256: 751002b3b91a87f7ae3bd2517c79a47a8d7ed6702901808a1cf9bd97d284f9b8
+#   size:   1024333 bytes
+#
+# `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs` recomputes
+# that digest from the checked-in file on every `cargo test` run, so an
+# edit to a vendored upstream artifact -- however well-intentioned -- is
+# a test failure rather than something a reviewer has to notice.
+#
+# Vendoring is not a preference here, it is what the install method
+# allows: `install.type: manifests` names local files, and nothing in
+# this project fetches a manifest over the network at install time (the
+# same local-first rule `compatibility/kubernetes.yaml` states for node
+# images: "Admission Lab never fetches this information over the network
+# at runtime"). A pinned URL plus a checksum would still be a network
+# dependency in the middle of every cluster install, and one that fails
+# differently on a machine with no route to github.com.
+#
+# # Which version, and why v1.5.1 specifically
+#
+# Not chosen as "the newest": chosen as the bundle the pinned Istio
+# release actually builds against. `istio/istio` at tag `1.30.4` declares
+# `sigs.k8s.io/gateway-api v1.5.1` in its own `go.mod` (fetched from
+# raw.githubusercontent.com while writing this recipe), so v1.5.1 is the
+# API version `istiod` 1.30.4's Gateway controller was compiled and
+# tested against. When `recipes/istio/recipe.yaml`'s chart pin moves,
+# this pin is re-derived from that release's own `go.mod` -- not bumped
+# independently.
+#
+# Standard channel, not experimental: everything this recipe's fixtures
+# use (`GatewayClass`, `Gateway`, `HTTPRoute`, `ReferenceGrant`) is in
+# the standard channel, and the experimental channel adds alpha APIs
+# whose schema can change between patch releases -- a moving target under
+# a tool whose whole job is telling stable behavior changes from noise.
+name: gateway-api-crds
+# The Gateway API bundle version, which is what this component installs
+# -- deliberately NOT Istio's 1.30.4. These two versions are independent
+# upstream projects that happen to be paired here; giving this component
+# Istio's version number would make a genuine future divergence
+# (Istio 1.31 still building against Gateway API v1.5.x, say) unsayable.
+version: "1.5.1"
+install:
+  type: manifests
+  paths:
+    # Relative to this recipe file's own directory, which is how an
+    # on-disk override recipe's paths resolve (`crate::model::resolve_manifests`).
+    # A subdirectory, not this directory, on purpose:
+    # `load_recipe_overrides` treats every `*.yaml` file *directly* in a
+    # recipe directory as a recipe document, and a 1 MB CRD bundle
+    # sitting beside `recipe.yaml` would be parsed as one and fail. A
+    # subdirectory is skipped by that loader entirely.
+    - gateway-api/standard-install-v1.5.1.yaml
+readiness:
+  # `Established` is the condition that means the API server is actually
+  # serving this resource -- not merely that the CRD object was accepted.
+  # `NamesAccepted` comes first and is weaker; a CRD can be accepted and
+  # briefly not yet served.
+  #
+  # Four checks, one per kind this recipe's own fixtures
+  # (`fixtures/gateway/istio/`) create, rather than one per kind in the
+  # bundle: the bundle also installs `BackendTLSPolicy`, `GRPCRoute`,
+  # `TLSRoute` and `ListenerSet`, which nothing here uses. Gating on a
+  # kind this project never creates would turn an unrelated upstream
+  # change into a false install failure.
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    # Cluster-scoped: no `namespace`. (`admissionlab_installer::readiness`'s
+    # `resolve_target` reads an omitted namespace as exactly that.)
+    name: gatewayclasses.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: httproutes.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: referencegrants.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+# No `capabilities:`. This component installs an API, not an
+# implementation of it: with these CRDs and nothing else on the cluster,
+# a `Gateway` can be created and will sit forever with no status at all,
+# because no controller is watching. The `gatewayApi` capability belongs
+# to `recipe.yaml`'s `istio-gateway`, which is what actually reconciles
+# one -- claiming it here would tell a later task's fixture selection
+# that this component alone can run Gateway fixtures, which is false.
+capabilities: []

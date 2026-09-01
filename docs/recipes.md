@@ -132,14 +132,21 @@ window gets a *different, quietly wrong* result rather than an error.
 
 ## The certified set
 
-Two recipes are embedded in the compiled binary; the third ships as an on-disk
-recipe because it installs raw manifests from paths that only exist on disk.
+Two recipes are embedded in the compiled binary; the others ship as on-disk
+recipes because they install raw manifests from paths that only exist on disk.
 
 | Recipe | Version | Install | Built in? | Notes |
 | --- | --- | --- | --- | --- |
 | `kyverno` | `3.9.0` (appVersion v1.19.0) | `kyverno/kyverno` from `https://kyverno.github.io/kyverno/`, namespace `kyverno` | yes | Installed entirely at chart defaults. Readiness gates only `kyverno-admission-controller` — the chart's other three Deployments (background, cleanup, reports) sit outside the admission path. This chart line is the last to support the legacy `ClusterPolicy`/`Policy` API its fixtures use. |
 | `istio` | `1.30.4` | `istio/istiod` from `https://istio-release.storage.googleapis.com/charts`, namespace `istio-system` | yes | **`istio/base` is deliberately omitted.** Verified empirically: `istiod` alone reaches Available, serves working sidecar injection, and logs no errors. `istio/base` supplies cluster-wide Istio CRDs this recipe's scope never touches. |
 | `test-webhook` | `0.1.0` | five raw manifests from `recipes/test-webhook/manifests/` | no — loaded as an on-disk override | Admission Lab's own deterministic dogfood webhook. Not built in because a built-in recipe's text is embedded at compile time and has no directory to resolve relative manifest paths against. |
+| `gateway-api-crds` | `1.5.1` (Gateway API) | the vendored `standard-install.yaml` bundle under `recipes/istio-gateway/gateway-api/` | no — loaded as an on-disk override | Half of the Istio Gateway API stack, composed **first**. Byte-identical to the upstream release artifact, with its SHA-256 re-checked by the recipe's own test. Declares no capability: it installs an API, not an implementation of one. |
+| `istio-gateway` | `1.30.4` | `istio/istiod` from `https://istio-release.storage.googleapis.com/charts`, namespace `istio-system` | no — composed with `gateway-api-crds` above | The other half: the same chart pin as `istio` (machine-checked against it), plus the `gatewayApi` capability and the `gatewayEndpoint` strategy that locates a Gateway's data-plane Service by its well-known `gateway.networking.k8s.io/gateway-name` label. |
+
+`recipes/istio-gateway/` is one **stack of two components**, not one recipe: the
+schema has exactly one `install:` per recipe, so "install the CRDs, then Istio"
+is expressed as an ordered component list, which `install_stack` installs
+sequentially, waiting out each component's readiness before the next begins.
 
 Per-recipe Kubernetes certification lives in `compatibility/recipes.yaml`, not
 in the recipe files — and it is read by the certification tests at test time
@@ -170,8 +177,10 @@ capabilities:
   - admission
 ```
 
-`admission` is the only capability that means anything in Alpha. Gateway-related
-capabilities are **planned for Public Beta** and have no behavior today.
+`admission` is the only capability that means anything in Alpha. `gatewayApi`
+arrives with Public Beta's Gateway suite (Phase 6) and is declared today by the
+`istio-gateway` recipe, which pairs it with the `gatewayEndpoint` metadata the
+Gateway engine needs to find a Gateway's data plane.
 
 A capability is a statement of fact, not an aspiration. The `test-webhook`
 recipe deliberately claimed **no** capability until its webhook actually
