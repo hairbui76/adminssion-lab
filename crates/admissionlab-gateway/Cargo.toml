@@ -43,3 +43,54 @@ admissionlab-spec = { workspace = true }
 # (Task 6.10 and later) must use that shape. A literal `core -> gateway`
 # dependency must never be added.
 admissionlab-core = { workspace = true }
+# `apply.rs` (Task 6.2) resolves each manifest document's
+# `apiVersion`/`kind` against the live cluster through
+# `admissionlab_fixtures::ResourceResolver`/`KubeResourceResolver`
+# instead of guessing a plural from the kind (Global Constraint 15; see
+# that module's own documentation for why guessing is observably wrong
+# for real CRDs). This is the `gateway -> fixtures` edge §1.1 draws
+# explicitly.
+admissionlab-fixtures = { workspace = true }
+# `apply.rs`'s `AppliedGatewayFixture::objects` is `Vec<ObjectKey>` --
+# Task 6.2's own frozen signature -- and `ObjectKey` is
+# `admissionlab_admission::correlate::ObjectKey`, §1.2's canonical name
+# for "which object a request targeted". §1.1 does not draw a
+# `gateway -> admission` edge, but the alternatives are worse: a second
+# type with the same five fields under a different name is exactly the
+# synonym §1.2's "these names are canonical" rule forbids, and lifting
+# `ObjectKey` into `admissionlab-core` would rewrite a Phase 3 crate's
+# public API for a Phase 6 convenience. This is the same resolution --
+# and the same reasoning -- the workspace already recorded for its
+# `diff -> admission` edge (see the root `Cargo.toml`): a roadmap-frozen
+# signature stated in terms of another crate's type makes that edge real
+# and intended rather than an oversight. Acyclic:
+# `admissionlab-admission` depends on `admissionlab-fixtures` and
+# `admissionlab-core`, neither of which depends on this crate, and
+# nothing may ever add an `admission -> gateway` edge back.
+admissionlab-admission = { workspace = true }
+# `apply.rs` applies each Gateway fixture document through the dynamic
+# (`DynamicObject`) API, so an arbitrary Gateway API or vendor CRD needs
+# no generated Rust type, and reaches each cluster only through that
+# cluster's own isolated kubeconfig.
+kube = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+# Parses Gateway fixture manifests, which are ordinary (possibly
+# multi-document) Kubernetes YAML -- the same parser, and the same
+# `serde_yaml`-is-deprecated reasoning, as
+# `admissionlab-installer`'s own manifest loader.
+serde_norway = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# The same `tower_test::mock`-backed `kube::Client` technique
+# `admissionlab-fixtures`'s `resources.rs` and `admissionlab-admission`'s
+# `tests/execute_unit.rs` already use: drives this crate's HTTP-level
+# code against a scripted request/response exchange, never a live
+# cluster. Pinned to the versions those crates' own test suites already
+# resolve in `Cargo.lock`.
+async-trait = { workspace = true }
+http = "1.5.0"
+http-body-util = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "time"] }
+tower-test = "0.4.0"

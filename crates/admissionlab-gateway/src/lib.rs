@@ -13,6 +13,14 @@
 //!   contract. See that module for why the canonical types are defined
 //!   in `admissionlab-spec` and re-exported here rather than declared
 //!   twice.
+//! - [`apply`] (Task 6.2) installs a suite's manifests into a lab
+//!   cluster: parse and hash everything first, then apply in a fixed
+//!   category order through the dynamic API, and never delete. Read that
+//!   module's documentation before changing anything about ordering or
+//!   apply semantics.
+//! - [`error`] defines [`GatewayError`], this crate's one error type,
+//!   and documents where it draws the line between "the API server
+//!   refused this" and "no answer could be obtained at all".
 //!
 //! # Gateway fixtures are persisted, not dry-run
 //!
@@ -36,8 +44,15 @@
 //! [`admissionlab_core::ClusterHandle`]'s own isolated kubeconfig rather
 //! than from an ambient `~/.kube/config`.
 
+pub mod apply;
+pub mod error;
 pub mod model;
 
+pub use apply::{
+    AppliedGatewayFixture, ApplyCategory, FIELD_MANAGER, GatewayApplyPlan, PlannedObject,
+    apply_gateway_manifests, apply_gateway_plan_with_client, plan_gateway_apply,
+};
+pub use error::GatewayError;
 pub use model::{
     ALLOWED_HTTP_METHODS, DEFAULT_RECONCILIATION_TIMEOUT, GatewayIdentity, GatewaySuiteSpec,
     HttpProbeContract, RouteContract, contract_gateway_identity, is_valid_http_status,

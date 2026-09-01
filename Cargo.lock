@@ -142,8 +142,20 @@ dependencies = [
 name = "admissionlab-gateway"
 version = "0.1.0"
 dependencies = [
+ "admissionlab-admission",
  "admissionlab-core",
+ "admissionlab-fixtures",
  "admissionlab-spec",
+ "async-trait",
+ "http",
+ "http-body-util",
+ "kube",
+ "serde",
+ "serde_json",
+ "serde_norway",
+ "thiserror",
+ "tokio",
+ "tower-test",
 ]
 
 [[package]]
