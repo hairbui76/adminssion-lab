@@ -24,6 +24,15 @@ repository = "https://github.com/hairbui76/adminssion-lab"
 admissionlab-admission = { path = "crates/admissionlab-admission" }
 admissionlab-cluster = { path = "crates/admissionlab-cluster" }
 admissionlab-core = { path = "crates/admissionlab-core" }
+# A workspace entry solely so `admissionlab-gateway` can name it as a
+# **dev-dependency** (Task 6.8): `tests/probe.rs` runs the real echo
+# backend on an ephemeral local port and probes it, rather than
+# hand-writing a stand-in for the frozen JSON contract that crate owns.
+# There is no production `gateway -> echo` edge, and there must not be:
+# `admissionlab-echo` is a deployed workload, not engine code, and the
+# probe parses its wire contract without importing its Rust types (see
+# `admissionlab_gateway::probe`'s own documentation for why).
+admissionlab-echo = { path = "crates/admissionlab-echo" }
 # `admissionlab-policy`'s `severity.rs`/`evaluate.rs` (Task 4.8) are the
 # first cross-crate consumers of this crate: policy grades
 # `admissionlab_diff::SemanticChange` values and keys its default

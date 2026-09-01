@@ -78,6 +78,31 @@ admissionlab-admission = { workspace = true }
 # trait-with-an-offline-implementation shape every other seam in this
 # workspace uses.
 async-trait = { workspace = true }
+# `probe.rs` (Task 6.8) speaks HTTP/1.1 to the local port-forward.
+#
+# The workspace tech-stack line names `reqwest`, and Task 8.6 will want
+# its per-request TLS trust configuration -- but `reqwest` is not in
+# `Cargo.lock` today, while `hyper` (1.11.1) already is, as a direct
+# dependency of `admissionlab-echo` and `admissionlab-test-webhook` and
+# transitively of `kube`'s own client stack. Adding a resolved crate's
+# `client` feature is strictly smaller than adding an unresolved crate
+# and its tree, so this uses what is already in the graph and leaves the
+# `reqwest`-vs-`hyper` question to whichever task first needs something
+# `hyper` genuinely cannot do.
+#
+# Two of Task 6.8's own requirements make the low-level client the
+# *better* tool here rather than merely the cheaper one: "redirects
+# disabled" is not a setting to remember but a property of the client
+# (`hyper::client::conn` has no redirect logic to disable), and the
+# retry rule needs to distinguish "the connection was refused before any
+# response" from "the server answered 503", which is exactly the seam
+# between `handshake`/`send_request` and the response this API exposes
+# and a high-level client hides.
+bytes = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client"] }
+# `TokioIo` adapts a `tokio::net::TcpStream` onto hyper's own IO traits.
+hyper-util = { workspace = true }
 # `endpoint.rs` (Task 6.6) reads `Service.spec.ports` to turn a
 # recipe-declared port *name* into a concrete port number. Unlike every
 # Gateway API object this crate handles -- which is a CRD, has no
@@ -122,6 +147,14 @@ tracing = { workspace = true }
 # cluster. Pinned to the versions those crates' own test suites already
 # resolve in `Cargo.lock`.
 http = "1.5.0"
-http-body-util = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+# `tests/probe.rs` drives the *real* echo backend
+# (`admissionlab_echo::serve::serve_on`) on an ephemeral local port
+# rather than hand-writing a stand-in for its frozen JSON contract, so
+# `probe.rs`'s parser is asserted against the bytes that component
+# actually produces. Dev-only: nothing in this crate's shipped code
+# depends on the echo backend, and `probe.rs` deliberately does not
+# import its `EchoBody` type -- see that module's own documentation for
+# why the wire contract is shared but the Rust type is not.
+admissionlab-echo = { workspace = true }
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
 tower-test = "0.4.0"

@@ -405,6 +405,74 @@ pub enum GatewayError {
         /// wrote nothing, which is itself worth seeing.
         stderr: String,
     },
+
+    /// An [`crate::model::HttpProbeContract`] could not be turned into an
+    /// HTTP request at all: its method, path, or one of its header names
+    /// or values is not something HTTP can carry.
+    ///
+    /// Mostly unreachable in practice —
+    /// `admissionlab_spec::resolve_lab` already validates the method
+    /// against Gateway API's own `HTTPMethod` enumeration and requires a
+    /// `/`-leading path at configuration-load time — but a header name
+    /// or value has no such validation, and a probe that silently
+    /// dropped an unsendable header would be measuring a different
+    /// request than the one the contract describes.
+    #[error("cannot build the probe request for {request}: {reason}")]
+    ProbeRequestInvalid {
+        /// The request, described with its `Authorization`/`Cookie`
+        /// values redacted — see [`crate::probe::describe_probe_request`].
+        request: String,
+        /// What about it could not be built.
+        reason: String,
+    },
+
+    /// A probe never obtained an HTTP response: the connection was not
+    /// ready for the whole readiness window, the request could not be
+    /// sent, or the response body could not be read to the end.
+    ///
+    /// Never a 4xx or a 5xx. An HTTP error *status* is a successful
+    /// observation — the very thing a Gateway probe exists to measure —
+    /// and is reported as an [`crate::probe::HttpProbeResult`], the same
+    /// line `admissionlab_fixtures::execute` draws between "the API
+    /// server refused this" and "no answer could be obtained at all".
+    #[error("no HTTP response from {endpoint} for {request} after {attempts} attempt(s): {reason}")]
+    ProbeUnavailable {
+        /// The local address that was probed.
+        endpoint: String,
+        /// The request, redacted — see
+        /// [`crate::probe::describe_probe_request`].
+        request: String,
+        /// What went wrong.
+        reason: String,
+        /// How many connection attempts were made. Counted honestly:
+        /// this is the real number, never rounded to "1" for a report's
+        /// convenience.
+        attempts: u32,
+    },
+
+    /// A response body exceeded [`crate::probe::MAX_PROBE_BODY_BYTES`].
+    ///
+    /// An error rather than a hash of the prefix that was read, and the
+    /// reason is that
+    /// [`crate::probe::HttpProbeResult::response_body_sha256`] means
+    /// exactly one thing: the SHA-256 of the response body. A hash of
+    /// the first megabyte is not that, and two sides that each truncated
+    /// at the same cap would produce *equal* hashes for genuinely
+    /// different bodies — a comparator reading them would report "no
+    /// change" about a body that changed. Reporting a body Admission Lab
+    /// could not measure as unmeasurable is the honest answer (Global
+    /// Constraint 15).
+    #[error(
+        "the response from {endpoint} for {request} exceeded the {limit}-byte probe body limit"
+    )]
+    ProbeBodyTooLarge {
+        /// The local address that was probed.
+        endpoint: String,
+        /// The request, redacted.
+        request: String,
+        /// The cap that was exceeded, in bytes.
+        limit: usize,
+    },
 }
 
 /// What a Gateway data-plane `Service` lookup was looking for, and

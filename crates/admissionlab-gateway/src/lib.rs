@@ -39,6 +39,14 @@
 //!   endpoint and manages its lifetime. Read that module's "Timeout
 //!   ownership" and "Termination" sections before changing anything
 //!   about when the child dies.
+//! - [`probe`] (Task 6.8) sends one real HTTP request through that
+//!   forward and records what came back: a status, a backend identity
+//!   when the response identified itself, normalized headers, a body
+//!   hash, and an honest attempt count. Read that module before
+//!   assuming anything about retries, redirects, or what `backend: None`
+//!   means.
+//! - [`case`] bundles Tasks 6.4 and 6.8's evidence into the
+//!   [`GatewayCaseResult`] Tasks 6.9 and 6.11 consume.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -66,17 +74,20 @@
 //! than from an ambient `~/.kube/config`.
 
 pub mod apply;
+pub mod case;
 pub mod conditions;
 pub mod endpoint;
 pub mod error;
 pub mod model;
 pub mod port_forward;
+pub mod probe;
 pub mod reconcile;
 
 pub use apply::{
     AppliedGatewayFixture, ApplyCategory, FIELD_MANAGER, GatewayApplyPlan, PlannedObject,
     apply_gateway_manifests, apply_gateway_plan_with_client, plan_gateway_apply,
 };
+pub use case::GatewayCaseResult;
 pub use conditions::{
     CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionFreshness,
     ConditionState, GatewayClassEvidence, GatewayEvidence, ObservedCondition, ParentIdentity,
@@ -92,6 +103,11 @@ pub use port_forward::{
     KUBECTL_PROGRAM, LOCAL_ADDRESS, PORT_FORWARD_READY_TIMEOUT, PortForwardHandle,
     PortForwardOutput, await_forwarding_address, parse_forwarding_line, port_forward_command,
     start_service_port_forward,
+};
+pub use probe::{
+    HttpProbeResult, MAX_PROBE_BODY_BYTES, PROBE_READINESS_WINDOW, PROBE_REQUEST_TIMEOUT,
+    PROBE_RETRY_INTERVAL, REDACTED_REQUEST_HEADERS, describe_probe_request, execute_http_probe,
+    is_redirect, redacted_probe_headers,
 };
 pub use reconcile::{
     DIAGNOSTIC_GATEWAY_CLASS_ABSENT, DIAGNOSTIC_PARENT_ABSENT, DIAGNOSTIC_PARENT_AMBIGUOUS,
