@@ -118,6 +118,15 @@
 # `ingress-nginx` entry's Tier-3 placement documented as the
 # migration-specific one it is. Both changes are to SCHEDULE only; no
 # row was added, removed, or re-certified.
+#
+# Re-verified 2026-09-01 for the v1.0.0 release candidate (ROADMAP Task
+# 9.7 step 3): `compatibility/kubernetes.yaml`'s pins were re-checked
+# against upstream and did not move, so no version string below shifted,
+# and every one of the eleven rows was re-run at that HEAD by the test
+# its own comment names. Timings for that run are in the commit that
+# made this note; the per-entry timings recorded below are from the
+# runs that first certified each row and are deliberately left as they
+# were.
 
 # The Kubernetes support-window escape hatch (Task 7.4 step 1; Global
 # Constraint 10, "support for the latest three upstream-supported

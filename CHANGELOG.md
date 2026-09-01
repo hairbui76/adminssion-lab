@@ -92,6 +92,36 @@ date. The contracts it describes are frozen and test-enforced today.
   `ingress-nginx` row is scheduled only in migration-specific weekly jobs. A
   tier is a statement about schedule and never about confidence; no row was
   added, removed, or re-certified.
+- **The v1 Kubernetes compatibility matrix is final.** Admission Lab `1.0.0`
+  provisions the latest three upstream-supported Kubernetes minors — **1.37,
+  1.36 and 1.35** — each pinned to an exact patch *and* to the `kindest/node`
+  digest that the `kind` v0.33.0 release published for it. Nothing floats, and
+  no digest was resolved from a tag:
+
+  ```text
+  1.37.0  kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  1.36.4  kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed  (Tier 1 primary)
+  1.35.8  kindest/node:v1.35.8@sha256:07b2536e30b803ed61d1677a79df6115f798ce64c80f9e22f6ed45afd09323c0
+  ```
+
+  The pins were re-checked against endoflife.date, the `kind` v0.33.0 release
+  notes and `dl.k8s.io/release/stable.txt` immediately before this release
+  candidate (`scripts/update-kubernetes-matrix.sh`) and needed **no change**:
+  those are still upstream's newest three minors at their newest patches, and
+  no 1.38 exists. `1.34.11` stays checked in as `supported: false`, so a
+  configuration still asking for it is refused by name rather than by a lookup
+  failure. All three supported minors were then re-run for real — the core
+  admission dogfood lab on each, and every certified recipe row in
+  [`compatibility/recipes.yaml`](compatibility/recipes.yaml) on the Kubernetes
+  versions it names.
+- **One vendor limitation is carried into v1, and it is a *recipe* limitation.**
+  The `kyverno` recipe (chart `3.9.0` / appVersion `v1.19.0`) is certified on
+  Kubernetes `1.35.8` and nowhere else, because Kyverno's own documentation for
+  that chart line states support for v1.33–v1.35 and stops there — certifying
+  it on `1.36.4` or `1.37.0` would mean claiming a window the vendor does not.
+  Core Kubernetes support is unaffected and is proven separately on all three
+  minors; see
+  [`docs/compatibility.md`](docs/compatibility.md#the-certified-table).
 
 ### Security
 

@@ -40,6 +40,20 @@
 # minor and its EOL-adjacent status, instead of a generic "never heard of
 # this version" lookup failure — see `VersionError::UnsupportedMinor` vs.
 # `VersionError::UnknownVersion`.
+#
+# Re-verified 2026-09-01 for the v1.0.0 release candidate (ROADMAP Task
+# 9.7 step 1) by running `scripts/update-kubernetes-matrix.sh`, which
+# fetches the same three upstream sources this file was populated from.
+# It proposed NOTHING and exited 0: endoflife.date still gives the newest
+# three supported minors as 1.37 (EOL 2027-10-28), 1.36 (2027-06-28) and
+# 1.35 (2027-02-28); their latest patches are still 1.37.0, 1.36.4 and
+# 1.35.8, exactly as pinned below; dl.k8s.io/release/stable.txt still
+# returns v1.37.0; and kind v0.33.0 — still kind's newest release, cut
+# 2026-08-26 — still publishes exactly the node-image digests below. No
+# 1.38 exists yet, so the release-time support window did not move and
+# nothing here had to be re-certified onto a new minor. Every pin below
+# was then exercised on real clusters rather than only re-read: see
+# CHANGELOG.md's Unreleased section for what was run.
 releases:
   - minor: "1.37"
     version: "1.37.0"

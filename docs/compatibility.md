@@ -203,6 +203,15 @@ and never "the closest patch we have".
 "Primary" is prose, not a field: nothing in the file marks it, and no code reads
 it. It names which version Tier 1 spends its per-commit budget on.
 
+**Re-verified for the `v1.0.0` release candidate on 2026-09-01.**
+`scripts/update-kubernetes-matrix.sh` proposed no change: upstream's newest
+three minors are still 1.37, 1.36 and 1.35, at exactly the patch levels above,
+and `kind` v0.33.0 is still `kind`'s newest release, so no digest moved and no
+new minor arrived to re-certify onto. Each supported pin was then re-run on
+real clusters rather than only re-read — the core admission dogfood lab on all
+three minors, and every certified recipe row on the Kubernetes versions it
+names.
+
 ## What happens on an uncertified combination
 
 **A warning. Never a refusal.** Global Constraint 6 makes the core
