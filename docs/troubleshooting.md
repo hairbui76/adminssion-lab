@@ -246,9 +246,13 @@ configurable.
 
 ### `helm` failed
 
-The whole error chain is rendered, so the `helm` exit status or the Kubernetes
-validation message reaches you rather than being swallowed by a wrapper. Common
-causes:
+The error names the failing component, the exact command, and its exit
+status. The command's own stderr (for example the Kubernetes validation
+message explaining *why* an apply was rejected) is not rendered inline
+today — re-run the printed command by hand to see it, or check the spilled
+command log under the run workspace's `logs/` directory when the command's
+output overflowed. Surfacing a bounded stderr tail inline is tracked as a
+post-v1 improvement in `docs/release-checklist.md`. Common causes:
 
 - **The chart reference is not in `<repoName>/<chartName>` form.** A bare
   `kyverno` fails with *"non-absolute URLs should be in form of

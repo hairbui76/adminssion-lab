@@ -649,6 +649,15 @@ so it is not rediscovered as a surprise:
   narrowing the doc sentence would settle it; that is a Task 10.3 judgement, not
   this pass's.
 
+  **Task 10.3 disposition:** the doc sentence was narrowed to describe what the
+  code does today (re-run the printed command, or read the spilled log), and
+  surfacing a bounded stderr tail inline is a **post-v1 patch-release
+  candidate** — a `Display`/`#[source]` change in the RC stabilization window
+  would alter error text several installer tests assert on, which is exactly
+  the class of non-blocker churn Task 10.3's rule exists to keep out. No other
+  blocker was found, so no code changed and no gate rerun was required beyond
+  the standing green results above.
+
 ---
 
 ## What only an operator can sign off
