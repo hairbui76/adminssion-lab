@@ -35,10 +35,31 @@ fn testdata_config(name: &str) -> PathBuf {
         .join(name)
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// for tests that need real files on disk (`load_lab` reads from a real
 /// path; it has no in-memory-string entry point).
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -46,16 +67,18 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Writes `yaml` (see [`dedent`]) to `admissionlab.yaml` inside a fresh
-/// unique temp directory and returns its path.
-fn write_config(label: &str, yaml: &str) -> PathBuf {
+/// unique temp directory and returns that directory's guard alongside
+/// the config's path. The caller must keep the guard alive for as long
+/// as it uses the path.
+fn write_config(label: &str, yaml: &str) -> (TempDir, PathBuf) {
     let dir = unique_temp_dir(label);
-    let path = dir.join("admissionlab.yaml");
+    let path = dir.path().join("admissionlab.yaml");
     std::fs::write(&path, dedent(yaml)).expect("write temp config");
-    path
+    (dir, path)
 }
 
 /// Strips the leading whitespace common to every non-empty line, so a
@@ -180,7 +203,7 @@ fn missing_candidate_is_rejected() {
 
 #[test]
 fn wrong_api_version_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "wrong-api-version",
         r#"
         apiVersion: admissionlab.io/v1beta1
@@ -204,7 +227,7 @@ fn wrong_api_version_is_rejected() {
 
 #[test]
 fn wrong_kind_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "wrong-kind",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -233,8 +256,8 @@ fn wrong_kind_is_rejected() {
 #[test]
 fn relative_paths_resolve_against_config_directory_not_cwd() {
     let root = unique_temp_dir("cwd-resolution");
-    let lab_dir = root.join("lab");
-    let elsewhere_dir = root.join("elsewhere");
+    let lab_dir = root.path().join("lab");
+    let elsewhere_dir = root.path().join("elsewhere");
     std::fs::create_dir_all(&lab_dir).unwrap();
     std::fs::create_dir_all(&elsewhere_dir).unwrap();
 
@@ -320,7 +343,7 @@ fn kubernetes_version_is_trimmed() {
     // A padded Kubernetes version must not keep its padding in the
     // resolved form — consistent with how a padded component name is
     // already trimmed by `require_component_name`.
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "padded-k8s-version",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -341,7 +364,7 @@ fn kubernetes_version_is_trimmed() {
 
 #[test]
 fn empty_baseline_kubernetes_version_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "empty-baseline-k8s",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -366,7 +389,7 @@ fn empty_baseline_kubernetes_version_is_rejected() {
 
 #[test]
 fn empty_candidate_kubernetes_version_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "empty-candidate-k8s",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -392,7 +415,7 @@ fn empty_candidate_kubernetes_version_is_rejected() {
 
 #[test]
 fn duplicate_component_names_within_an_environment_are_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "duplicate-component-names",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -437,7 +460,7 @@ fn same_component_name_in_baseline_and_candidate_is_allowed() {
     // This is the tool's normal use case: baseline and candidate install
     // the *same*-named component (compared to each other), so duplicate
     // detection must be scoped per-environment, not across both.
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "same-name-both-sides",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -474,7 +497,7 @@ fn same_component_name_in_baseline_and_candidate_is_allowed() {
 
 #[test]
 fn component_missing_name_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "component-missing-name",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -501,7 +524,7 @@ fn component_missing_name_is_rejected() {
 
 #[test]
 fn empty_fixture_include_list_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "empty-fixture-include",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -526,7 +549,7 @@ fn empty_fixture_include_list_is_rejected() {
 
 #[test]
 fn invalid_fixture_glob_pattern_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "invalid-glob",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -554,7 +577,7 @@ fn invalid_fixture_glob_pattern_is_rejected() {
 
 #[test]
 fn helm_install_method_parses() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-install",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -604,7 +627,7 @@ fn helm_install_method_parses() {
 
 #[test]
 fn manifests_install_method_parses() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "manifests-install",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -646,7 +669,7 @@ fn manifests_install_method_parses() {
 
 #[test]
 fn unrecognized_install_method_type_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "unknown-install-type",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -679,7 +702,7 @@ fn unrecognized_install_method_type_is_rejected() {
 
 #[test]
 fn latency_absolute_increase_is_milliseconds() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "latency-policy",
         r#"
         apiVersion: admissionlab.io/v1alpha1

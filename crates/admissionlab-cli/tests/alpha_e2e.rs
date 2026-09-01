@@ -73,14 +73,36 @@ fn example_config() -> PathBuf {
     workspace_root().join("examples/kyverno-istio-upgrade/admissionlab.yaml")
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// [`run_lab`] holds one for as long as it reads the run's artifacts out
+/// of it. `Drop` runs on a panicking assertion too, which an explicit
+/// delete at the end of a test does not — that is what keeps a `cargo
+/// test` run from leaving a report directory per run behind in the
+/// system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!(
         "admissionlab-alpha-e2e-{}-{label}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create the run's report directory");
-    dir
+    TempDir(dir)
 }
 
 // ---------------------------------------------------------------------
@@ -275,7 +297,11 @@ struct LabRun {
 /// Runs the canonical example once, end to end, through the compiled
 /// binary.
 fn run_lab(label: &str) -> LabRun {
-    let report_dir = unique_temp_dir(label);
+    // Bound before the run so the report directory is removed even if an
+    // assertion below panics; every read of it happens before this
+    // function returns.
+    let report_root = unique_temp_dir(label);
+    let report_dir = report_root.path();
     let binary = cargo_bin_admissionlab();
 
     eprintln!("alpha_e2e[{label}]: running {} ...", binary.display());
@@ -284,7 +310,7 @@ fn run_lab(label: &str) -> LabRun {
         .arg("test")
         .arg(example_config())
         .arg("--report-dir")
-        .arg(&report_dir)
+        .arg(report_dir)
         // The terminal report's color decision belongs to the caller
         // that observed the stream (`TerminalOptions::for_stream`).
         // stdout is a pipe here so color would already be off; setting

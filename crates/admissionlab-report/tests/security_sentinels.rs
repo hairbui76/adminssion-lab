@@ -69,7 +69,7 @@
 
 mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -481,9 +481,30 @@ struct Rendered {
     text: String,
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// following the same convention as this crate's other filesystem tests.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -491,7 +512,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Every artifact a run produces, rendered from `result`.
@@ -504,16 +525,16 @@ fn unique_temp_dir(label: &str) -> PathBuf {
 fn render_every_artifact(result: &LabResult, label: &str) -> Vec<Rendered> {
     let dir = unique_temp_dir(label);
 
-    let json_path = dir.join("result.json");
+    let json_path = dir.path().join("result.json");
     write_json_report(&json_path, result).expect("the JSON report writes");
     let json_text = std::fs::read_to_string(&json_path).expect("the JSON report reads back");
 
-    let html_path = dir.join("report.html");
+    let html_path = dir.path().join("report.html");
     write_html_report(&html_path, result).expect("the HTML report writes");
     let html_text = std::fs::read_to_string(&html_path).expect("the HTML report reads back");
 
-    // Self-cleaning: the assertions below run on the text, not the files.
-    let _ = std::fs::remove_dir_all(&dir);
+    // Self-cleaning: `dir` removes itself when this function returns, and
+    // the assertions below run on the text, not the files.
 
     vec![
         Rendered {

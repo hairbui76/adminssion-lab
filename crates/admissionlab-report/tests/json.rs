@@ -20,7 +20,7 @@
 
 mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use admissionlab_report::{ReportError, SCHEMA_VERSION, render_json, write_json_report};
@@ -30,9 +30,30 @@ use support::canonical_result;
 /// The committed stable example, embedded at compile time.
 const GOLDEN: &str = include_str!("../../../testdata/golden/result-v1.json");
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// following the same convention as the other crates' filesystem tests.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -40,7 +61,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// The golden document, parsed. Used only by the tests that assert on
@@ -65,7 +86,8 @@ fn the_canonical_result_matches_the_golden_byte_for_byte() {
 #[test]
 fn writing_produces_exactly_the_rendered_bytes() {
     let result = canonical_result();
-    let path = unique_temp_dir("write").join("result.json");
+    let temp_dir = unique_temp_dir("write");
+    let path = temp_dir.path().join("result.json");
 
     write_json_report(&path, &result).expect("writing the report succeeds");
 
@@ -361,7 +383,8 @@ fn the_summary_counts_partition_the_fixtures() {
 
 #[test]
 fn writing_replaces_existing_content_completely() {
-    let path = unique_temp_dir("replace").join("result.json");
+    let temp_dir = unique_temp_dir("replace");
+    let path = temp_dir.path().join("result.json");
     std::fs::write(&path, "x".repeat(100_000)).expect("seed the destination");
 
     write_json_report(&path, &canonical_result()).expect("writing succeeds");
@@ -376,9 +399,10 @@ fn writing_replaces_existing_content_completely() {
 #[test]
 fn writing_leaves_no_temporary_file_behind() {
     let dir = unique_temp_dir("no-temp");
-    write_json_report(&dir.join("result.json"), &canonical_result()).expect("writing succeeds");
+    write_json_report(&dir.path().join("result.json"), &canonical_result())
+        .expect("writing succeeds");
 
-    let entries: Vec<String> = std::fs::read_dir(&dir)
+    let entries: Vec<String> = std::fs::read_dir(dir.path())
         .expect("read the temp dir")
         .map(|entry| {
             entry
@@ -394,9 +418,8 @@ fn writing_leaves_no_temporary_file_behind() {
 
 #[test]
 fn a_missing_parent_directory_is_a_reported_error() {
-    let path = unique_temp_dir("missing-parent")
-        .join("does-not-exist")
-        .join("result.json");
+    let temp_dir = unique_temp_dir("missing-parent");
+    let path = temp_dir.path().join("does-not-exist").join("result.json");
 
     let error = write_json_report(&path, &canonical_result())
         .expect_err("writing into a missing directory must fail");

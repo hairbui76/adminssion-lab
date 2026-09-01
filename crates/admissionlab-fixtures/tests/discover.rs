@@ -65,11 +65,32 @@ fn select_testdata_file(filename: &str) -> ResolvedFixtureSelection {
     }
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// mirroring `admissionlab-installer/tests/manifests_unit.rs`'s own
 /// `unique_temp_dir` helper (each integration test binary is compiled
 /// separately, so nothing is actually shared between them).
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -77,7 +98,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Writes `contents` to `dir.join(name)`.
@@ -279,11 +300,11 @@ fn discovery_order_is_sorted_by_relative_path_not_creation_order() {
     // `discover.rs`'s own inline unit tests for a second, filesystem-free
     // proof of the same sort step.
     let dir = unique_temp_dir("ordering");
-    write_fixture(&dir, "charlie.yaml", &configmap("charlie"));
-    write_fixture(&dir, "alpha.yaml", &configmap("alpha"));
-    write_fixture(&dir, "bravo.yaml", &configmap("bravo"));
+    write_fixture(dir.path(), "charlie.yaml", &configmap("charlie"));
+    write_fixture(dir.path(), "alpha.yaml", &configmap("alpha"));
+    write_fixture(dir.path(), "bravo.yaml", &configmap("bravo"));
 
-    let selection = select_all_yaml(dir.clone());
+    let selection = select_all_yaml(dir.path().to_path_buf());
     let sources = discover_fixtures(&selection).expect("all three fixtures must discover");
 
     let names: Vec<_> = sources
@@ -311,9 +332,9 @@ fn sort_key_is_the_relative_path_string_not_paths_own_component_ordering() {
     // to sorting bare `PathBuf`s), this assertion would see the reversed
     // order and fail.
     let dir = unique_temp_dir("path-vs-string-ordering");
-    std::fs::create_dir_all(dir.join("a")).expect("create nested dir");
-    write_fixture(&dir, "a-b.yaml", &configmap("dash"));
-    write_fixture(&dir.join("a"), "x.yaml", &configmap("nested"));
+    std::fs::create_dir_all(dir.path().join("a")).expect("create nested dir");
+    write_fixture(dir.path(), "a-b.yaml", &configmap("dash"));
+    write_fixture(&dir.path().join("a"), "x.yaml", &configmap("nested"));
 
     // Sanity check on the trap itself, mirroring
     // `admissionlab_recipes::model`'s own
@@ -332,14 +353,14 @@ fn sort_key_is_the_relative_path_string_not_paths_own_component_ordering() {
          path second"
     );
 
-    let selection = select_all_yaml(dir.clone());
+    let selection = select_all_yaml(dir.path().to_path_buf());
     let sources = discover_fixtures(&selection).expect("both fixtures must discover");
 
     let relative_order: Vec<_> = sources
         .iter()
         .map(|s| {
             s.path
-                .strip_prefix(&dir)
+                .strip_prefix(dir.path())
                 .unwrap()
                 .to_str()
                 .unwrap()
@@ -352,11 +373,11 @@ fn sort_key_is_the_relative_path_string_not_paths_own_component_ordering() {
 #[test]
 fn discover_fixtures_is_deterministic_across_repeated_calls() {
     let dir = unique_temp_dir("repeatable");
-    write_fixture(&dir, "one.yaml", &configmap("one"));
-    write_fixture(&dir, "two.yaml", &configmap("two"));
-    write_fixture(&dir, "three.yaml", &configmap("three"));
+    write_fixture(dir.path(), "one.yaml", &configmap("one"));
+    write_fixture(dir.path(), "two.yaml", &configmap("two"));
+    write_fixture(dir.path(), "three.yaml", &configmap("three"));
 
-    let selection = select_all_yaml(dir);
+    let selection = select_all_yaml(dir.path().to_path_buf());
     let first = discover_fixtures(&selection).expect("first call must succeed");
     let second = discover_fixtures(&selection).expect("second call must succeed");
 
@@ -383,14 +404,18 @@ fn fixture_id_is_identical_regardless_of_the_selections_absolute_root() {
     // controller supplement §3 requires.
     let dir_a = unique_temp_dir("root-a");
     let dir_b = unique_temp_dir("root-b");
-    assert_ne!(dir_a, dir_b, "test precondition: the two roots must differ");
-    write_fixture(&dir_a, "shared.yaml", &configmap("shared"));
-    write_fixture(&dir_b, "shared.yaml", &configmap("shared"));
+    assert_ne!(
+        dir_a.path(),
+        dir_b.path(),
+        "test precondition: the two roots must differ"
+    );
+    write_fixture(dir_a.path(), "shared.yaml", &configmap("shared"));
+    write_fixture(dir_b.path(), "shared.yaml", &configmap("shared"));
 
-    let sources_a =
-        discover_fixtures(&select_all_yaml(dir_a)).expect("dir_a fixture must discover");
-    let sources_b =
-        discover_fixtures(&select_all_yaml(dir_b)).expect("dir_b fixture must discover");
+    let sources_a = discover_fixtures(&select_all_yaml(dir_a.path().to_path_buf()))
+        .expect("dir_a fixture must discover");
+    let sources_b = discover_fixtures(&select_all_yaml(dir_b.path().to_path_buf()))
+        .expect("dir_b fixture must discover");
 
     assert_eq!(sources_a.len(), 1);
     assert_eq!(sources_b.len(), 1);
@@ -428,10 +453,10 @@ fn a_real_id_collision_across_two_files_is_rejected_not_silently_accepted() {
     // `FixtureError::DuplicateFixtureId` rather than silently returning
     // two `FixtureSource`s under one id.
     let dir = unique_temp_dir("collision");
-    write_fixture(&dir, "a.b.yaml", &configmap("x"));
-    write_fixture(&dir, "a-b.yaml", &configmap("x"));
+    write_fixture(dir.path(), "a.b.yaml", &configmap("x"));
+    write_fixture(dir.path(), "a-b.yaml", &configmap("x"));
 
-    let err = discover_fixtures(&select_all_yaml(dir)).unwrap_err();
+    let err = discover_fixtures(&select_all_yaml(dir.path().to_path_buf())).unwrap_err();
     assert!(matches!(
         err,
         admissionlab_fixtures::FixtureError::DuplicateFixtureId { .. }
@@ -444,7 +469,8 @@ fn a_real_id_collision_across_two_files_is_rejected_not_silently_accepted() {
 
 #[test]
 fn a_missing_root_directory_is_an_error() {
-    let root = unique_temp_dir("missing-root-parent").join("does-not-exist");
+    let temp_dir = unique_temp_dir("missing-root-parent");
+    let root = temp_dir.path().join("does-not-exist");
     assert!(!root.exists(), "test precondition: root must not exist");
     let selection = select_all_yaml(root);
 
@@ -458,9 +484,9 @@ fn a_missing_root_directory_is_an_error() {
 #[test]
 fn a_pattern_matching_nothing_returns_an_empty_result_not_an_error() {
     let dir = unique_temp_dir("no-matches");
-    write_fixture(&dir, "irrelevant.txt", "not a fixture");
+    write_fixture(dir.path(), "irrelevant.txt", "not a fixture");
 
-    let selection = select_all_yaml(dir);
+    let selection = select_all_yaml(dir.path().to_path_buf());
     let sources = discover_fixtures(&selection).expect("no match is not itself an error");
     assert!(sources.is_empty());
 }
@@ -468,7 +494,7 @@ fn a_pattern_matching_nothing_returns_an_empty_result_not_an_error() {
 #[test]
 fn an_empty_directory_returns_an_empty_result() {
     let dir = unique_temp_dir("empty-dir");
-    let selection = select_all_yaml(dir);
+    let selection = select_all_yaml(dir.path().to_path_buf());
     let sources = discover_fixtures(&selection).expect("an empty directory is not an error");
     assert!(sources.is_empty());
 }

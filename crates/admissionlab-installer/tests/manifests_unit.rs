@@ -62,11 +62,32 @@ fn exit_status(code: i32) -> ExitStatus {
     ExitStatus::from_raw(code << 8)
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// mirroring `admissionlab-spec/tests/component.rs`'s own
 /// `unique_temp_dir` helper (each integration test binary is compiled
 /// separately, so nothing is actually shared between them).
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -74,7 +95,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Writes `contents` to `dir.join(name)` and returns the resulting path.
@@ -244,7 +265,7 @@ impl ProcessRunner for FakeProcessRunner {
 fn multi_document_yaml_produces_multiple_documents() {
     let dir = unique_temp_dir("multi-doc-yaml");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "stack.yaml",
         "apiVersion: v1\n\
          kind: Namespace\n\
@@ -273,7 +294,7 @@ fn multi_document_yaml_produces_multiple_documents() {
 fn json_input_produces_one_document() {
     let dir = unique_temp_dir("json-input");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "cm.json",
         r#"{"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"cfg"},"data":{"key":"value"}}"#,
     );
@@ -291,7 +312,7 @@ fn json_input_produces_one_document() {
 #[test]
 fn json_extension_is_case_insensitive() {
     let dir = unique_temp_dir("json-ext-case");
-    let path = write_manifest(&dir, "cm.JSON", r#"{"kind":"ConfigMap"}"#);
+    let path = write_manifest(dir.path(), "cm.JSON", r#"{"kind":"ConfigMap"}"#);
 
     let bundle = load_manifest_bundle(&[path])
         .expect("an uppercase .JSON extension must still parse as JSON");
@@ -307,12 +328,12 @@ fn deterministic_order_is_preserved_across_repeated_loads_and_not_sorted() {
     // -- proving order is preserved from the caller's list, not
     // re-sorted by filename.
     let path_b = write_manifest(
-        &dir,
+        dir.path(),
         "b-second.yaml",
         "apiVersion: v1\nkind: Zebra\nmetadata:\n  name: z\n",
     );
     let path_a = write_manifest(
-        &dir,
+        dir.path(),
         "a-first.yaml",
         "apiVersion: v1\nkind: Alpha\nmetadata:\n  name: a\n",
     );
@@ -337,12 +358,12 @@ fn deterministic_order_is_preserved_across_repeated_loads_and_not_sorted() {
 fn reordering_input_paths_changes_document_order_and_hash() {
     let dir = unique_temp_dir("reorder");
     let path_a = write_manifest(
-        &dir,
+        dir.path(),
         "a.yaml",
         "apiVersion: v1\nkind: Alpha\nmetadata:\n  name: a\n",
     );
     let path_b = write_manifest(
-        &dir,
+        dir.path(),
         "b.yaml",
         "apiVersion: v1\nkind: Beta\nmetadata:\n  name: b\n",
     );
@@ -363,12 +384,12 @@ fn reordering_input_paths_changes_document_order_and_hash() {
 fn duplicate_source_files_are_read_and_counted_once() {
     let dir = unique_temp_dir("dup");
     let path_a = write_manifest(
-        &dir,
+        dir.path(),
         "a.yaml",
         "apiVersion: v1\nkind: Alpha\nmetadata:\n  name: a\n",
     );
     let path_b = write_manifest(
-        &dir,
+        dir.path(),
         "b.yaml",
         "apiVersion: v1\nkind: Beta\nmetadata:\n  name: b\n",
     );
@@ -395,7 +416,7 @@ fn malformed_yaml_document_fails_with_file_and_document_identified() {
     // character for indentation, which the YAML spec forbids -- a
     // reliable, implementation-independent parse error.
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "broken.yaml",
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n---\nkind: ConfigMap\n\tname: cfg\n",
     );
@@ -424,7 +445,11 @@ fn malformed_yaml_document_fails_with_file_and_document_identified() {
 #[test]
 fn malformed_json_fails_with_file_identified() {
     let dir = unique_temp_dir("malformed-json");
-    let path = write_manifest(&dir, "broken.json", "{\"apiVersion\": \"v1\", \"kind\": }");
+    let path = write_manifest(
+        dir.path(),
+        "broken.json",
+        "{\"apiVersion\": \"v1\", \"kind\": }",
+    );
 
     let error = load_manifest_bundle(std::slice::from_ref(&path))
         .expect_err("malformed JSON must fail to load");
@@ -447,7 +472,7 @@ fn malformed_json_fails_with_file_identified() {
 #[test]
 fn missing_file_surfaces_as_manifest_read_error() {
     let dir = unique_temp_dir("missing");
-    let missing = dir.join("does-not-exist.yaml");
+    let missing = dir.path().join("does-not-exist.yaml");
 
     let error = load_manifest_bundle(std::slice::from_ref(&missing))
         .expect_err("a missing file must fail to load");
@@ -463,7 +488,7 @@ fn directory_path_surfaces_as_manifest_read_error_not_expanded() {
     let dir = unique_temp_dir("dir-as-manifest");
     // `dir` itself is a real directory; treat it as a (bogus) manifest
     // "file" path to prove Task 2.3 does not silently expand it.
-    let error = load_manifest_bundle(std::slice::from_ref(&dir))
+    let error = load_manifest_bundle(&[dir.path().to_path_buf()])
         .expect_err("a directory must not be read as a file");
 
     assert!(matches!(error, InstallError::ManifestRead { .. }));
@@ -473,7 +498,7 @@ fn directory_path_surfaces_as_manifest_read_error_not_expanded() {
 fn trailing_empty_yaml_document_is_not_counted() {
     let dir = unique_temp_dir("trailing-empty");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "trailing.yaml",
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n---\n",
     );
@@ -492,8 +517,8 @@ fn source_hash_depends_on_content_not_on_the_paths_holding_it() {
     let dir_one = unique_temp_dir("hash-path-one");
     let dir_two = unique_temp_dir("hash-path-two");
     let content = "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n";
-    let path_one = write_manifest(&dir_one, "config.yaml", content);
-    let path_two = write_manifest(&dir_two, "totally-different-name.yaml", content);
+    let path_one = write_manifest(dir_one.path(), "config.yaml", content);
+    let path_two = write_manifest(dir_two.path(), "totally-different-name.yaml", content);
 
     let bundle_one = load_manifest_bundle(&[path_one]).expect("load must succeed");
     let bundle_two = load_manifest_bundle(&[path_two]).expect("load must succeed");
@@ -509,7 +534,7 @@ fn source_hash_depends_on_content_not_on_the_paths_holding_it() {
 fn source_hash_is_lowercase_hex_sha256_and_changes_with_content() {
     let dir = unique_temp_dir("hash-shape");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "a.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );
@@ -548,7 +573,7 @@ fn source_hash_is_lowercase_hex_sha256_and_changes_with_content() {
 async fn apply_uses_exact_argv_with_server_side_false_kubeconfig_and_cache_dir() {
     let dir = unique_temp_dir("apply-argv");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "cm.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );
@@ -591,7 +616,7 @@ async fn every_kubectl_invocation_carries_kubeconfig_and_cache_dir_pointing_insi
     let paths: Vec<PathBuf> = (0..3)
         .map(|i| {
             write_manifest(
-                &dir,
+                dir.path(),
                 &format!("m{i}.yaml"),
                 &format!("apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg{i}\n"),
             )
@@ -648,12 +673,12 @@ async fn every_kubectl_invocation_carries_kubeconfig_and_cache_dir_pointing_insi
 async fn files_are_applied_in_declared_order_one_kubectl_call_per_file() {
     let dir = unique_temp_dir("order-apply");
     let path_first = write_manifest(
-        &dir,
+        dir.path(),
         "01-namespace.yaml",
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n",
     );
     let path_second = write_manifest(
-        &dir,
+        dir.path(),
         "02-configmap.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  namespace: demo\n",
     );
@@ -689,7 +714,7 @@ async fn files_are_applied_in_declared_order_one_kubectl_call_per_file() {
 async fn duplicate_paths_are_applied_only_once() {
     let dir = unique_temp_dir("dup-apply");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "cm.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );
@@ -735,11 +760,11 @@ async fn duplicate_paths_are_applied_only_once() {
 async fn malformed_manifest_fails_before_any_kubectl_call() {
     let dir = unique_temp_dir("fail-fast");
     let good = write_manifest(
-        &dir,
+        dir.path(),
         "good.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );
-    let bad = write_manifest(&dir, "bad.yaml", "kind: ConfigMap\n\tname: cfg\n");
+    let bad = write_manifest(dir.path(), "bad.yaml", "kind: ConfigMap\n\tname: cfg\n");
 
     let runner = Arc::new(FakeProcessRunner::new().with(&good, FakeOutcome::Success(b"")));
     let run_paths = test_run_paths();
@@ -763,12 +788,12 @@ async fn malformed_manifest_fails_before_any_kubectl_call() {
 async fn nonzero_kubectl_exit_surfaces_as_install_error_with_stderr_not_panic() {
     let dir = unique_temp_dir("nonzero");
     let path_first = write_manifest(
-        &dir,
+        dir.path(),
         "01.yaml",
         "apiVersion: v1\nkind: Namespace\nmetadata:\n  name: demo\n",
     );
     let path_second = write_manifest(
-        &dir,
+        dir.path(),
         "02.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n  namespace: nope\n",
     );
@@ -817,7 +842,7 @@ async fn nonzero_kubectl_exit_surfaces_as_install_error_with_stderr_not_panic() 
 async fn kubectl_not_found_surfaces_as_install_error_process_variant() {
     let dir = unique_temp_dir("missing-kubectl");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "cm.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );
@@ -866,7 +891,7 @@ async fn helm_install_method_is_rejected_without_invoking_runner() {
 async fn successful_install_reports_declared_version_and_manifests_method() {
     let dir = unique_temp_dir("record");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "cm.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );
@@ -900,7 +925,7 @@ async fn successful_install_reports_declared_version_and_manifests_method() {
 async fn annotation_size_limit_failure_is_surfaced_with_clear_diagnostic_and_no_silent_retry() {
     let dir = unique_temp_dir("annotation-limit");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "hugecrd.yaml",
         "apiVersion: apiextensions.k8s.io/v1\nkind: CustomResourceDefinition\nmetadata:\n  name: hugecrd.example.io\n",
     );
@@ -954,7 +979,7 @@ async fn annotation_size_limit_failure_is_surfaced_with_clear_diagnostic_and_no_
 async fn plain_nonzero_exit_without_annotation_limit_wording_stays_a_generic_command_failed() {
     let dir = unique_temp_dir("not-annotation-limit");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "cm.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );
@@ -985,7 +1010,7 @@ async fn stderr_mentioning_annotations_without_the_size_limit_number_stays_a_gen
  {
     let dir = unique_temp_dir("annotations-word-only");
     let path = write_manifest(
-        &dir,
+        dir.path(),
         "cm.yaml",
         "apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: cfg\n",
     );

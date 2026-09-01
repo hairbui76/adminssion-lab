@@ -66,15 +66,37 @@ fn block_on<F: std::future::Future>(future: F) -> F::Output {
         .block_on(future)
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which the explicit deletes that
+/// used to sit at the end of each test below did not — that is what
+/// keeps a `cargo test` run from leaving a directory per test behind in
+/// the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique scratch directory. Mirrors
 /// `admissionlab-core`'s own `tests/run_lifecycle.rs`.
-fn unique_dir(label: &str) -> PathBuf {
+fn unique_dir(label: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!(
         "admissionlab-cli-pipeline-{label}-{}",
         RunId::generate().as_str()
     ));
     std::fs::create_dir_all(&dir).expect("failed to create scratch dir");
-    dir
+    TempDir(dir)
 }
 
 /// Writes a lab configuration whose `policy` section is `policy`
@@ -717,15 +739,15 @@ fn read_result(path: &Path) -> serde_json::Value {
 #[test]
 fn a_run_with_no_differences_passes_and_writes_all_three_reports() {
     let dir = unique_dir("happy");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -793,14 +815,13 @@ fn a_run_with_no_differences_passes_and_writes_all_three_reports() {
 
     assert_eq!(backend.clusters.created_sides().len(), 2);
     assert_eq!(backend.clusters.deleted_sides().len(), 2);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn reports_default_to_the_runs_own_directory_when_no_report_dir_is_given() {
     let dir = unique_dir("default-report-dir");
-    let config = write_lab(&dir, "");
-    let run_root = dir.join("runs");
+    let config = write_lab(dir.path(), "");
+    let run_root = dir.path().join("runs");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
@@ -826,7 +847,6 @@ fn reports_default_to_the_runs_own_directory_when_no_report_dir_is_given() {
         "expected exactly one run's reports under {}",
         run_root.display()
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -836,15 +856,15 @@ fn reports_default_to_the_runs_own_directory_when_no_report_dir_is_given() {
 #[test]
 fn a_critical_regression_fails_the_run_and_still_writes_the_reports() {
     let dir = unique_dir("policy-fail");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let backend = FakeBackend::new(CaptureBehavior::CandidateDenies);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -874,21 +894,20 @@ fn a_critical_regression_fails_the_run_and_still_writes_the_reports() {
 
     // A failing verdict never skips cleanup.
     assert_eq!(backend.clusters.deleted_sides().len(), 2);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_warning_only_run_still_exits_passed_with_the_warning_in_the_report() {
     let dir = unique_dir("warn");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let backend = FakeBackend::new(CaptureBehavior::CandidateInjectsSidecar);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -904,20 +923,19 @@ fn a_warning_only_run_still_exits_passed_with_the_warning_in_the_report() {
         "the warning must be visible in the terminal report:\n{}",
         output.stdout
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn fail_on_escalates_a_warning_into_a_failing_run() {
     let dir = unique_dir("fail-on");
-    let config = write_lab(&dir, "policy:\n  failOn:\n    - container_added\n");
+    let config = write_lab(dir.path(), "policy:\n  failOn:\n    - container_added\n");
     let backend = FakeBackend::new(CaptureBehavior::CandidateInjectsSidecar);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -926,7 +944,6 @@ fn fail_on_escalates_a_warning_into_a_failing_run() {
         RunDisposition::PolicyFailed,
         "`policy.failOn` must reach the evaluation: {output:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -936,14 +953,14 @@ fn fail_on_escalates_a_warning_into_a_failing_run() {
 #[test]
 fn an_unreadable_configuration_exits_invalid_input_without_creating_a_cluster() {
     let dir = unique_dir("bad-config");
-    let config = dir.join("missing.yaml");
+    let config = dir.path().join("missing.yaml");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -958,7 +975,6 @@ fn an_unreadable_configuration_exits_invalid_input_without_creating_a_cluster() 
         backend.clusters.created_sides().is_empty(),
         "a configuration that never loaded must not cost a cluster"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -967,14 +983,14 @@ fn an_unknown_semantic_kind_in_fail_on_exits_invalid_input_before_any_cluster() 
     // `image_change` is the plausible near miss of the real
     // `image_changed`, which is exactly the typo
     // `admissionlab_policy::kind_from_name` refuses to guess at.
-    let config = write_lab(&dir, "policy:\n  failOn:\n    - image_change\n");
+    let config = write_lab(dir.path(), "policy:\n  failOn:\n    - image_change\n");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -994,20 +1010,19 @@ fn an_unknown_semantic_kind_in_fail_on_exits_invalid_input_before_any_cluster() 
         backend.clusters.created_sides().is_empty(),
         "an unknown kind must be caught before any cluster is created"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_host_missing_its_prerequisites_exits_invalid_input_before_any_cluster() {
     let dir = unique_dir("no-prereqs");
-    let config = write_lab(&dir, "");
+    let config = write_lab(dir.path(), "");
     let backend = FakeBackend::new(CaptureBehavior::Identical).without_prerequisites();
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1021,7 +1036,6 @@ fn a_host_missing_its_prerequisites_exits_invalid_input_before_any_cluster() {
         backend.clusters.created_sides().is_empty(),
         "the prerequisite gate must run before any cluster is created"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -1031,15 +1045,15 @@ fn a_host_missing_its_prerequisites_exits_invalid_input_before_any_cluster() {
 #[test]
 fn an_install_failure_exits_four_writes_diagnostics_and_still_cleans_up() {
     let dir = unique_dir("install-fail");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let backend = FakeBackend::new(CaptureBehavior::Identical).failing_install();
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1048,7 +1062,6 @@ fn an_install_failure_exits_four_writes_diagnostics_and_still_cleans_up() {
     assert!(reports.join("diagnostics.json").is_file());
     assert!(!reports.join("result.json").exists());
     assert_eq!(backend.clusters.deleted_sides().len(), 2);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -1071,19 +1084,19 @@ fn read_summary(path: &Path) -> String {
 #[test]
 fn a_passing_run_writes_its_verdict_to_the_github_summary() {
     let dir = unique_dir("summary-pass");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     // Deliberately two levels below anything that exists: the flag
     // creates its parent directories rather than requiring a `mkdir`
     // step in the workflow.
-    let summary = dir.join("summaries").join("github-summary.md");
+    let summary = dir.path().join("summaries").join("github-summary.md");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: Some(&summary),
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1106,14 +1119,13 @@ fn a_passing_run_writes_its_verdict_to_the_github_summary() {
         "stdout:\n{}",
         output.stdout
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_policy_failure_still_writes_the_github_summary() {
     let dir = unique_dir("summary-fail");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let summary = reports.join("github-summary.md");
     let backend = FakeBackend::new(CaptureBehavior::CandidateDenies);
     let request = RunRequest {
@@ -1121,7 +1133,7 @@ fn a_policy_failure_still_writes_the_github_summary() {
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: Some(&summary),
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1144,14 +1156,13 @@ fn a_policy_failure_still_writes_the_github_summary() {
     // the JSON, and the HTML are all there for the upload step.
     assert!(reports.join("result.json").is_file());
     assert!(reports.join("report.html").is_file());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_run_that_never_reaches_a_verdict_writes_a_summary_naming_the_stage() {
     let dir = unique_dir("summary-install-fail");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let summary = reports.join("github-summary.md");
     let backend = FakeBackend::new(CaptureBehavior::Identical).failing_install();
     let request = RunRequest {
@@ -1159,7 +1170,7 @@ fn a_run_that_never_reaches_a_verdict_writes_a_summary_naming_the_stage() {
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: Some(&summary),
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1189,20 +1200,19 @@ fn a_run_that_never_reaches_a_verdict_writes_a_summary_naming_the_stage() {
     // It matches what the machine-readable failure artifact says.
     assert!(reports.join("diagnostics.json").is_file());
     assert!(!reports.join("result.json").exists());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn an_invalid_configuration_writes_a_summary_before_any_cluster_exists() {
     let dir = unique_dir("summary-invalid-input");
-    let summary = dir.join("artifacts").join("github-summary.md");
+    let summary = dir.path().join("artifacts").join("github-summary.md");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
-        config: &dir.join("missing.yaml"),
+        config: &dir.path().join("missing.yaml"),
         keep_clusters: false,
         report_dir: None,
         github_summary: Some(&summary),
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1219,7 +1229,6 @@ fn an_invalid_configuration_writes_a_summary_before_any_cluster_exists() {
     // than inventing a run id.
     assert!(text.contains("not started"), "summary:\n{text}");
     assert!(backend.clusters.created_sides().is_empty());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The end-to-end half of Task 5.2, proved through the real pipeline
@@ -1232,13 +1241,13 @@ fn an_invalid_configuration_writes_a_summary_before_any_cluster_exists() {
 #[test]
 fn a_failed_install_leaves_a_run_manifest_naming_the_stage() {
     let dir = unique_dir("manifest-install-fail");
-    let config = write_lab(&dir, "");
-    let run_root = dir.join("runs");
+    let config = write_lab(dir.path(), "");
+    let run_root = dir.path().join("runs");
     let backend = FakeBackend::new(CaptureBehavior::Identical).failing_install();
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
-        report_dir: Some(&dir.join("artifacts")),
+        report_dir: Some(&dir.path().join("artifacts")),
         github_summary: None,
         run_root: run_root.clone(),
     };
@@ -1287,8 +1296,6 @@ fn a_failed_install_leaves_a_run_manifest_naming_the_stage() {
     // No expectations file was configured, so this is honestly absent
     // rather than an empty-string digest (Global Constraint 15).
     assert_eq!(manifest["expectationsSha256"], serde_json::Value::Null);
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A run that reaches a verdict marks its manifest completed — including
@@ -1296,8 +1303,8 @@ fn a_failed_install_leaves_a_run_manifest_naming_the_stage() {
 #[test]
 fn a_completed_run_marks_its_manifest_completed_even_when_the_policy_failed() {
     let dir = unique_dir("manifest-complete");
-    let config = write_lab(&dir, "");
-    let run_root = dir.join("runs");
+    let config = write_lab(dir.path(), "");
+    let run_root = dir.path().join("runs");
     let backend = FakeBackend::new(CaptureBehavior::CandidateDenies);
     let request = RunRequest {
         config: &config,
@@ -1321,8 +1328,6 @@ fn a_completed_run_marks_its_manifest_completed_even_when_the_policy_failed() {
     // The install stage re-recorded what was actually installed; the
     // minimal configuration installs nothing, so both sides are empty.
     assert_eq!(manifest["baseline"]["components"], serde_json::json!([]));
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `<run_root>/<run id>/run.json`, asserting there is exactly one run
@@ -1346,15 +1351,15 @@ fn sole_run_manifest(run_root: &Path) -> PathBuf {
 #[test]
 fn a_capture_failure_exits_five_writes_what_it_knows_and_still_cleans_up() {
     let dir = unique_dir("capture-fail");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let backend = FakeBackend::new(CaptureBehavior::CandidateFails);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1385,7 +1390,6 @@ fn a_capture_failure_exits_five_writes_what_it_knows_and_still_cleans_up() {
 
     // ROADMAP step 4.
     assert_eq!(backend.clusters.deleted_sides().len(), 2);
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -1395,14 +1399,14 @@ fn a_capture_failure_exits_five_writes_what_it_knows_and_still_cleans_up() {
 #[test]
 fn keep_clusters_skips_cleanup_and_prints_the_exact_delete_commands() {
     let dir = unique_dir("keep");
-    let config = write_lab(&dir, "");
+    let config = write_lab(dir.path(), "");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: true,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1431,14 +1435,13 @@ fn keep_clusters_skips_cleanup_and_prints_the_exact_delete_commands() {
         "stdout:\n{}",
         output.stdout
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_cleanup_failure_after_a_passing_run_reports_infrastructure_but_keeps_the_reports() {
     let dir = unique_dir("cleanup-fail");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("artifacts");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("artifacts");
     let backend = FakeBackend::new(CaptureBehavior::Identical)
         .with_clusters(FakeClusterManager::new().failing_delete());
     let request = RunRequest {
@@ -1446,7 +1449,7 @@ fn a_cleanup_failure_after_a_passing_run_reports_infrastructure_but_keeps_the_re
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1467,13 +1470,12 @@ fn a_cleanup_failure_after_a_passing_run_reports_infrastructure_but_keeps_the_re
         "the run's own verdict is preserved in the report it already wrote"
     );
     assert!(reports.join("report.html").is_file());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_cleanup_failure_never_masks_a_policy_failure() {
     let dir = unique_dir("cleanup-fail-policy");
-    let config = write_lab(&dir, "");
+    let config = write_lab(dir.path(), "");
     let backend = FakeBackend::new(CaptureBehavior::CandidateDenies)
         .with_clusters(FakeClusterManager::new().failing_delete());
     let request = RunRequest {
@@ -1481,7 +1483,7 @@ fn a_cleanup_failure_never_masks_a_policy_failure() {
         keep_clusters: false,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1493,7 +1495,6 @@ fn a_cleanup_failure_never_masks_a_policy_failure() {
          reported loudly on stderr either way"
     );
     assert!(output.stderr.contains("kind delete cluster --name"));
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -1570,7 +1571,7 @@ fn gateway_entry(result: &serde_json::Value) -> Option<&serde_json::Value> {
 fn a_configured_gateway_suite_runs_on_both_sides_and_reaches_the_report() {
     let dir = unique_dir("gateway-both-sides");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
-    let (output, result) = run_gateway(&dir, &backend);
+    let (output, result) = run_gateway(dir.path(), &backend);
 
     assert_eq!(
         backend.gateway_sides(),
@@ -1612,7 +1613,6 @@ fn a_configured_gateway_suite_runs_on_both_sides_and_reaches_the_report() {
         output.stdout.contains("Gateway  1 route contract(s)"),
         "the terminal report must carry a Gateway section: {output:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1620,7 +1620,7 @@ fn a_candidate_that_loses_resolved_refs_fails_the_run_and_reports_its_skipped_pr
     let dir = unique_dir("gateway-resolved-refs");
     let backend = FakeBackend::new(CaptureBehavior::Identical)
         .with_gateway(GatewayBehavior::CandidateLosesResolvedRefs);
-    let (output, result) = run_gateway(&dir, &backend);
+    let (output, result) = run_gateway(dir.path(), &backend);
 
     assert_eq!(
         output.disposition,
@@ -1675,7 +1675,6 @@ fn a_candidate_that_loses_resolved_refs_fails_the_run_and_reports_its_skipped_pr
         output.stdout.contains("traffic: no probe was sent"),
         "the terminal report must say a probe was skipped rather than showing nothing: {output:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1683,7 +1682,7 @@ fn a_candidate_that_never_converges_is_counted_inconclusive_rather_than_identica
     let dir = unique_dir("gateway-unconverged");
     let backend = FakeBackend::new(CaptureBehavior::Identical)
         .with_gateway(GatewayBehavior::CandidateNeverConverges);
-    let (output, result) = run_gateway(&dir, &backend);
+    let (output, result) = run_gateway(dir.path(), &backend);
 
     assert_eq!(
         result["summary"]["inconclusive"], 1,
@@ -1696,14 +1695,13 @@ fn a_candidate_that_never_converges_is_counted_inconclusive_rather_than_identica
             .contains("only one side converged (baseline converged, candidate unconverged"),
         "the comparability answer must be surfaced at report altitude: {output:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_gateway_suite_failure_ends_the_run_as_a_fixture_failure() {
     let dir = unique_dir("gateway-suite-fails");
-    let config = write_gateway_lab(&dir);
-    let reports = dir.join("reports");
+    let config = write_gateway_lab(dir.path());
+    let reports = dir.path().join("reports");
     let backend =
         FakeBackend::new(CaptureBehavior::Identical).with_gateway(GatewayBehavior::CandidateFails);
     let request = RunRequest {
@@ -1711,7 +1709,7 @@ fn a_gateway_suite_failure_ends_the_run_as_a_fixture_failure() {
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1734,21 +1732,20 @@ fn a_gateway_suite_failure_ends_the_run_as_a_fixture_failure() {
         2,
         "one side failing must never abandon the other's in-flight suite"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_lab_with_no_gateway_section_produces_no_gateway_output_at_all() {
     let dir = unique_dir("gateway-absent");
-    let config = write_lab(&dir, "");
-    let reports = dir.join("reports");
+    let config = write_lab(dir.path(), "");
+    let reports = dir.path().join("reports");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1773,7 +1770,6 @@ fn a_lab_with_no_gateway_section_produces_no_gateway_output_at_all() {
         result["timings"].get("gatewaySuite").is_none(),
         "a stage that never ran is absent, never zero"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ---------------------------------------------------------------------
@@ -1841,7 +1837,7 @@ fn helm_component(name: &str, chart: &str, repo: &str, version: &str) -> String 
 fn an_uncertified_recipe_combination_warns_and_still_runs_to_a_verdict() {
     let dir = unique_dir("uncertified");
     let config = write_lab_with_component(
-        &dir,
+        dir.path(),
         // Supported (it is the Tier-1 primary), which is what makes this
         // a certification question at all rather than a cluster-creation
         // refusal.
@@ -1853,14 +1849,14 @@ fn an_uncertified_recipe_combination_warns_and_still_runs_to_a_verdict() {
             "3.9.0",
         ),
     );
-    let reports = dir.join("artifacts");
+    let reports = dir.path().join("artifacts");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1904,15 +1900,13 @@ fn an_uncertified_recipe_combination_warns_and_still_runs_to_a_verdict() {
         serde_json::json!("baseline, candidate"),
         "both sides asked for it, and one diagnostic says so: {result}"
     );
-
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_certified_combination_warns_about_nothing() {
     let dir = unique_dir("certified");
     let config = write_lab_with_component(
-        &dir,
+        dir.path(),
         "1.35.8",
         &helm_component(
             "kyverno",
@@ -1927,7 +1921,7 @@ fn a_certified_combination_warns_about_nothing() {
         keep_clusters: false,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1937,14 +1931,13 @@ fn a_certified_combination_warns_about_nothing() {
         !output.stderr.contains("does not certify"),
         "the certified combination must be silent: {output:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn a_user_defined_stack_admission_lab_ships_no_recipe_for_is_silent() {
     let dir = unique_dir("user-defined");
     let config = write_lab_with_component(
-        &dir,
+        dir.path(),
         "1.36.4",
         &helm_component(
             "my-webhook",
@@ -1959,7 +1952,7 @@ fn a_user_defined_stack_admission_lab_ships_no_recipe_for_is_silent() {
         keep_clusters: false,
         report_dir: None,
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -1970,7 +1963,6 @@ fn a_user_defined_stack_admission_lab_ships_no_recipe_for_is_silent() {
         "a stack Admission Lab certifies nothing for is not a certification question at all, \
          and warning about every such component would make the warning worthless: {output:?}"
     );
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 impl std::fmt::Debug for RunOutput {
@@ -2146,8 +2138,8 @@ fn write_migration_lab_with_sides(dir: &Path, sides: &str) -> PathBuf {
 #[test]
 fn a_preserved_migration_passes_and_still_reports_its_declared_nonportability() {
     let dir = unique_dir("migration-preserved");
-    let config = write_migration_lab(&dir);
-    let reports = dir.join("reports");
+    let config = write_migration_lab(dir.path());
+    let reports = dir.path().join("reports");
     let backend =
         FakeBackend::new(CaptureBehavior::Identical).with_migration(MigrationBehavior::Preserved);
     let request = RunRequest {
@@ -2155,7 +2147,7 @@ fn a_preserved_migration_passes_and_still_reports_its_declared_nonportability() 
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -2189,8 +2181,8 @@ fn a_preserved_migration_passes_and_still_reports_its_declared_nonportability() 
 #[test]
 fn an_undeclared_migration_regression_fails_the_run_and_names_the_observed_backends() {
     let dir = unique_dir("migration-regression");
-    let config = write_migration_lab(&dir);
-    let reports = dir.join("reports");
+    let config = write_migration_lab(dir.path());
+    let reports = dir.path().join("reports");
     let backend = FakeBackend::new(CaptureBehavior::Identical)
         .with_migration(MigrationBehavior::BackendRegression);
     let request = RunRequest {
@@ -2198,7 +2190,7 @@ fn an_undeclared_migration_regression_fails_the_run_and_names_the_observed_backe
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -2242,8 +2234,8 @@ fn an_undeclared_migration_regression_fails_the_run_and_names_the_observed_backe
 #[test]
 fn a_migration_suite_failure_ends_the_run_as_a_fixture_failure() {
     let dir = unique_dir("migration-fails");
-    let config = write_migration_lab(&dir);
-    let reports = dir.join("reports");
+    let config = write_migration_lab(dir.path());
+    let reports = dir.path().join("reports");
     let backend =
         FakeBackend::new(CaptureBehavior::Identical).with_migration(MigrationBehavior::Fails);
     let request = RunRequest {
@@ -2251,7 +2243,7 @@ fn a_migration_suite_failure_ends_the_run_as_a_fixture_failure() {
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);
@@ -2278,15 +2270,15 @@ fn a_migration_suite_failure_ends_the_run_as_a_fixture_failure() {
 #[test]
 fn a_migration_suite_with_no_endpoint_is_refused_before_any_cluster_exists() {
     let dir = unique_dir("migration-no-endpoint");
-    let config = write_migration_lab_with_sides(&dir, MIGRATION_CANDIDATE_ONLY);
-    let reports = dir.join("reports");
+    let config = write_migration_lab_with_sides(dir.path(), MIGRATION_CANDIDATE_ONLY);
+    let reports = dir.path().join("reports");
     let backend = FakeBackend::new(CaptureBehavior::Identical);
     let request = RunRequest {
         config: &config,
         keep_clusters: false,
         report_dir: Some(&reports),
         github_summary: None,
-        run_root: dir.join("runs"),
+        run_root: dir.path().join("runs"),
     };
 
     let output = run(&backend, &request);

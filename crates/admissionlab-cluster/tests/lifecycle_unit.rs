@@ -41,7 +41,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::io;
 use std::os::unix::process::ExitStatusExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -74,16 +74,41 @@ fn block_on<F: Future>(future: F) -> F::Output {
     test_runtime().block_on(future)
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+///
+/// The path is only named here, not created; whoever creates it (an
+/// `ArtifactStore`, or the test itself) is what puts it on disk, and
+/// removing a directory that was never created is a harmless no-op.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique scratch directory under the OS temp dir.
 /// Mirrors `admissionlab-core`'s `tests/artifact.rs`'s
 /// `unique_store_root` rather than pulling in a new dependency just for
 /// test-only temp directories.
-fn unique_root(label: &str) -> PathBuf {
+fn unique_root(label: &str) -> TempDir {
     let unique = RunId::generate();
-    std::env::temp_dir().join(format!(
+    TempDir(std::env::temp_dir().join(format!(
         "admissionlab-cluster-lifecycle-test-{label}-{}",
         unique.as_str()
-    ))
+    )))
 }
 
 /// Creates a fresh, real (absolute, on-disk) [`RunPaths`] for one test,
@@ -91,14 +116,17 @@ fn unique_root(label: &str) -> PathBuf {
 /// writes through an `ArtifactStore` it derives from `paths.root()`, so
 /// tests that call `create` need every directory `RunPaths` names to
 /// genuinely exist.
-async fn new_run_paths(label: &str) -> RunPaths {
+/// Returns the scratch root's guard alongside the paths: the caller must
+/// keep the guard alive for as long as it uses the workspace.
+async fn new_run_paths(label: &str) -> (TempDir, RunPaths) {
     let root = unique_root(label);
-    let store = ArtifactStore::new(&root);
+    let store = ArtifactStore::new(root.path());
     let run_id = RunId::generate();
-    store
+    let paths = store
         .create_run(&run_id)
         .await
-        .expect("create_run should succeed under a fresh temp root")
+        .expect("create_run should succeed under a fresh temp root");
+    (root, paths)
 }
 
 fn baseline_spec(name: &str) -> ClusterSpec {
@@ -251,7 +279,7 @@ impl ProcessRunner for FakeProcessRunner {
 
 #[test]
 fn create_invokes_kind_with_generated_config_and_explicit_kubeconfig_path() {
-    let paths = block_on(new_run_paths("create-argv"));
+    let (_root, paths) = block_on(new_run_paths("create-argv"));
     let runner = Arc::new(FakeProcessRunner::new().with("create", FakeOutcome::Success(b"")));
     let manager = KindClusterManager::new(runner.clone());
     let spec = baseline_spec("adlab-baseline-argvtest0001");
@@ -435,7 +463,7 @@ fn create_rejects_a_non_absolute_run_paths_root_before_running_kind() {
 
 #[test]
 fn create_rejects_invalid_name_before_running_kind() {
-    let paths = block_on(new_run_paths("invalid-name"));
+    let (_root, paths) = block_on(new_run_paths("invalid-name"));
     let runner = Arc::new(FakeProcessRunner::new());
     let manager = KindClusterManager::new(runner.clone());
     let mut spec = baseline_spec("adlab-baseline-placeholder01");
@@ -459,7 +487,7 @@ fn create_rejects_invalid_name_before_running_kind() {
 
 #[test]
 fn create_rolls_back_when_kubeconfig_export_fails_after_kind_reports_success() {
-    let paths = block_on(new_run_paths("rollback-deleted"));
+    let (_root, paths) = block_on(new_run_paths("rollback-deleted"));
     let runner = Arc::new(
         FakeProcessRunner::new()
             .with("create", FakeOutcome::Success(b""))
@@ -510,7 +538,7 @@ fn create_rolls_back_when_kubeconfig_export_fails_after_kind_reports_success() {
 
 #[test]
 fn create_rollback_preserves_original_error_even_when_delete_also_fails() {
-    let paths = block_on(new_run_paths("rollback-failed"));
+    let (_root, paths) = block_on(new_run_paths("rollback-failed"));
     let runner = Arc::new(
         FakeProcessRunner::new()
             .with("create", FakeOutcome::Success(b""))
@@ -549,7 +577,7 @@ fn create_rollback_preserves_original_error_even_when_delete_also_fails() {
 
 #[test]
 fn create_does_not_roll_back_when_the_kind_binary_itself_is_missing() {
-    let paths = block_on(new_run_paths("no-rollback-on-spawn"));
+    let (_root, paths) = block_on(new_run_paths("no-rollback-on-spawn"));
     let runner = Arc::new(FakeProcessRunner::new().with("create", FakeOutcome::Missing));
     let manager = KindClusterManager::new(runner.clone());
     let spec = baseline_spec("adlab-baseline-nokindbinary1");
@@ -569,7 +597,7 @@ fn create_does_not_roll_back_when_the_kind_binary_itself_is_missing() {
 
 #[test]
 fn create_rolls_back_on_a_create_timeout_not_only_a_non_zero_exit() {
-    let paths = block_on(new_run_paths("rollback-timeout"));
+    let (_root, paths) = block_on(new_run_paths("rollback-timeout"));
     let runner = Arc::new(
         FakeProcessRunner::new()
             .with("create", FakeOutcome::TimedOut)
@@ -598,7 +626,7 @@ fn create_rolls_back_on_a_create_timeout_not_only_a_non_zero_exit() {
 
 #[test]
 fn create_rolls_back_when_kind_create_exits_non_zero() {
-    let paths = block_on(new_run_paths("rollback-nonzero"));
+    let (_root, paths) = block_on(new_run_paths("rollback-nonzero"));
     let runner = Arc::new(
         FakeProcessRunner::new()
             .with(
@@ -630,7 +658,7 @@ fn create_rolls_back_when_kind_create_exits_non_zero() {
 
 #[test]
 fn baseline_and_candidate_use_independent_kubeconfig_and_audit_paths() {
-    let paths = block_on(new_run_paths("isolation"));
+    let (_root, paths) = block_on(new_run_paths("isolation"));
     let runner = Arc::new(FakeProcessRunner::new().with("create", FakeOutcome::Success(b"")));
     let manager = KindClusterManager::new(runner.clone());
 
@@ -725,14 +753,14 @@ fn concurrent_deletes_each_carry_their_own_kubeconfig_path() {
 #[test]
 fn diagnostics_reports_kubeconfig_and_audit_log_presence_and_cluster_existence() {
     let root = unique_root("diagnostics-present");
-    block_on(tokio::fs::create_dir_all(&root)).expect("create scratch dir");
-    let kubeconfig_path = root.join("baseline.kubeconfig");
+    block_on(tokio::fs::create_dir_all(root.path())).expect("create scratch dir");
+    let kubeconfig_path = root.path().join("baseline.kubeconfig");
     block_on(tokio::fs::write(
         &kubeconfig_path,
         b"apiVersion: v1\nkind: Config\n",
     ))
     .expect("write dummy kubeconfig");
-    let audit_log_path = root.join("does-not-exist-audit.log");
+    let audit_log_path = root.path().join("does-not-exist-audit.log");
 
     let handle = ClusterHandle {
         spec: baseline_spec("adlab-baseline-diagtest0001"),

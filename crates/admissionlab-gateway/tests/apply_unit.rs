@@ -47,15 +47,36 @@ use tower_test::mock;
 // Fixture helpers
 // =========================================================================
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, empty directory under the OS temp dir for one test's
 /// manifest files.
-fn temp_manifest_dir(label: &str) -> PathBuf {
+fn temp_manifest_dir(label: &str) -> TempDir {
     let directory = std::env::temp_dir().join(format!(
         "admissionlab-gateway-apply-{label}-{}",
         RunId::generate().as_str()
     ));
     std::fs::create_dir_all(&directory).expect("create temp manifest directory");
-    directory
+    TempDir(directory)
 }
 
 /// Writes `contents` to `<directory>/<name>` and returns the path.
@@ -194,12 +215,12 @@ struct ObservedRequest {
 fn every_file_is_hashed_and_parsed_before_anything_is_applied() {
     let directory = temp_manifest_dir("plan-hashes");
     let namespace = write_manifest(
-        &directory,
+        directory.path(),
         "00-namespace.yaml",
         &document("v1", "Namespace", None, "gateway-lab"),
     );
     let gateway = write_manifest(
-        &directory,
+        directory.path(),
         "10-gateway.yaml",
         &document(
             "gateway.networking.k8s.io/v1",
@@ -237,17 +258,17 @@ fn a_malformed_later_file_fails_the_whole_plan() {
     // applied as it parsed would already have sent the first two.
     let directory = temp_manifest_dir("plan-malformed");
     let good_one = write_manifest(
-        &directory,
+        directory.path(),
         "00-namespace.yaml",
         &document("v1", "Namespace", None, "gateway-lab"),
     );
     let good_two = write_manifest(
-        &directory,
+        directory.path(),
         "10-service.yaml",
         &document("v1", "Service", Some("gateway-lab"), "echo-a"),
     );
     let bad = write_manifest(
-        &directory,
+        directory.path(),
         "20-routes.yaml",
         "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  name: [unclosed\n",
     );
@@ -296,7 +317,7 @@ fn documents_without_a_usable_identity_are_rejected() {
             "metadata.name",
         ),
     ] {
-        let path = write_manifest(&directory, name, contents);
+        let path = write_manifest(directory.path(), name, contents);
         let error = plan_gateway_apply(std::slice::from_ref(&path))
             .expect_err(&format!("{name} must be rejected"));
         match error {
@@ -305,14 +326,14 @@ fn documents_without_a_usable_identity_are_rejected() {
         }
     }
 
-    let scalar = write_manifest(&directory, "scalar.yaml", "just-a-string\n");
+    let scalar = write_manifest(directory.path(), "scalar.yaml", "just-a-string\n");
     match plan_gateway_apply(&[scalar]).expect_err("a scalar document must be rejected") {
         GatewayError::ManifestNotAnObject { found, .. } => assert_eq!(found, "a string"),
         other => panic!("expected ManifestNotAnObject, got {other:?}"),
     }
 
     let generated = write_manifest(
-        &directory,
+        directory.path(),
         "generate-name.yaml",
         "apiVersion: gateway.networking.k8s.io/v1\nkind: HTTPRoute\nmetadata:\n  \
          generateName: route-\n",
@@ -326,7 +347,7 @@ fn documents_without_a_usable_identity_are_rejected() {
 #[test]
 fn a_missing_file_is_reported_by_name() {
     let directory = temp_manifest_dir("plan-missing");
-    let missing = directory.join("does-not-exist.yaml");
+    let missing = directory.path().join("does-not-exist.yaml");
 
     match plan_gateway_apply(std::slice::from_ref(&missing))
         .expect_err("a missing file must fail the plan")
@@ -343,7 +364,7 @@ fn duplicate_paths_are_read_and_planned_once() {
     // how many times a path was repeated.
     let directory = temp_manifest_dir("plan-duplicates");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "namespace.yaml",
         &document("v1", "Namespace", None, "gateway-lab"),
     );
@@ -361,7 +382,7 @@ fn a_trailing_empty_yaml_document_is_dropped_without_renumbering() {
     // would count to in their editor.
     let directory = temp_manifest_dir("plan-trailing");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "two.yaml",
         &format!(
             "{}---\n{}---\n",
@@ -442,7 +463,7 @@ fn documents_are_reordered_into_category_order_regardless_of_source_order() {
     // not the other.
     let directory = temp_manifest_dir("order-reverse");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "all.yaml",
         &[
             document(
@@ -505,7 +526,7 @@ fn unknown_kinds_are_applied_last_in_source_order() {
     // every known category*, and among themselves in source order.
     let directory = temp_manifest_dir("order-unknown");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "all.yaml",
         &[
             document(
@@ -554,7 +575,7 @@ fn ties_within_a_category_keep_file_then_document_order() {
     // files must come out in file order, then in-file order.
     let directory = temp_manifest_dir("order-stable");
     let first = write_manifest(
-        &directory,
+        directory.path(),
         "00-first.yaml",
         &format!(
             "{}---\n{}",
@@ -563,7 +584,7 @@ fn ties_within_a_category_keep_file_then_document_order() {
         ),
     );
     let second = write_manifest(
-        &directory,
+        directory.path(),
         "10-second.yaml",
         &document("v1", "Service", Some("gateway-lab"), "c"),
     );
@@ -687,7 +708,7 @@ fn ok_object(api_version: &str, kind: &str, name: &str) -> Response<Body> {
 async fn objects_are_applied_in_category_order_as_forced_server_side_applies() {
     let directory = temp_manifest_dir("apply-order");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "all.yaml",
         &[
             document(
@@ -787,7 +808,7 @@ async fn a_namespaced_object_without_a_namespace_targets_default() {
     // `metadata.namespace` the user never wrote.
     let directory = temp_manifest_dir("apply-default-ns");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "service.yaml",
         &document("v1", "Service", None, "echo-a"),
     );
@@ -828,7 +849,7 @@ async fn a_refused_object_stops_the_suite_and_carries_the_api_servers_own_words(
     // answer rather than a boolean.
     let directory = temp_manifest_dir("apply-refused");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "all.yaml",
         &format!(
             "{}---\n{}",
@@ -905,7 +926,7 @@ async fn a_refused_object_stops_the_suite_and_carries_the_api_servers_own_words(
 async fn a_kind_the_cluster_does_not_serve_fails_before_any_request() {
     let directory = temp_manifest_dir("apply-unknown-kind");
     let path = write_manifest(
-        &directory,
+        directory.path(),
         "custom.yaml",
         &document("example.com/v1", "NotServedHere", Some("gateway-lab"), "x"),
     );

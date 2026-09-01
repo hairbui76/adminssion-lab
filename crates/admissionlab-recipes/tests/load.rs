@@ -48,11 +48,37 @@ use admissionlab_recipes::{
 // Test support
 // ---------------------------------------------------------------------
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+///
+/// A test that also changes directory declares its `TempDir` *before*
+/// its [`CwdGuard`], so the guard restores the original working
+/// directory first and the removal never runs from inside the directory
+/// being removed.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// for tests that need real recipe files on disk. Mirrors
 /// `admissionlab-spec`'s own `tests/load.rs` helper of the same name and
 /// shape.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -60,7 +86,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Strips the leading whitespace common to every non-empty line, so a
@@ -82,10 +108,11 @@ fn dedent(text: &str) -> String {
 }
 
 /// Writes `yaml` (dedented) to `file_name` inside a fresh unique temp
-/// directory and returns that directory.
-fn write_recipe_dir(label: &str, file_name: &str, yaml: &str) -> PathBuf {
+/// directory and returns that directory's guard. The caller must keep it
+/// alive for as long as it reads out of the directory.
+fn write_recipe_dir(label: &str, file_name: &str, yaml: &str) -> TempDir {
     let dir = unique_temp_dir(label);
-    std::fs::write(dir.join(file_name), dedent(yaml)).expect("write temp recipe file");
+    std::fs::write(dir.path().join(file_name), dedent(yaml)).expect("write temp recipe file");
     dir
 }
 
@@ -177,7 +204,7 @@ fn minimal_recipe_with_extra(extra_yaml_line: &str) -> String {
 fn valid_recipe_loads_and_resolves_every_field() {
     let dir = write_recipe_dir("valid-recipe", "demo.yaml", VALID_RECIPE_YAML);
 
-    let recipes = load_recipe_overrides(&dir).expect("a fully valid recipe must load");
+    let recipes = load_recipe_overrides(dir.path()).expect("a fully valid recipe must load");
     assert_eq!(recipes.len(), 1);
     let recipe = &recipes[0];
     assert_eq!(recipe.name, "demo-webhook");
@@ -254,7 +281,7 @@ fn explicit_repo_name_release_name_and_namespace_override_the_recipe_name_defaul
         "#,
     );
 
-    let recipes = load_recipe_overrides(&dir).expect("explicit Helm overrides must load");
+    let recipes = load_recipe_overrides(dir.path()).expect("explicit Helm overrides must load");
     match &recipes[0].install {
         InstallMethod::Helm(helm) => {
             assert_eq!(helm.repo_name, "istio");
@@ -285,7 +312,7 @@ fn manifests_install_method_recipe_loads() {
         "#,
     );
 
-    let recipes = load_recipe_overrides(&dir).expect("a manifests install recipe must load");
+    let recipes = load_recipe_overrides(dir.path()).expect("a manifests install recipe must load");
     match &recipes[0].install {
         InstallMethod::Manifests(manifests) => {
             assert_eq!(
@@ -347,7 +374,7 @@ fn every_readiness_check_and_normalize_rule_variant_resolves_correctly() {
     );
 
     let recipes =
-        load_recipe_overrides(&dir).expect("every readiness/normalize variant must resolve");
+        load_recipe_overrides(dir.path()).expect("every readiness/normalize variant must resolve");
     let recipe = &recipes[0];
 
     assert!(matches!(
@@ -410,7 +437,8 @@ fn top_level_fail_on_is_rejected() {
         &minimal_recipe_with_extra(r#"failOn: ["breaking-change"]"#),
     );
 
-    let err = load_recipe_overrides(&dir).expect_err("a top-level failOn key must be rejected");
+    let err =
+        load_recipe_overrides(dir.path()).expect_err("a top-level failOn key must be rejected");
     let message = err.to_string();
     assert!(
         message.contains("failOn"),
@@ -426,7 +454,8 @@ fn top_level_severity_is_rejected() {
         &minimal_recipe_with_extra("severity: critical"),
     );
 
-    let err = load_recipe_overrides(&dir).expect_err("a top-level severity key must be rejected");
+    let err =
+        load_recipe_overrides(dir.path()).expect_err("a top-level severity key must be rejected");
     let message = err.to_string();
     assert!(
         message.contains("severity"),
@@ -454,7 +483,7 @@ fn fail_on_nested_inside_a_normalize_rule_is_rejected() {
         "#,
     );
 
-    let err = load_recipe_overrides(&dir)
+    let err = load_recipe_overrides(dir.path())
         .expect_err("a failOn key nested inside a normalize rule must be rejected");
     let message = err.to_string();
     assert!(
@@ -484,7 +513,7 @@ fn severity_nested_inside_a_readiness_check_is_rejected() {
         "#,
     );
 
-    let err = load_recipe_overrides(&dir)
+    let err = load_recipe_overrides(dir.path())
         .expect_err("a severity key nested inside a readiness check must be rejected");
     let message = err.to_string();
     assert!(
@@ -516,7 +545,7 @@ fn other_classification_shaped_keys_beyond_fail_on_and_severity_are_rejected() {
             &minimal_recipe_with_extra(&format!("{key}: true")),
         );
 
-        let err = load_recipe_overrides(&dir)
+        let err = load_recipe_overrides(dir.path())
             .unwrap_err_with_context(&format!("a top-level {key:?} key must be rejected"));
         assert!(err.contains(key), "error must name {key:?}; got {err:?}");
     }
@@ -546,8 +575,8 @@ fn inventing_a_new_normalize_rule_type_is_rejected() {
         "#,
     );
 
-    let err =
-        load_recipe_overrides(&dir).expect_err("an invented normalize rule type must be rejected");
+    let err = load_recipe_overrides(dir.path())
+        .expect_err("an invented normalize rule type must be rejected");
     let message = err.to_string();
     assert!(
         message.contains("treatAsEquivalent"),
@@ -563,7 +592,7 @@ fn unknown_capability_string_is_rejected() {
         &minimal_recipe_with_extra(r#"capabilities: ["breakingChangeApprover"]"#),
     );
 
-    let err = load_recipe_overrides(&dir)
+    let err = load_recipe_overrides(dir.path())
         .expect_err("an unrecognized capability string must be rejected");
     let message = err.to_string();
     assert!(
@@ -592,7 +621,7 @@ fn empty_recipe_name_is_rejected() {
         "#,
     );
 
-    let err = load_recipe_overrides(&dir).expect_err("an empty recipe name must be rejected");
+    let err = load_recipe_overrides(dir.path()).expect_err("an empty recipe name must be rejected");
     assert!(err.to_string().contains("name"));
 }
 
@@ -612,7 +641,8 @@ fn blank_recipe_version_is_rejected() {
         "#,
     );
 
-    let err = load_recipe_overrides(&dir).expect_err("a whitespace-only version must be rejected");
+    let err =
+        load_recipe_overrides(dir.path()).expect_err("a whitespace-only version must be rejected");
     assert!(err.to_string().contains("version"));
 }
 
@@ -632,7 +662,7 @@ fn floating_helm_version_is_rejected() {
         "#,
     );
 
-    let err = load_recipe_overrides(&dir)
+    let err = load_recipe_overrides(dir.path())
         .expect_err("a floating (non-pinned) Helm chart version must be rejected");
     assert!(err.to_string().contains("not an exact pinned version"));
 }
@@ -651,8 +681,8 @@ fn unrecognized_install_type_is_rejected() {
         "#,
     );
 
-    let err =
-        load_recipe_overrides(&dir).expect_err("an unrecognized install type must be rejected");
+    let err = load_recipe_overrides(dir.path())
+        .expect_err("an unrecognized install type must be rejected");
     assert!(err.to_string().contains("kustomize"));
 }
 
@@ -676,7 +706,7 @@ fn unrecognized_readiness_check_type_is_rejected() {
         "#,
     );
 
-    let err = load_recipe_overrides(&dir)
+    let err = load_recipe_overrides(dir.path())
         .expect_err("an unrecognized readiness check type must be rejected");
     assert!(err.to_string().contains("podRunning"));
 }
@@ -695,8 +725,8 @@ fn empty_manifests_paths_is_rejected() {
         "#,
     );
 
-    let err =
-        load_recipe_overrides(&dir).expect_err("an empty manifests path list must be rejected");
+    let err = load_recipe_overrides(dir.path())
+        .expect_err("an empty manifests path list must be rejected");
     assert!(err.to_string().contains("paths"));
 }
 
@@ -730,13 +760,13 @@ fn relative_manifest_path_in_an_override_recipe_resolves_against_its_own_directo
         "#,
     );
 
-    let recipes = load_recipe_overrides(&dir)
+    let recipes = load_recipe_overrides(dir.path())
         .expect("a relative manifest path must resolve against the recipe's own directory");
     match &recipes[0].install {
         InstallMethod::Manifests(manifests) => {
             assert_eq!(
                 manifests.paths,
-                vec![dir.join("manifests/webhook.yaml")],
+                vec![dir.path().join("manifests/webhook.yaml")],
                 "a relative install.paths entry must resolve against the directory \
                  load_recipe_overrides found the recipe file in -- mirroring \
                  admissionlab_spec::resolve_lab's own pattern for a lab file's relative paths"
@@ -761,7 +791,7 @@ fn manifest_path_traversal_outside_the_recipe_directory_is_rejected() {
         "#,
     );
 
-    let err = load_recipe_overrides(&dir).expect_err(
+    let err = load_recipe_overrides(dir.path()).expect_err(
         "a relative manifest path that escapes the recipe's own directory must be rejected",
     );
     let message = err.to_string();
@@ -797,11 +827,14 @@ fn manifest_path_that_dips_outside_and_returns_is_allowed() {
         "#,
     );
 
-    let recipes = load_recipe_overrides(&dir)
+    let recipes = load_recipe_overrides(dir.path())
         .expect("a `..` cancelled within the same path must not be rejected as traversal");
     match &recipes[0].install {
         InstallMethod::Manifests(manifests) => {
-            assert_eq!(manifests.paths, vec![dir.join("manifests/webhook.yaml")]);
+            assert_eq!(
+                manifests.paths,
+                vec![dir.path().join("manifests/webhook.yaml")]
+            );
         }
         InstallMethod::Helm(_) => panic!("expected a Manifests install method"),
     }
@@ -847,12 +880,12 @@ fn override_directory_is_never_consulted_via_the_current_working_directory() {
         ".admissionlab/recipes",
         "admissionlab-recipes",
     ] {
-        let candidate_dir = root.join(candidate);
+        let candidate_dir = root.path().join(candidate);
         std::fs::create_dir_all(&candidate_dir).unwrap();
         std::fs::write(candidate_dir.join("evil.yaml"), dedent(VALID_RECIPE_YAML)).unwrap();
     }
 
-    let _guard = CwdGuard::change_to(&root);
+    let _guard = CwdGuard::change_to(root.path());
     let recipes = load_recipes(None).expect("load_recipes(None) must succeed");
     // Exactly the built-in set (kyverno and istio, as of Task 2.9) --
     // never "demo-webhook", the name every seeded current-directory
@@ -872,7 +905,7 @@ fn explicit_override_directory_is_loaded() {
     let dir = write_recipe_dir("explicit-override", "demo.yaml", VALID_RECIPE_YAML);
 
     let recipes =
-        load_recipes(Some(&dir)).expect("an explicitly named override directory must load");
+        load_recipes(Some(dir.path())).expect("an explicitly named override directory must load");
     // The built-in kyverno and istio recipes, plus this override -- a
     // distinct name, so it is added alongside rather than replacing
     // anything; see `two_distinct_override_recipes_both_load_sorted_by_name`
@@ -892,9 +925,9 @@ fn explicit_override_directory_is_loaded() {
 #[test]
 fn two_distinct_override_recipes_both_load_sorted_by_name() {
     let dir = unique_temp_dir("two-overrides");
-    std::fs::write(dir.join("a.yaml"), dedent(VALID_RECIPE_YAML)).unwrap();
+    std::fs::write(dir.path().join("a.yaml"), dedent(VALID_RECIPE_YAML)).unwrap();
     std::fs::write(
-        dir.join("b.yaml"),
+        dir.path().join("b.yaml"),
         dedent(
             VALID_RECIPE_YAML
                 .replace("demo-webhook", "another-webhook")
@@ -903,7 +936,7 @@ fn two_distinct_override_recipes_both_load_sorted_by_name() {
     )
     .unwrap();
 
-    let recipes = load_recipes(Some(&dir)).expect("two distinct override recipes must load");
+    let recipes = load_recipes(Some(dir.path())).expect("two distinct override recipes must load");
     let names: Vec<&str> = recipes.iter().map(|r| r.name.as_str()).collect();
     // Both overrides, plus the built-in kyverno and istio recipes (Task
     // 2.8/2.9) -- all four sorted by name together.
@@ -916,29 +949,31 @@ fn two_distinct_override_recipes_both_load_sorted_by_name() {
 #[test]
 fn duplicate_recipe_name_within_the_override_directory_is_rejected() {
     let dir = unique_temp_dir("duplicate-override-name");
-    std::fs::write(dir.join("a.yaml"), dedent(VALID_RECIPE_YAML)).unwrap();
-    std::fs::write(dir.join("b.yaml"), dedent(VALID_RECIPE_YAML)).unwrap();
+    std::fs::write(dir.path().join("a.yaml"), dedent(VALID_RECIPE_YAML)).unwrap();
+    std::fs::write(dir.path().join("b.yaml"), dedent(VALID_RECIPE_YAML)).unwrap();
 
-    let err = load_recipe_overrides(&dir)
+    let err = load_recipe_overrides(dir.path())
         .expect_err("two override files declaring the same recipe name must be rejected");
     assert!(err.to_string().contains("demo-webhook"));
 }
 
 #[test]
 fn missing_override_directory_is_a_loud_error_not_silently_empty() {
-    let dir = unique_temp_dir("never-created").join("does-not-exist");
+    let temp_dir = unique_temp_dir("never-created");
+    let missing = temp_dir.path().join("does-not-exist");
 
-    let err = load_recipe_overrides(&dir).expect_err("a nonexistent override directory must error");
+    let err =
+        load_recipe_overrides(&missing).expect_err("a nonexistent override directory must error");
     assert!(matches!(err, RecipeError::Io { .. }));
 }
 
 #[test]
 fn non_yaml_files_in_the_override_directory_are_ignored() {
     let dir = write_recipe_dir("non-yaml-ignored", "demo.yaml", VALID_RECIPE_YAML);
-    std::fs::write(dir.join("README.md"), "not a recipe\n").unwrap();
-    std::fs::create_dir(dir.join("subdir")).unwrap();
+    std::fs::write(dir.path().join("README.md"), "not a recipe\n").unwrap();
+    std::fs::create_dir(dir.path().join("subdir")).unwrap();
 
-    let recipes = load_recipe_overrides(&dir)
+    let recipes = load_recipe_overrides(dir.path())
         .expect("non-YAML files and subdirectories must not break override loading");
     assert_eq!(recipes.len(), 1);
 }

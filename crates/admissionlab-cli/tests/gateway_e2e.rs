@@ -69,9 +69,8 @@
 //! `admissionlab test` deletes both clusters itself on every path except
 //! `--keep-clusters`, which this test never passes. [`ScratchRoot`]
 //! removes the temporary workspace afterwards; it is a `Drop` guard so
-//! that a panicking assertion cannot leak the directory (the workspace's
-//! own `unique_temp_dir` helpers do leak, deliberately, and are a
-//! separate cleanup task's to fix — this file does not copy them).
+//! that a panicking assertion cannot leak the directory — the same shape
+//! the workspace's `unique_temp_dir` helpers now return.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -118,8 +117,8 @@ const BUILD_TIMEOUT: Duration = Duration::from_mins(15);
 /// Removes a temporary directory when dropped.
 ///
 /// Bound before the first fallible step in every test below, so a failed
-/// assertion still cleans up. Deliberately not the workspace's existing
-/// `unique_temp_dir` helpers, which leak by construction.
+/// assertion still cleans up — the same contract the workspace's
+/// `unique_temp_dir` helpers hold to.
 struct ScratchRoot(PathBuf);
 
 impl Drop for ScratchRoot {

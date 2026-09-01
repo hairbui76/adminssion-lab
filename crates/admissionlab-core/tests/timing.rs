@@ -172,14 +172,37 @@ async fn paths(root: &Path) -> RunPaths {
         .expect("a run workspace is created")
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it — here,
+/// for as long as the [`RunPaths`] workspace built inside it is in use.
+/// `Drop` runs on a panicking assertion too, which an explicit delete at
+/// the end of a test does not — that is what keeps a `cargo test` run
+/// from leaving a directory per test behind in the system temp
+/// directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     let dir = std::env::temp_dir().join(format!(
         "admissionlab-core-timing-{}-{label}",
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// `timings` serialized, so the absence assertions read the same document
@@ -225,7 +248,7 @@ fn every_stage_is_absent_until_its_scope_drops() {
 async fn both_sides_of_a_concurrent_stage_keep_their_own_duration() {
     let recorder = TimingRecorder::start();
     let root = unique_temp_dir("clusters");
-    let paths = paths(&root).await;
+    let paths = paths(root.path()).await;
     let clusters = TimedClusterManager::new(Arc::new(SleepyClusters), recorder.clone());
 
     let baseline = spec(Side::Baseline);
@@ -295,7 +318,7 @@ async fn a_component_duration_is_the_installers_own_measurement() {
 async fn a_capture_records_the_corpus_size_it_replayed() {
     let recorder = TimingRecorder::start();
     let root = unique_temp_dir("capture");
-    let paths = paths(&root).await;
+    let paths = paths(root.path()).await;
     let capture = TimedFixtureCapture::new(CountingCapture { fixtures: 100 }, recorder.clone());
     let baseline = handle(spec(Side::Baseline));
     let candidate = handle(spec(Side::Candidate));

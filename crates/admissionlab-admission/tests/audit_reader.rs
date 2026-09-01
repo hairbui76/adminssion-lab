@@ -66,10 +66,31 @@ fn basic_lines() -> Vec<String> {
     text.split_inclusive('\n').map(str::to_string).collect()
 }
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// mirroring `admissionlab-installer/tests/manifests_unit.rs`'s own
 /// `unique_temp_dir` helper.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -77,15 +98,18 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Writes `contents` as a temp audit log named after `label` and returns
-/// its path.
-fn write_audit_log(label: &str, contents: &str) -> PathBuf {
-    let path = unique_temp_dir(label).join("audit.log");
+/// its directory's guard alongside the log's path. The caller must keep
+/// the guard alive for as long as it uses the path — including across
+/// any task it spawns to append to the log.
+fn write_audit_log(label: &str, contents: &str) -> (TempDir, PathBuf) {
+    let dir = unique_temp_dir(label);
+    let path = dir.path().join("audit.log");
     std::fs::write(&path, contents).expect("write temp audit log");
-    path
+    (dir, path)
 }
 
 /// A reader over `path` polling at [`TEST_POLL_INTERVAL`].
@@ -311,7 +335,7 @@ async fn absent_optional_evidence_is_none_never_a_fabricated_value() {
 #[tokio::test]
 async fn checkpoint_is_the_current_end_of_file_and_later_events_start_there() {
     let lines = basic_lines();
-    let path = write_audit_log("checkpoint-eof", &lines.concat());
+    let (_temp_dir, path) = write_audit_log("checkpoint-eof", &lines.concat());
     let reader = reader_at(&path);
 
     let checkpoint = reader
@@ -381,7 +405,8 @@ async fn events_since_a_mid_file_checkpoint_returns_only_later_events() {
 /// at that path.
 #[test]
 fn checkpointing_a_missing_audit_log_is_an_error_not_offset_zero() {
-    let path = unique_temp_dir("missing-log").join("audit.log");
+    let temp_dir = unique_temp_dir("missing-log");
+    let path = temp_dir.path().join("audit.log");
     let reader = reader_at(&path);
     match reader.checkpoint() {
         Err(AuditError::Metadata { path: reported, .. }) => assert_eq!(reported, path),
@@ -402,7 +427,7 @@ fn checkpointing_a_missing_audit_log_is_an_error_not_offset_zero() {
 async fn an_unfinished_trailing_line_is_waited_for_not_treated_as_corruption() {
     let lines = basic_lines();
     let (head, tail) = lines[1].split_at(200);
-    let path = write_audit_log("partial-completed", &format!("{}{head}", lines[0]));
+    let (_temp_dir, path) = write_audit_log("partial-completed", &format!("{}{head}", lines[0]));
 
     let completion_path = path.clone();
     let tail = tail.to_string();
@@ -452,7 +477,7 @@ async fn an_unfinished_trailing_line_is_waited_for_not_treated_as_corruption() {
 async fn a_deadline_that_expires_on_a_never_completed_line_returns_the_complete_events() {
     let lines = basic_lines();
     let (head, _) = lines[1].split_at(200);
-    let path = write_audit_log("partial-forever", &format!("{}{head}", lines[0]));
+    let (_temp_dir, path) = write_audit_log("partial-forever", &format!("{}{head}", lines[0]));
 
     let reader = reader_at(&path);
     let started = Instant::now();
@@ -492,7 +517,7 @@ async fn a_deadline_that_expires_on_a_never_completed_line_returns_the_complete_
 #[tokio::test]
 async fn a_response_complete_event_returns_immediately_rather_than_waiting_out_the_deadline() {
     let lines = basic_lines();
-    let path = write_audit_log("early-stop", &format!("{}{}", lines[0], lines[1]));
+    let (_temp_dir, path) = write_audit_log("early-stop", &format!("{}{}", lines[0], lines[1]));
 
     let reader = reader_at(&path);
     let started = Instant::now();
@@ -532,7 +557,7 @@ async fn an_unparsable_complete_line_becomes_a_diagnostic_and_the_other_events_s
         "{\"kind\":\"Event\",\"level\":\"Request\"}\n",
         lines[1],
     );
-    let path = write_audit_log("malformed", &contents);
+    let (_temp_dir, path) = write_audit_log("malformed", &contents);
 
     let reader = reader_at(&path);
     let events = reader
@@ -588,7 +613,8 @@ async fn an_unparsable_complete_line_becomes_a_diagnostic_and_the_other_events_s
 #[tokio::test]
 async fn blank_lines_between_events_are_skipped_without_a_diagnostic() {
     let lines = basic_lines();
-    let path = write_audit_log("blank-lines", &format!("{}\n   \n{}", lines[0], lines[1]));
+    let (_temp_dir, path) =
+        write_audit_log("blank-lines", &format!("{}\n   \n{}", lines[0], lines[1]));
 
     let reader = reader_at(&path);
     let events = reader
@@ -616,7 +642,7 @@ async fn blank_lines_between_events_are_skipped_without_a_diagnostic() {
 #[tokio::test]
 async fn a_rotated_or_truncated_audit_log_is_an_explicit_error() {
     let lines = basic_lines();
-    let path = write_audit_log("truncated", &lines.concat());
+    let (_temp_dir, path) = write_audit_log("truncated", &lines.concat());
     let reader = reader_at(&path);
     let checkpoint = reader.checkpoint().expect("checkpoint the full file");
 

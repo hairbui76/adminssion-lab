@@ -15,7 +15,7 @@
 //! Step 1 asks for *config* tests, and a struct literal would skip
 //! exactly the parsing and validation being tested.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use admissionlab_gateway::model::{
@@ -38,6 +38,27 @@ fn gateway_valid_path() -> PathBuf {
 /// Returns the resolved `gateway` suite, or the `SpecError` the pipeline
 /// rejected the document with. The surrounding admission-lab fields are
 /// the same ones `testdata/configs/minimal-valid.yaml` uses, so nothing
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// outside the `gateway` section can be what fails.
 fn resolve_gateway_section(
     label: &str,
@@ -52,14 +73,16 @@ fn resolve_gateway_section(
          {gateway_section}"
     );
 
-    let directory = std::env::temp_dir().join(format!(
+    let directory = TempDir(std::env::temp_dir().join(format!(
         "admissionlab-gateway-model-{label}-{}",
         std::process::id()
-    ));
-    std::fs::create_dir_all(&directory).expect("create temp directory");
-    let path = directory.join("admissionlab.yaml");
+    )));
+    std::fs::create_dir_all(directory.path()).expect("create temp directory");
+    let path = directory.path().join("admissionlab.yaml");
     std::fs::write(&path, document).expect("write temp lab configuration");
 
+    // `directory` removes itself when this function returns -- including
+    // on the `?` early return below.
     let loaded = load_lab(&path)?;
     resolve_lab(loaded).map(|lab| lab.gateway)
 }

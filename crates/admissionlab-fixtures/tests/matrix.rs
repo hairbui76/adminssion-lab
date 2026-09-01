@@ -39,9 +39,30 @@ use globset::Glob;
 // Test support
 // ---------------------------------------------------------------------
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// mirroring `tests/discover.rs`'s own helper of the same name.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -49,7 +70,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Writes `contents` to `dir.join(name)`, creating parent directories.
@@ -128,7 +149,7 @@ fn error_chain(error: &FixtureError) -> String {
 #[test]
 fn expands_one_fixture_per_case_in_declaration_order() {
     let root = unique_temp_dir("order");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     // Case ids in a deliberately *non*-alphabetical order: an
     // implementation that sorted or hash-mapped the cases would produce
     // `[alpha, mid, zulu]` and fail this, where a declaration-order one
@@ -148,7 +169,7 @@ fn expands_one_fixture_per_case_in_declaration_order() {
         \x20     patches: []\n",
     );
 
-    let sources = expand_matrix(&spec, &root).expect("expansion must succeed");
+    let sources = expand_matrix(&spec, root.path()).expect("expansion must succeed");
     let ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
     assert_eq!(ids, ["m-zulu", "m-alpha", "m-mid"]);
 }
@@ -156,14 +177,14 @@ fn expands_one_fixture_per_case_in_declaration_order() {
 #[test]
 fn a_case_patch_is_applied_to_the_parsed_base_object() {
     let root = unique_temp_dir("apply");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: add\n\
         \x20         path: /spec/hostNetwork\n\
         \x20         value: true\n",
     );
 
-    let sources = expand_matrix(&spec, &root).expect("expansion must succeed");
+    let sources = expand_matrix(&spec, root.path()).expect("expansion must succeed");
     assert_eq!(sources.len(), 1);
     assert_eq!(
         sources[0].object["spec"]["hostNetwork"],
@@ -188,7 +209,7 @@ fn a_case_patch_is_applied_to_the_parsed_base_object() {
 #[test]
 fn each_case_starts_from_the_unmodified_base_not_the_previous_case() {
     let root = unique_temp_dir("isolation");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = matrix_spec(
         "apiVersion: admissionlab.io/v1alpha1\n\
          kind: FixtureMatrix\n\
@@ -208,7 +229,7 @@ fn each_case_starts_from_the_unmodified_base_not_the_previous_case() {
         \x20         value: runner\n",
     );
 
-    let sources = expand_matrix(&spec, &root).expect("expansion must succeed");
+    let sources = expand_matrix(&spec, root.path()).expect("expansion must succeed");
     assert_eq!(
         sources[1].object["spec"]["serviceAccountName"],
         serde_json::json!("runner")
@@ -227,14 +248,14 @@ fn an_expanded_fixture_points_at_the_base_file_and_its_document_index() {
     // be 0: an implementation that hard-coded 0 rather than recording the
     // base document's true position would fail this.
     write(
-        &root,
+        root.path(),
         "base.yaml",
         &format!("---\n# only a comment\n---\n{BASE_POD}"),
     );
     let spec = single_case_matrix("\x20       []\n");
 
-    let sources = expand_matrix(&spec, &root).expect("expansion must succeed");
-    assert_eq!(sources[0].path, root.join("base.yaml"));
+    let sources = expand_matrix(&spec, root.path()).expect("expansion must succeed");
+    assert_eq!(sources[0].path, root.path().join("base.yaml"));
     assert_eq!(sources[0].document_index, 1);
 }
 
@@ -245,7 +266,7 @@ fn an_expanded_fixture_points_at_the_base_file_and_its_document_index() {
 #[test]
 fn expansion_is_byte_for_byte_deterministic_across_calls() {
     let root = unique_temp_dir("deterministic");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: add\n\
         \x20         path: /metadata/labels\n\
@@ -253,8 +274,8 @@ fn expansion_is_byte_for_byte_deterministic_across_calls() {
     );
 
     assert_eq!(
-        expand_matrix(&spec, &root).unwrap(),
-        expand_matrix(&spec, &root).unwrap()
+        expand_matrix(&spec, root.path()).unwrap(),
+        expand_matrix(&spec, root.path()).unwrap()
     );
 }
 
@@ -264,16 +285,16 @@ fn expansion_is_byte_for_byte_deterministic_across_calls() {
 #[test]
 fn the_source_hash_changes_when_the_base_file_changes() {
     let root = unique_temp_dir("hash-base");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix("\x20       []\n");
-    let before = expand_matrix(&spec, &root).unwrap()[0].sha256.clone();
+    let before = expand_matrix(&spec, root.path()).unwrap()[0].sha256.clone();
 
     write(
-        &root,
+        root.path(),
         "base.yaml",
         &BASE_POD.replace("pause:3.10", "pause:3.9"),
     );
-    let after = expand_matrix(&spec, &root).unwrap()[0].sha256.clone();
+    let after = expand_matrix(&spec, root.path()).unwrap()[0].sha256.clone();
 
     assert_ne!(before, after);
 }
@@ -285,7 +306,7 @@ fn the_source_hash_changes_when_the_base_file_changes() {
 #[test]
 fn the_source_hash_differs_between_cases_over_the_same_base() {
     let root = unique_temp_dir("hash-patches");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = matrix_spec(
         "apiVersion: admissionlab.io/v1alpha1\n\
          kind: FixtureMatrix\n\
@@ -305,7 +326,7 @@ fn the_source_hash_differs_between_cases_over_the_same_base() {
         \x20         value: false\n",
     );
 
-    let sources = expand_matrix(&spec, &root).unwrap();
+    let sources = expand_matrix(&spec, root.path()).unwrap();
     assert_ne!(sources[0].sha256, sources[1].sha256);
 }
 
@@ -315,13 +336,13 @@ fn the_source_hash_differs_between_cases_over_the_same_base() {
 #[test]
 fn the_source_hash_is_not_the_base_files_own_hash() {
     let root = unique_temp_dir("hash-domain");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix("\x20       []\n");
 
-    let expanded = expand_matrix(&spec, &root).unwrap()[0].sha256.clone();
+    let expanded = expand_matrix(&spec, root.path()).unwrap()[0].sha256.clone();
     let base_file_hash = discover_fixtures(&ResolvedFixtureSelection {
         include: vec![Glob::new("base.yaml").unwrap()],
-        root: root.clone(),
+        root: root.path().to_path_buf(),
     })
     .unwrap()[0]
         .sha256
@@ -355,7 +376,7 @@ fn expect_matrix_error(spec: &FixtureMatrixSpec, root: &Path, expected: &str) ->
 #[test]
 fn a_duplicate_case_id_is_rejected() {
     let root = unique_temp_dir("dup-case");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = matrix_spec(
         "apiVersion: admissionlab.io/v1alpha1\n\
          kind: FixtureMatrix\n\
@@ -370,13 +391,13 @@ fn a_duplicate_case_id_is_rejected() {
         \x20   - id: same\n\
         \x20     patches: []\n",
     );
-    expect_matrix_error(&spec, &root, "declared twice");
+    expect_matrix_error(&spec, root.path(), "declared twice");
 }
 
 #[test]
 fn an_empty_case_list_is_rejected_rather_than_silently_contributing_nothing() {
     let root = unique_temp_dir("no-cases");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = matrix_spec(
         "apiVersion: admissionlab.io/v1alpha1\n\
          kind: FixtureMatrix\n\
@@ -385,66 +406,70 @@ fn an_empty_case_list_is_rejected_rather_than_silently_contributing_nothing() {
         \x20 base: base.yaml\n\
         \x20 cases: []\n",
     );
-    expect_matrix_error(&spec, &root, "declares no cases");
+    expect_matrix_error(&spec, root.path(), "declares no cases");
 }
 
 #[test]
 fn a_matrix_id_outside_the_fixture_id_character_set_is_rejected_not_slugified() {
     let root = unique_temp_dir("bad-matrix-id");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let mut spec = single_case_matrix("\x20       []\n");
     spec.id = "Pod_Variants".to_owned();
-    expect_matrix_error(&spec, &root, "not a valid fixture identifier");
+    expect_matrix_error(&spec, root.path(), "not a valid fixture identifier");
 }
 
 #[test]
 fn a_case_id_outside_the_fixture_id_character_set_is_rejected_not_slugified() {
     let root = unique_temp_dir("bad-case-id");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let mut spec = single_case_matrix("\x20       []\n");
     spec.cases[0].id = "Host Network".to_owned();
-    expect_matrix_error(&spec, &root, "not a valid fixture identifier");
+    expect_matrix_error(&spec, root.path(), "not a valid fixture identifier");
 }
 
 #[test]
 fn a_base_escaping_the_fixture_root_is_rejected() {
     let root = unique_temp_dir("escape");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let mut spec = single_case_matrix("\x20       []\n");
     spec.base = PathBuf::from("../base.yaml");
-    expect_matrix_error(&spec, &root, "ordinary path components");
+    expect_matrix_error(&spec, root.path(), "ordinary path components");
 }
 
 #[test]
 fn an_absolute_base_is_rejected() {
     let root = unique_temp_dir("absolute");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let mut spec = single_case_matrix("\x20       []\n");
-    spec.base = root.join("base.yaml");
-    expect_matrix_error(&spec, &root, "ordinary path components");
+    spec.base = root.path().join("base.yaml");
+    expect_matrix_error(&spec, root.path(), "ordinary path components");
 }
 
 #[test]
 fn a_missing_base_file_is_rejected() {
     let root = unique_temp_dir("missing-base");
     let spec = single_case_matrix("\x20       []\n");
-    expect_matrix_error(&spec, &root, "failed to read base");
+    expect_matrix_error(&spec, root.path(), "failed to read base");
 }
 
 #[test]
 fn a_multi_document_base_file_is_rejected_as_ambiguous() {
     let root = unique_temp_dir("multi-base");
-    write(&root, "base.yaml", &format!("{BASE_POD}---\n{BASE_POD}"));
+    write(
+        root.path(),
+        "base.yaml",
+        &format!("{BASE_POD}---\n{BASE_POD}"),
+    );
     let spec = single_case_matrix("\x20       []\n");
-    expect_matrix_error(&spec, &root, "exactly one document, found 2");
+    expect_matrix_error(&spec, root.path(), "exactly one document, found 2");
 }
 
 #[test]
 fn an_empty_base_file_is_rejected() {
     let root = unique_temp_dir("empty-base");
-    write(&root, "base.yaml", "# nothing but a comment\n");
+    write(root.path(), "base.yaml", "# nothing but a comment\n");
     let spec = single_case_matrix("\x20       []\n");
-    expect_matrix_error(&spec, &root, "exactly one document, found 0");
+    expect_matrix_error(&spec, root.path(), "exactly one document, found 0");
 }
 
 /// RFC 6902 has no valid `add` for a pointer whose parent does not
@@ -452,25 +477,25 @@ fn an_empty_base_file_is_rejected() {
 #[test]
 fn a_patch_against_a_nonexistent_location_is_rejected() {
     let root = unique_temp_dir("bad-pointer");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: add\n\
         \x20         path: /spec/nope/deeper\n\
         \x20         value: 1\n",
     );
-    expect_matrix_error(&spec, &root, "patch failed");
+    expect_matrix_error(&spec, root.path(), "patch failed");
 }
 
 #[test]
 fn a_failing_test_operation_is_rejected() {
     let root = unique_temp_dir("test-op");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: test\n\
         \x20         path: /metadata/name\n\
         \x20         value: not-the-name\n",
     );
-    expect_matrix_error(&spec, &root, "patch failed");
+    expect_matrix_error(&spec, root.path(), "patch failed");
 }
 
 /// The point of Step 1/Step 4: an expanded object goes through the exact
@@ -481,12 +506,12 @@ fn a_failing_test_operation_is_rejected() {
 #[test]
 fn a_patch_that_removes_kind_is_rejected_by_the_static_fixture_validation() {
     let root = unique_temp_dir("remove-kind");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: remove\n\
         \x20         path: /kind\n",
     );
-    let message = expect_matrix_error(&spec, &root, "not a valid fixture");
+    let message = expect_matrix_error(&spec, root.path(), "not a valid fixture");
     assert!(
         message.contains("missing required field \"kind\""),
         "message {message:?} must carry the same static-fixture validation failure"
@@ -496,13 +521,13 @@ fn a_patch_that_removes_kind_is_rejected_by_the_static_fixture_validation() {
 #[test]
 fn a_patch_that_empties_metadata_name_is_rejected() {
     let root = unique_temp_dir("empty-name");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: replace\n\
         \x20         path: /metadata/name\n\
         \x20         value: \"\"\n",
     );
-    let message = expect_matrix_error(&spec, &root, "not a valid fixture");
+    let message = expect_matrix_error(&spec, root.path(), "not a valid fixture");
     assert!(message.contains("metadata.name"), "message {message:?}");
 }
 
@@ -512,7 +537,7 @@ fn a_patch_that_empties_metadata_name_is_rejected() {
 #[test]
 fn a_patch_introducing_generate_name_only_is_rejected() {
     let root = unique_temp_dir("generate-name");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: remove\n\
         \x20         path: /metadata/name\n\
@@ -520,7 +545,7 @@ fn a_patch_introducing_generate_name_only_is_rejected() {
         \x20         path: /metadata/generateName\n\
         \x20         value: base-\n",
     );
-    let message = expect_matrix_error(&spec, &root, "not a valid fixture");
+    let message = expect_matrix_error(&spec, root.path(), "not a valid fixture");
     assert!(message.contains("generateName"), "message {message:?}");
 }
 
@@ -529,13 +554,13 @@ fn a_patch_introducing_generate_name_only_is_rejected() {
 #[test]
 fn a_patch_that_replaces_the_whole_document_with_a_scalar_is_rejected() {
     let root = unique_temp_dir("scalar");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: replace\n\
         \x20         path: \"\"\n\
         \x20         value: just-a-string\n",
     );
-    let message = expect_matrix_error(&spec, &root, "not a valid fixture");
+    let message = expect_matrix_error(&spec, root.path(), "not a valid fixture");
     assert!(message.contains("a string"), "message {message:?}");
 }
 
@@ -545,7 +570,7 @@ fn a_patch_that_replaces_the_whole_document_with_a_scalar_is_rejected() {
 #[test]
 fn a_case_whose_second_patch_fails_yields_no_fixture_at_all() {
     let root = unique_temp_dir("atomic");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     let spec = single_case_matrix(
         "\x20       - op: add\n\
         \x20         path: /spec/hostNetwork\n\
@@ -553,7 +578,7 @@ fn a_case_whose_second_patch_fails_yields_no_fixture_at_all() {
         \x20       - op: remove\n\
         \x20         path: /spec/doesNotExist\n",
     );
-    expect_matrix_error(&spec, &root, "patch failed");
+    expect_matrix_error(&spec, root.path(), "patch failed");
 }
 
 // ---------------------------------------------------------------------
@@ -580,14 +605,15 @@ fn matrix_document(id: &str, base: &str, case_id: &str) -> String {
 #[test]
 fn discovery_expands_a_matrix_and_never_replays_the_matrix_document_itself() {
     let root = unique_temp_dir("discover-basic");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "m.matrix.yaml",
         &matrix_document("m", "base.yaml", "c"),
     );
 
-    let sources = discover_fixtures(&select_all_yaml(root.clone())).expect("discovery");
+    let sources =
+        discover_fixtures(&select_all_yaml(root.path().to_path_buf())).expect("discovery");
     let ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
 
     // Exactly two: the base (which the `**/*.yaml` include independently
@@ -611,9 +637,9 @@ fn discovery_expands_a_matrix_and_never_replays_the_matrix_document_itself() {
 #[test]
 fn a_base_outside_the_include_globs_is_a_template_only_and_is_not_replayed() {
     let root = unique_temp_dir("template-only");
-    write(&root, "bases/pod.yaml", BASE_POD);
+    write(root.path(), "bases/pod.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "m.matrix.yaml",
         &matrix_document("m", "bases/pod.yaml", "c"),
     );
@@ -623,7 +649,7 @@ fn a_base_outside_the_include_globs_is_a_template_only_and_is_not_replayed() {
         // nothing else, so `bases/pod.yaml` is genuinely outside the
         // include list rather than incidentally unmatched.
         include: vec![Glob::new("m.matrix.yaml").unwrap()],
-        root: root.clone(),
+        root: root.path().to_path_buf(),
     };
     let sources = discover_fixtures(&selection).expect("discovery");
     let ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
@@ -636,14 +662,15 @@ fn a_base_outside_the_include_globs_is_a_template_only_and_is_not_replayed() {
 #[test]
 fn a_base_matched_by_the_include_globs_is_replayed_alongside_its_cases() {
     let root = unique_temp_dir("base-replayed");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "m.matrix.yaml",
         &matrix_document("m", "base.yaml", "c"),
     );
 
-    let sources = discover_fixtures(&select_all_yaml(root.clone())).expect("discovery");
+    let sources =
+        discover_fixtures(&select_all_yaml(root.path().to_path_buf())).expect("discovery");
     assert!(
         sources
             .iter()
@@ -662,18 +689,18 @@ fn a_base_matched_by_the_include_globs_is_replayed_alongside_its_cases() {
 fn matrix_cases_land_at_the_matrix_documents_own_position_in_the_order() {
     let root = unique_temp_dir("splice");
     write(
-        &root,
+        root.path(),
         "a.yaml",
         &BASE_POD.replace("name: base", "name: aaa"),
     );
     write(
-        &root,
+        root.path(),
         "z.yaml",
         &BASE_POD.replace("name: base", "name: zzz"),
     );
-    write(&root, "n-base.yaml", BASE_POD);
+    write(root.path(), "n-base.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "n.matrix.yaml",
         &matrix_document("mm", "n-base.yaml", "c"),
     );
@@ -684,7 +711,7 @@ fn matrix_cases_land_at_the_matrix_documents_own_position_in_the_order() {
             Glob::new("z.yaml").unwrap(),
             Glob::new("n.matrix.yaml").unwrap(),
         ],
-        root: root.clone(),
+        root: root.path().to_path_buf(),
     };
     let sources = discover_fixtures(&selection).expect("discovery");
     let ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
@@ -695,19 +722,20 @@ fn matrix_cases_land_at_the_matrix_documents_own_position_in_the_order() {
 #[test]
 fn two_matrices_sharing_an_id_are_rejected() {
     let root = unique_temp_dir("dup-matrix-id");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "a.matrix.yaml",
         &matrix_document("same", "base.yaml", "one"),
     );
     write(
-        &root,
+        root.path(),
         "b.matrix.yaml",
         &matrix_document("same", "base.yaml", "two"),
     );
 
-    let err = discover_fixtures(&select_all_yaml(root)).expect_err("must be rejected");
+    let err = discover_fixtures(&select_all_yaml(root.path().to_path_buf()))
+        .expect_err("must be rejected");
     let message = error_chain(&err);
     assert!(
         message.contains("is not unique") && message.contains("a.matrix.yaml"),
@@ -721,21 +749,21 @@ fn two_matrices_sharing_an_id_are_rejected() {
 #[test]
 fn two_matrices_whose_case_ids_collide_after_joining_are_rejected() {
     let root = unique_temp_dir("id-collision");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "a.matrix.yaml",
         &matrix_document("a-b", "base.yaml", "c"),
     );
     write(
-        &root,
+        root.path(),
         "b.matrix.yaml",
         &matrix_document("a", "base.yaml", "b-c"),
     );
 
     let err = discover_fixtures(&ResolvedFixtureSelection {
         include: vec![Glob::new("*.matrix.yaml").unwrap()],
-        root,
+        root: root.path().to_path_buf(),
     })
     .expect_err("must be rejected");
     assert!(
@@ -756,19 +784,20 @@ fn two_matrices_whose_case_ids_collide_after_joining_are_rejected() {
 #[test]
 fn a_broken_matrix_fails_discovery_rather_than_being_skipped() {
     let root = unique_temp_dir("no-skip");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "good.yaml",
         &BASE_POD.replace("name: base", "name: good"),
     );
     write(
-        &root,
+        root.path(),
         "broken.matrix.yaml",
         "apiVersion: admissionlab.io/v1alpha1\nkind: FixtureMatrix\nspec:\n  id: m\n  base: base.yaml\n  cases:\n    - id: c\n      patches:\n        - op: remove\n          path: /apiVersion\n",
     );
 
-    let err = discover_fixtures(&select_all_yaml(root)).expect_err("must be rejected");
+    let err = discover_fixtures(&select_all_yaml(root.path().to_path_buf()))
+        .expect_err("must be rejected");
     assert!(
         matches!(err, FixtureError::Matrix(_)),
         "expected FixtureError::Matrix, got {err:?}"
@@ -782,12 +811,13 @@ fn a_broken_matrix_fails_discovery_rather_than_being_skipped() {
 fn a_misspelled_fixture_matrix_kind_is_rejected_with_a_matrix_message() {
     let root = unique_temp_dir("typo-kind");
     write(
-        &root,
+        root.path(),
         "typo.yaml",
         "apiVersion: admissionlab.io/v1alpha1\nkind: Fixturematrix\nspec:\n  id: m\n  base: b.yaml\n  cases: []\n",
     );
 
-    let err = discover_fixtures(&select_all_yaml(root)).expect_err("must be rejected");
+    let err = discover_fixtures(&select_all_yaml(root.path().to_path_buf()))
+        .expect_err("must be rejected");
     let message = error_chain(&err);
     assert!(
         message.contains("is not a fixture matrix"),
@@ -799,12 +829,13 @@ fn a_misspelled_fixture_matrix_kind_is_rejected_with_a_matrix_message() {
 fn a_matrix_base_escaping_its_own_directory_is_rejected_at_discovery() {
     let root = unique_temp_dir("discover-escape");
     write(
-        &root,
+        root.path(),
         "m.matrix.yaml",
         &matrix_document("m", "../outside.yaml", "c"),
     );
 
-    let err = discover_fixtures(&select_all_yaml(root)).expect_err("must be rejected");
+    let err = discover_fixtures(&select_all_yaml(root.path().to_path_buf()))
+        .expect_err("must be rejected");
     assert!(
         error_chain(&err).contains("ordinary path components"),
         "{}",
@@ -815,13 +846,13 @@ fn a_matrix_base_escaping_its_own_directory_is_rejected_at_discovery() {
 #[test]
 fn discovery_over_a_matrix_is_deterministic_across_repeated_calls() {
     let root = unique_temp_dir("discover-deterministic");
-    write(&root, "base.yaml", BASE_POD);
+    write(root.path(), "base.yaml", BASE_POD);
     write(
-        &root,
+        root.path(),
         "m.matrix.yaml",
         &matrix_document("m", "base.yaml", "c"),
     );
-    let selection = select_all_yaml(root);
+    let selection = select_all_yaml(root.path().to_path_buf());
 
     assert_eq!(
         discover_fixtures(&selection).unwrap(),

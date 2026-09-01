@@ -40,8 +40,29 @@ use admissionlab_spec::{
 // `tests/load.rs`'s own (near-identical) helpers.
 // ---------------------------------------------------------------------
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -49,16 +70,18 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// Writes `yaml` (see [`dedent`]) to `admissionlab.yaml` inside a fresh
-/// unique temp directory and returns its path.
-fn write_config(label: &str, yaml: &str) -> PathBuf {
+/// unique temp directory and returns that directory's guard alongside
+/// the config's path. The caller must keep the guard alive for as long
+/// as it uses the path.
+fn write_config(label: &str, yaml: &str) -> (TempDir, PathBuf) {
     let dir = unique_temp_dir(label);
-    let path = dir.join("admissionlab.yaml");
+    let path = dir.path().join("admissionlab.yaml");
     std::fs::write(&path, dedent(yaml)).expect("write temp config");
-    path
+    (dir, path)
 }
 
 /// Strips the leading whitespace common to every non-empty line, so a
@@ -114,7 +137,7 @@ impl Drop for CwdGuard {
 
 #[test]
 fn component_without_install_block_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "no-install",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -141,7 +164,7 @@ fn component_without_install_block_is_rejected() {
 
 #[test]
 fn install_block_mixing_helm_and_manifest_fields_is_rejected_at_load_time() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "mixed-install-fields",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -183,7 +206,7 @@ fn install_block_mixing_helm_and_manifest_fields_is_rejected_at_load_time() {
 
 #[test]
 fn helm_install_without_version_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-no-version",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -214,7 +237,7 @@ fn helm_install_without_version_is_rejected() {
 
 #[test]
 fn helm_install_without_repo_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-no-repo",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -245,7 +268,7 @@ fn helm_install_without_repo_is_rejected() {
 
 #[test]
 fn helm_install_with_empty_chart_is_rejected() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-empty-chart",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -307,7 +330,7 @@ fn helm_floating_versions_are_rejected() {
     ];
 
     for version in floating {
-        let path = write_config(
+        let (_temp_dir, path) = write_config(
             "helm-floating",
             &format!(
                 r#"
@@ -355,7 +378,7 @@ fn helm_pinned_versions_are_accepted() {
     ];
 
     for version in pinned {
-        let path = write_config(
+        let (_temp_dir, path) = write_config(
             "helm-pinned",
             &format!(
                 r#"
@@ -394,7 +417,7 @@ fn helm_pinned_versions_are_accepted() {
 
 #[test]
 fn helm_component_resolves_to_expected_shape_with_defaults() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-full-shape",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -456,7 +479,7 @@ fn helm_component_resolves_to_expected_shape_with_defaults() {
 
 #[test]
 fn helm_install_overrides_repo_name_release_name_namespace_and_set_values() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-explicit-overrides",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -515,7 +538,7 @@ fn helm_install_namespace_override_resolves_correctly_for_istiod() {
     // `istio-system`, and getting this wrong would make the install
     // *appear* to succeed while placing the control plane somewhere
     // nothing expects it.
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-istiod-namespace",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -554,7 +577,7 @@ fn helm_install_namespace_override_resolves_correctly_for_istiod() {
 
 #[test]
 fn top_level_version_overrides_helm_install_version() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "helm-version-override",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -589,7 +612,7 @@ fn top_level_version_overrides_helm_install_version() {
 
 #[test]
 fn manifests_install_requires_explicit_component_version() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "manifests-no-version",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -621,7 +644,7 @@ fn manifests_install_requires_explicit_component_version() {
 
 #[test]
 fn manifests_component_resolves_to_expected_shape() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "manifests-full-shape",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -663,7 +686,7 @@ fn manifests_component_resolves_to_expected_shape() {
 
 #[test]
 fn manifests_paths_must_not_be_empty() {
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "manifests-empty-paths",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -703,8 +726,8 @@ fn manifests_paths_must_not_be_empty() {
 #[test]
 fn helm_values_files_resolve_against_config_directory_not_cwd() {
     let root = unique_temp_dir("helm-values-cwd");
-    let lab_dir = root.join("lab");
-    let elsewhere_dir = root.join("elsewhere");
+    let lab_dir = root.path().join("lab");
+    let elsewhere_dir = root.path().join("elsewhere");
     std::fs::create_dir_all(&lab_dir).unwrap();
     std::fs::create_dir_all(&elsewhere_dir).unwrap();
 
@@ -776,8 +799,8 @@ fn helm_values_files_resolve_against_config_directory_not_cwd() {
 #[test]
 fn manifests_paths_resolve_against_config_directory_not_cwd() {
     let root = unique_temp_dir("manifests-paths-cwd");
-    let lab_dir = root.join("lab");
-    let elsewhere_dir = root.join("elsewhere");
+    let lab_dir = root.path().join("lab");
+    let elsewhere_dir = root.path().join("elsewhere");
     std::fs::create_dir_all(&lab_dir).unwrap();
     std::fs::create_dir_all(&elsewhere_dir).unwrap();
 
@@ -844,7 +867,7 @@ fn readiness_checks_resolve_from_yaml() {
     // `recipes/*/recipe.yaml` writes them -- the whole point of the
     // shared spelling is that a certified recipe's readiness section can
     // be transcribed into a lab file without translation.
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "readiness-all-variants",
         r#"
         apiVersion: admissionlab.io/v1alpha1
@@ -929,7 +952,7 @@ fn an_unknown_readiness_check_type_is_rejected() {
     // check must fail at load time, not silently resolve to no wait at
     // all -- which would be indistinguishable from a component that
     // legitimately has nothing to wait on.
-    let path = write_config(
+    let (_temp_dir, path) = write_config(
         "readiness-unknown-type",
         r#"
         apiVersion: admissionlab.io/v1alpha1

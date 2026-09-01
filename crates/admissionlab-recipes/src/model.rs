@@ -1209,8 +1209,8 @@ mod tests {
     #[test]
     fn join_confined_does_not_detect_a_symlink_that_points_outside_base_dir() {
         let root = unique_symlink_test_dir("join-confined-symlink-gap");
-        let base_dir = root.join("recipe");
-        let outside_dir = root.join("outside");
+        let base_dir = root.path().join("recipe");
+        let outside_dir = root.path().join("outside");
         std::fs::create_dir_all(&base_dir).expect("create synthetic recipe directory");
         std::fs::create_dir_all(&outside_dir).expect("create synthetic outside directory");
 
@@ -1262,20 +1262,45 @@ mod tests {
              own marker, not something inside base_dir"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        // `root` removes itself when this test returns, on the panicking
+        // path as well as this one.
+    }
+
+    /// A temporary directory that removes itself when dropped.
+    ///
+    /// The one test below that touches disk holds it for as long as it
+    /// uses paths underneath it. `Drop` runs on a panicking assertion
+    /// too, which an explicit delete at the end of a test does not —
+    /// that is what keeps a `cargo test` run from leaving a directory
+    /// per test behind in the system temp directory. `remove_dir_all`
+    /// does not follow symlinks, so the link this test plants is
+    /// unlinked rather than followed out of the tree.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        /// The directory's path, valid for as long as this guard lives.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     /// A fresh, guaranteed-unique directory under the system temp
     /// directory, for the one test above that (uniquely in this module)
     /// needs real files and a real symlink on disk. Mirrors
     /// `tests/load.rs`'s own `unique_temp_dir` helper shape.
-    fn unique_symlink_test_dir(label: &str) -> PathBuf {
+    fn unique_symlink_test_dir(label: &str) -> TempDir {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
+        TempDir(std::env::temp_dir().join(format!(
             "admissionlab-recipes-model-test-{}-{label}-{n}",
             std::process::id()
-        ))
+        )))
     }
 
     // -------------------------------------------------------------

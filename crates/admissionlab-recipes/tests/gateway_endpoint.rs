@@ -28,7 +28,7 @@
 //!   documentation).
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use admissionlab_recipes::{
@@ -39,7 +39,29 @@ use admissionlab_recipes::{
 // Test support (mirrors `tests/load.rs`'s helpers of the same shape)
 // ---------------------------------------------------------------------
 
-fn unique_temp_dir(label: &str) -> PathBuf {
+/// A temporary directory that removes itself when dropped.
+///
+/// [`load_one`] holds one for as long as the loader is reading out of
+/// it. `Drop` runs on a panicking assertion too, which an explicit
+/// delete at the end of a test does not — that is what keeps a `cargo
+/// test` run from leaving a directory per test behind in the system temp
+/// directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -47,7 +69,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 fn dedent(text: &str) -> String {
@@ -66,8 +88,8 @@ fn dedent(text: &str) -> String {
 /// Loads one recipe document through the public override loader.
 fn load_one(label: &str, yaml: &str) -> Result<Recipe, String> {
     let dir = unique_temp_dir(label);
-    std::fs::write(dir.join("recipe.yaml"), dedent(yaml)).expect("write temp recipe file");
-    match load_recipe_overrides(&dir) {
+    std::fs::write(dir.path().join("recipe.yaml"), dedent(yaml)).expect("write temp recipe file");
+    match load_recipe_overrides(dir.path()) {
         Ok(mut recipes) => {
             assert_eq!(recipes.len(), 1, "each test writes exactly one recipe");
             Ok(recipes.remove(0))

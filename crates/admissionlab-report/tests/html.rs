@@ -12,7 +12,7 @@
 
 mod support;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use admissionlab_policy::Severity;
@@ -26,8 +26,29 @@ use support::canonical_result;
 /// points at: the stack under test decides both.
 const XSS_SENTINEL: &str = "<script>alert('admissionlab')</script>";
 
+/// A temporary directory that removes itself when dropped.
+///
+/// A test holds one for as long as it uses paths underneath it. `Drop`
+/// runs on a panicking assertion too, which an explicit delete at the
+/// end of a test does not — that is what keeps a `cargo test` run from
+/// leaving a directory per test behind in the system temp directory.
+struct TempDir(PathBuf);
+
+impl TempDir {
+    /// The directory's path, valid for as long as this guard lives.
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// A fresh, guaranteed-unique directory under the system temp directory.
-fn unique_temp_dir(label: &str) -> PathBuf {
+fn unique_temp_dir(label: &str) -> TempDir {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let dir = std::env::temp_dir().join(format!(
@@ -35,7 +56,7 @@ fn unique_temp_dir(label: &str) -> PathBuf {
         std::process::id()
     ));
     std::fs::create_dir_all(&dir).expect("create unique temp dir");
-    dir
+    TempDir(dir)
 }
 
 /// [`canonical_result`] with [`XSS_SENTINEL`] planted in five different
@@ -317,7 +338,8 @@ fn rendering_is_deterministic() {
 #[test]
 fn writing_produces_exactly_the_rendered_page() {
     let result = canonical_result();
-    let path = unique_temp_dir("write").join("report.html");
+    let temp_dir = unique_temp_dir("write");
+    let path = temp_dir.path().join("report.html");
 
     write_html_report(&path, &result).expect("writing the report succeeds");
 
@@ -329,9 +351,10 @@ fn writing_produces_exactly_the_rendered_page() {
 #[test]
 fn writing_leaves_no_temporary_file_behind() {
     let dir = unique_temp_dir("no-temp");
-    write_html_report(&dir.join("report.html"), &canonical_result()).expect("writing succeeds");
+    write_html_report(&dir.path().join("report.html"), &canonical_result())
+        .expect("writing succeeds");
 
-    let entries: Vec<String> = std::fs::read_dir(&dir)
+    let entries: Vec<String> = std::fs::read_dir(dir.path())
         .expect("read the temp dir")
         .map(|entry| {
             entry

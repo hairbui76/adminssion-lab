@@ -613,7 +613,7 @@ mod tests {
     use std::future::Future;
     use std::io;
     use std::os::unix::process::ExitStatusExt as _;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::process::ExitStatus;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -857,23 +857,46 @@ mod tests {
     // and never panics.
     // -------------------------------------------------------------
 
+    /// A temporary directory that removes itself when dropped.
+    ///
+    /// Each deep-probe test below holds one for as long as it uses the
+    /// workspace underneath it. `Drop` runs on a panicking assertion
+    /// too, which an explicit delete at the end of a test does not —
+    /// that is what keeps a `cargo test` run from leaving a directory
+    /// per test behind in the system temp directory.
+    struct TempDir(PathBuf);
+
+    impl TempDir {
+        /// The directory's path, valid for as long as this guard lives.
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// A fresh, real (absolute, on-disk) `RunPaths` for one deep-probe
     /// test, via a real `ArtifactStore::create_run` -- `run_deep_probe`
     /// writes through an `ArtifactStore` derived from `paths.root()`
     /// (inside `KindClusterManager`), so tests need every directory
     /// `RunPaths` names to genuinely exist. Mirrors
     /// `admissionlab-cluster`'s own `tests/lifecycle_unit.rs::new_run_paths`.
-    async fn new_deep_probe_run_paths(run_id: &RunId) -> RunPaths {
+    async fn new_deep_probe_run_paths(run_id: &RunId) -> (TempDir, RunPaths) {
         let unique = RunId::generate();
-        let root = std::env::temp_dir().join(format!(
+        let root = TempDir(std::env::temp_dir().join(format!(
             "admissionlab-cli-doctor-deep-test-{}",
             unique.as_str()
-        ));
-        let store = ArtifactStore::new(&root);
-        store
+        )));
+        let store = ArtifactStore::new(root.path());
+        let paths = store
             .create_run(run_id)
             .await
-            .expect("create_run should succeed under a fresh temp root")
+            .expect("create_run should succeed under a fresh temp root");
+        (root, paths)
     }
 
     /// Pre-seeds the audit log file at the exact path
@@ -1020,7 +1043,7 @@ mod tests {
     #[test]
     fn deep_probe_succeeds_when_health_and_audit_log_both_check_out() {
         let run_id = RunId::parse("deepprobesuccess001").expect("valid run id");
-        let paths = block_on(new_deep_probe_run_paths(&run_id));
+        let (_root, paths) = block_on(new_deep_probe_run_paths(&run_id));
         seed_audit_log(&paths);
 
         let runner: Arc<dyn ProcessRunner> = Arc::new(DeepFakeRunner::passing());
@@ -1035,7 +1058,7 @@ mod tests {
     #[test]
     fn deep_probe_reports_failure_and_still_deletes_when_the_audit_log_is_missing() {
         let run_id = RunId::parse("deepprobeauditmiss01").expect("valid run id");
-        let paths = block_on(new_deep_probe_run_paths(&run_id));
+        let (_root, paths) = block_on(new_deep_probe_run_paths(&run_id));
         // Deliberately not seeded -- see `DeepFakeRunner::passing`'s doc.
 
         let runner = Arc::new(DeepFakeRunner::passing());
@@ -1057,7 +1080,7 @@ mod tests {
     #[test]
     fn deep_probe_reports_failure_and_still_deletes_when_the_health_check_fails() {
         let run_id = RunId::parse("deepprobehealthfail1").expect("valid run id");
-        let paths = block_on(new_deep_probe_run_paths(&run_id));
+        let (_root, paths) = block_on(new_deep_probe_run_paths(&run_id));
         seed_audit_log(&paths);
 
         let runner = Arc::new(DeepFakeRunner::passing().with(
@@ -1085,7 +1108,7 @@ mod tests {
     #[test]
     fn deep_probe_reports_a_clear_error_when_cluster_creation_fails() {
         let run_id = RunId::parse("deepprobecreatefail1").expect("valid run id");
-        let paths = block_on(new_deep_probe_run_paths(&run_id));
+        let (_root, paths) = block_on(new_deep_probe_run_paths(&run_id));
 
         let runner: Arc<dyn ProcessRunner> =
             Arc::new(DeepFakeRunner::passing().with("kind-create", FakeOutcome::Missing));
