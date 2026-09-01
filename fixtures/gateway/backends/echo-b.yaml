@@ -1,0 +1,170 @@
+# `echo-b`: one of the two deterministic HTTP backends Gateway
+# data-plane fixtures route traffic to (Task 6.5). Its twin is
+# `echo-a.yaml`, which is this file with `echo-b` replaced by `echo-a`
+# throughout and nothing else changed -- deliberately, so that a diff of
+# the two files shows only the identity, and so that a Gateway
+# comparison that reports "the same route now reaches a different
+# backend" (Task 6.9's `traffic_backend_changed`) cannot be explained by
+# any other difference between the workloads.
+#
+# The workload answers every request with JSON naming which backend
+# answered it; see `crates/admissionlab-echo/src/lib.rs` for the frozen
+# response contract and `crates/admissionlab-echo/src/config.rs` for why
+# `ADMISSIONLAB_BACKEND_ID` below is required rather than defaulted (in
+# short: two backends that could both answer to the same id would hide
+# exactly the regression these fixtures exist to catch).
+#
+# # No namespace, on purpose
+#
+# Neither this file nor `echo-a.yaml` declares a `Namespace` object or a
+# `metadata.namespace` field. The applying suite chooses the namespace
+# (`kubectl apply -n <namespace> -f fixtures/gateway/backends/echo-b.yaml`)
+# and is responsible for creating it first, exactly as
+# `recipes/test-webhook/manifests/00-namespace.yaml` is applied ahead of
+# everything else in that recipe.
+#
+# That is not indecision. Task 6.10's Istio Gateway fixtures need these
+# same two backends in *two* configurations: same-namespace (both
+# backends beside the Gateway) and cross-namespace (a backend in another
+# namespace, reachable only through a `ReferenceGrant`). A hardcoded
+# namespace here would make the second impossible without a second copy
+# of these manifests, and two copies of a fixture that must stay
+# identical is precisely the drift this file's symmetry with `echo-a`
+# is designed to prevent.
+#
+# # Getting the image into the cluster
+#
+# `image: admissionlab-echo:dev` with `imagePullPolicy: IfNotPresent`
+# and no registry: the image is built and loaded into each `kind` node
+# by `scripts/build-test-images.sh` (`kind load docker-image`), which is
+# the local development path and requires no network access to any
+# registry. The tag must match that script's own `IMAGES` entry exactly
+# -- both are hardcoded, cross-referencing comments, since a shell
+# script and a YAML manifest have no mechanism to share one literal.
+# ROADMAP Task 6.5 Step 5's digest pinning applies to a *published*
+# image at release time and would replace this tag with a
+# `repository@sha256:...` reference then; until an image is published
+# there is no digest to pin, and pinning a locally-built one would
+# break `kind load`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  # One replica. Not a scaling decision -- a determinism one: every pod
+  # of this Deployment answers identically (the response is a pure
+  # function of the request plus `ADMISSIONLAB_BACKEND_ID`), so a second
+  # replica would add nothing to observe and one more scheduling event
+  # to wait for before a route can be called ready.
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-b
+    spec:
+      # This workload never talks to the Kubernetes API (see
+      # `crates/admissionlab-echo/src/lib.rs`), so it is given no
+      # credential that could let it: an echo answer must be a function
+      # of the request alone, and a mounted token is the beginning of a
+      # way for that to stop being true.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # 65532 is the `nonroot` UID/GID baked into the distroless base
+        # image this container is built on -- see
+        # `crates/admissionlab-echo/Dockerfile`'s own `USER` line.
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            # 8080 matches `admissionlab_echo::serve::PORT`, which is a
+            # fixed constant in the binary rather than configuration --
+            # see that constant's own documentation for why.
+            - name: http
+              containerPort: 8080
+          env:
+            # Required, never defaulted. This is the value echoed as the
+            # response body's `backend` field and the only thing that
+            # distinguishes this workload from `echo-a`; a pod that
+            # starts without it crash-loops on purpose.
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-b
+            # Optional; absent means no delay, which is what these
+            # baseline backends want. A fixture that needs a slow
+            # backend either sets this here (making the whole pod slow)
+            # or sends the per-request `x-admissionlab-delay-ms` header
+            # -- see `crates/admissionlab-echo/src/delay.rs` for when
+            # each is the right tool.
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          # Bounded so a fixture backend can never be the reason a
+          # `kind` node runs out of room for the stack under test, and
+          # so both backends get identical, predictable scheduling
+          # treatment. Generous for what this is: a single-threaded-
+          # workload HTTP server with no allocation beyond one bounded
+          # request body at a time.
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          # `GET /healthz` is the one route that is never delayed, so a
+          # backend deliberately configured slow still becomes a Service
+          # endpoint -- see `crates/admissionlab-echo/src/serve.rs`'s own
+          # module documentation for why that distinction matters to a
+          # timeout fixture.
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The Service an `HTTPRoute`'s `backendRefs` points at. Port 80 (the
+# conventional HTTP port a route refers to without saying so) forwarding
+# to the container's own 8080, so a route that omits `port:` still
+# resolves -- and so the two backends are addressed identically.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

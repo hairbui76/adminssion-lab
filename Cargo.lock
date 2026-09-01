@@ -100,6 +100,21 @@ dependencies = [
 [[package]]
 name = "admissionlab-echo"
 version = "0.1.0"
+dependencies = [
+ "assert_cmd",
+ "bytes",
+ "clap",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "predicates",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "admissionlab-fixtures"

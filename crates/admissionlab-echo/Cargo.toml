@@ -7,3 +7,82 @@ repository.workspace = true
 
 [lints]
 workspace = true
+
+# A library as well as a binary, for the same reason
+# `admissionlab-test-webhook` is one (see that crate's own `Cargo.toml`
+# and `src/lib.rs`): the frozen echo JSON contract and the header
+# normalization rules are what `crates/admissionlab-echo/tests/http.rs`
+# has to reach, and an integration test can only drive
+# `serve::serve_on`/`config::EchoConfig` if they are library items.
+# `src/main.rs` is then a thin `clap` front end holding no logic.
+[lib]
+name = "admissionlab_echo"
+path = "src/lib.rs"
+
+[[bin]]
+name = "admissionlab-echo"
+path = "src/main.rs"
+
+[dependencies]
+# A front end with no subcommands and no flags of its own -- see
+# `src/main.rs` for why this binary still parses its command line
+# (`--version` provenance, and a mistyped `args:` entry in a fixture
+# manifest failing loudly instead of being ignored). Already a workspace
+# dependency; `derive` is already enabled at the workspace level.
+clap = { workspace = true }
+# The hand-rolled HTTP/1.1 server (`src/serve.rs`) -- plain HTTP, no
+# TLS, because this backend only ever answers a Gateway data plane that
+# has already terminated TLS in front of it. Every one of these was
+# already resolved in `Cargo.lock` transitively via `kube`'s own client
+# stack and is already a direct dependency of
+# `admissionlab-test-webhook`; see the root `Cargo.toml`'s comments on
+# each for why none is a new crate in the resolved graph. No `rustls`/
+# `tokio-rustls`/`rustls-pki-types` here at all, unlike that crate --
+# this server terminates nothing.
+bytes = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+# `serde` derives the frozen echo response body (`src/echo.rs`) and
+# `serde_json` serializes it. The response shape is a small, fixed
+# struct plus a `BTreeMap` of headers, so this needs no `k8s-openapi`,
+# no `json-patch`, and no Kubernetes types of any kind: this binary
+# never talks to a Kubernetes API server (see `src/lib.rs`).
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+# `time` (the Tokio feature, not the `time` crate): the optional
+# response delay in `src/delay.rs` is a `tokio::time::sleep`, which is
+# also what makes it observable under a paused test clock.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "time"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["env-filter"] }
+
+[dev-dependencies]
+# `tests/http.rs`'s two `ADMISSIONLAB_BACKEND_ID` tests run the real
+# binary and assert it exits non-zero rather than serving with a
+# defaulted identity -- see `src/config.rs`'s own module documentation
+# for why a defaulted backend id would hide exactly the regression this
+# component exists to catch. Both are already workspace dependencies
+# (`admissionlab-cli`'s own tests use them).
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+# `test-util` gives `src/serve.rs`'s and `src/delay.rs`'s own tests
+# Tokio's paused clock (`#[tokio::test(start_paused = true)]`), so the
+# largest delay this backend accepts (`delay::MAX_DELAY_MS`, a full
+# minute) is asserted in full with no wall-clock cost. `io-util` gives
+# `tests/http.rs` the `AsyncReadExt`/`AsyncWriteExt` extension traits it
+# writes raw HTTP/1.1 request bytes with (see that file's own
+# documentation for why it speaks the wire protocol by hand rather than
+# through a client library). Both are dev-only: neither feature may
+# reach the shipped image. The other features repeat the
+# `[dependencies]` entry's because Cargo unifies the two, not because
+# they are needed twice.
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "net",
+    "time",
+    "io-util",
+    "test-util",
+] }
