@@ -17,22 +17,28 @@
 //!   digits, `null` for an unfinished run, string map keys in identifier
 //!   order, and a full round-trip through `serde` that also proves
 //!   identifier validation survives deserialization.
-//! - **The checked-in artifacts.** `schemas/run-manifest-v1alpha1.json`
-//!   and `testdata/golden/run-manifest-alpha.json` are regenerated and
+//! - **The checked-in artifacts.** `schemas/run-manifest-v1beta1.json`
+//!   and `testdata/golden/run-manifest-beta.json` are regenerated and
 //!   compared byte-for-byte, with an `#[ignore]`d regenerator alongside
 //!   each — the pattern `admissionlab-spec`'s `tests/schema.rs`
 //!   established, so the generator and the checker can never drift from
 //!   each other by construction.
+//!
+//! This file is about the *document*: what it may contain, how it hashes,
+//! and what it looks like on the wire. `tests/run_manifest_beta.rs` is
+//! about its *versions* — reading a v1alpha1 manifest back, refusing an
+//! unknown one, and holding the v1beta1 schema to the compatibility rule
+//! `docs/schema-migrations.md` states.
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 use admissionlab_core::run_manifest::{
-    ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, HostProvenance,
-    NormalizationRuleRecord, RunManifest, RunStage, RunStatus, SCHEMA_VERSION, ToolProvenance,
-    canonical_sha256, normalization_sha256, policy_sha256, run_manifest_v1alpha1_json_schema,
-    sha256_hex, split_node_image_reference,
+    ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, GatewayProvenance,
+    HostProvenance, NormalizationRuleRecord, RunManifest, RunStage, RunStatus, SCHEMA_VERSION,
+    ToolProvenance, canonical_sha256, normalization_sha256, policy_sha256,
+    run_manifest_v1beta1_json_schema, sha256_hex, split_node_image_reference,
 };
 use admissionlab_core::{DoctorReport, FixtureId, RunId, ToolName, ToolStatus};
 
@@ -53,13 +59,20 @@ fn completed() -> SystemTime {
     started() + Duration::from_secs(1_050)
 }
 
-/// A realistic, fully-populated manifest — the value both the golden file
-/// and the credential-safety test are built from.
+/// A realistic, fully-populated v1beta1 manifest — the value both the
+/// golden file and the credential-safety test are built from.
 ///
 /// Every string here is one a real run would produce: node images from
 /// `compatibility/kubernetes.yaml`, tool versions in the exact verbatim
 /// form each probe prints, and a candidate stack one chart version ahead
 /// of the baseline (which is the whole point of a comparison run).
+///
+/// **Fully populated on purpose**, including every field v1beta1 added.
+/// The golden file is documentation as much as it is a fixture, and a
+/// field left `null` in it teaches nothing about what the field looks
+/// like when a run actually has one — so this run side-loads the echo
+/// image and replays a Gateway suite, which is the configuration those
+/// three fields exist for.
 fn realistic_manifest() -> RunManifest {
     let mut fixture_hashes = BTreeMap::new();
     // Inserted out of order deliberately: the serialized document must
@@ -96,6 +109,7 @@ fn realistic_manifest() -> RunManifest {
                 "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"
                     .to_owned(),
             ),
+            images: Some(vec!["admissionlab-echo:dev".to_owned()]),
             components: vec![ComponentProvenance {
                 name: "kyverno".to_owned(),
                 version: "3.2.6".to_owned(),
@@ -109,17 +123,24 @@ fn realistic_manifest() -> RunManifest {
                 "sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed"
                     .to_owned(),
             ),
+            images: Some(vec!["admissionlab-echo:dev".to_owned()]),
             components: vec![ComponentProvenance {
                 name: "kyverno".to_owned(),
                 version: "3.3.0".to_owned(),
                 source_sha256: None,
             }],
         },
+        config_api_version: Some("admissionlab.io/v1alpha1".to_owned()),
         config_sha256: sha256_hex(b"apiVersion: admissionlab.io/v1alpha1\nkind: Lab\n"),
         fixture_hashes,
         expectations_sha256: Some(sha256_hex(b"expectations: []\n")),
         normalization_sha256: normalization_sha256(&sample_normalization()),
         policy_sha256: policy_sha256(&admissionlab_spec::PolicySpec::default()),
+        gateway: Some(GatewayProvenance {
+            routes: vec!["echo-a-root".to_owned(), "echo-b-prefix".to_owned()],
+            reconciliation_timeout_millis: 90_000,
+            endpoint_strategy: Some("serviceBySelector".to_owned()),
+        }),
         started_at: started(),
         completed_at: Some(completed()),
     }
@@ -222,9 +243,11 @@ fn top_level_keys_are_exactly_the_frozen_set() {
             "baseline",
             "candidate",
             "completedAt",
+            "configApiVersion",
             "configSha256",
             "expectationsSha256",
             "fixtureHashes",
+            "gateway",
             "host",
             "normalizationSha256",
             "policySha256",
@@ -582,10 +605,10 @@ fn deserializing_rejects_unknown_fields() {
 // ---------------------------------------------------------------------
 
 /// Renders the schema in the exact byte-for-byte form checked in at
-/// `schemas/run-manifest-v1alpha1.json`. Shared by the checker and the
+/// `schemas/run-manifest-v1beta1.json`. Shared by the checker and the
 /// regenerator so the two can never disagree with each other.
 fn render_schema() -> String {
-    let schema = run_manifest_v1alpha1_json_schema();
+    let schema = run_manifest_v1beta1_json_schema();
     let mut text =
         serde_json::to_string_pretty(&schema).expect("a schemars::Schema always serializes");
     text.push('\n');
@@ -594,7 +617,7 @@ fn render_schema() -> String {
 
 #[test]
 fn schema_matches_checked_in_file() {
-    let path = workspace_file("schemas/run-manifest-v1alpha1.json");
+    let path = workspace_file("schemas/run-manifest-v1beta1.json");
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "checked-in schema missing at {path:?} ({error}); generate it with \
@@ -604,7 +627,7 @@ fn schema_matches_checked_in_file() {
     assert_eq!(
         render_schema(),
         expected,
-        "generated schema no longer matches schemas/run-manifest-v1alpha1.json; regenerate it \
+        "generated schema no longer matches schemas/run-manifest-v1beta1.json; regenerate it \
          with `cargo test -p admissionlab-core --test run_manifest -- --ignored regenerate_schema_file`"
     );
 }
@@ -615,10 +638,10 @@ fn schema_generation_is_deterministic_across_runs() {
 }
 
 #[test]
-#[ignore = "run explicitly to (re)write schemas/run-manifest-v1alpha1.json after a deliberate model change"]
+#[ignore = "run explicitly to (re)write schemas/run-manifest-v1beta1.json after a deliberate model change"]
 fn regenerate_schema_file() {
     std::fs::write(
-        workspace_file("schemas/run-manifest-v1alpha1.json"),
+        workspace_file("schemas/run-manifest-v1beta1.json"),
         render_schema(),
     )
     .expect("write schema file");
@@ -629,7 +652,7 @@ fn regenerate_schema_file() {
 /// shape, so it must always be exactly what this crate currently writes.
 #[test]
 fn golden_manifest_matches_checked_in_file() {
-    let path = workspace_file("testdata/golden/run-manifest-alpha.json");
+    let path = workspace_file("testdata/golden/run-manifest-beta.json");
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "checked-in golden manifest missing at {path:?} ({error}); generate it with \
@@ -645,10 +668,10 @@ fn golden_manifest_matches_checked_in_file() {
 }
 
 #[test]
-#[ignore = "run explicitly to (re)write testdata/golden/run-manifest-alpha.json after a deliberate model change"]
+#[ignore = "run explicitly to (re)write testdata/golden/run-manifest-beta.json after a deliberate model change"]
 fn regenerate_golden_manifest() {
     std::fs::write(
-        workspace_file("testdata/golden/run-manifest-alpha.json"),
+        workspace_file("testdata/golden/run-manifest-beta.json"),
         render_manifest(&realistic_manifest()),
     )
     .expect("write golden manifest");

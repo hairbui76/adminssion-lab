@@ -25,7 +25,7 @@ use admissionlab_cli::pipeline::{
     Console, GatewaySuiteError, GatewaySuiteRunner, LabBackend, OutcomeCapture, RunRequest,
     SideGatewayOutcome, run_lab,
 };
-use admissionlab_core::run_manifest::SCHEMA_VERSION;
+use admissionlab_core::run_manifest::{SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS};
 use admissionlab_core::{
     ArtifactStore, CapturedFixture, ClusterDiagnostics, ClusterError, ClusterHandle,
     ClusterManager, ClusterSpec, ComponentProvenance, DoctorReport, EnvironmentProvenance,
@@ -140,6 +140,7 @@ fn manifest_for(config: &Path, component_version: &str) -> RunManifest {
         kubernetes_version: "1.31.0".to_owned(),
         node_image: NODE_IMAGE.to_owned(),
         node_image_digest: Some(NODE_DIGEST.to_owned()),
+        images: Some(Vec::new()),
         components: vec![ComponentProvenance {
             name: "setup".to_owned(),
             version: component_version.to_owned(),
@@ -161,11 +162,13 @@ fn manifest_for(config: &Path, component_version: &str) -> RunManifest {
         },
         baseline: environment(),
         candidate: environment(),
+        config_api_version: Some("admissionlab.io/v1alpha1".to_owned()),
         config_sha256: file_sha256(config).expect("hash config"),
         fixture_hashes: BTreeMap::new(),
         expectations_sha256: None,
         normalization_sha256: sha256_hex(b"normalization"),
         policy_sha256: sha256_hex(b"policy"),
+        gateway: None,
         started_at: SystemTime::UNIX_EPOCH,
         completed_at: Some(SystemTime::UNIX_EPOCH),
     }
@@ -674,8 +677,39 @@ fn a_manifest_that_is_not_one_refuses_with_the_path_it_read() {
         .assert()
         .code(2)
         .stderr(predicate::str::contains(
-            "is not a valid Admission Lab run manifest",
+            "is not a run manifest this build can reproduce",
         ));
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A manifest from a schema version this build does not read is refused
+/// before anything is provisioned, and the refusal names every version it
+/// *does* read (ROADMAP Task 7.3).
+///
+/// The CLI half of `admissionlab-core`'s own version dispatch: what this
+/// adds is that `admissionlab reproduce` goes through the versioned
+/// reader at all, so the message a user sees is the one that names the
+/// supported versions rather than a `serde` field complaint.
+#[test]
+fn a_manifest_from_an_unknown_schema_version_names_the_supported_versions() {
+    let dir = unique_dir("unknown-schema");
+    let config = write_lab(&dir);
+    let mut manifest = manifest_for(&config, "1");
+    manifest.schema_version = "admissionlab.io/run-manifest/v2".to_owned();
+    let path = write_manifest(&dir, &manifest);
+
+    let mut assertion = admissionlab()
+        .arg("reproduce")
+        .arg(&path)
+        .arg("--source-root")
+        .arg(&dir)
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("admissionlab.io/run-manifest/v2"));
+    for version in SUPPORTED_SCHEMA_VERSIONS {
+        assertion = assertion.stderr(predicate::str::contains(*version));
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }

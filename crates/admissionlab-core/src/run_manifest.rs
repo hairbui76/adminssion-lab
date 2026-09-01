@@ -60,6 +60,13 @@
 //! - [`ComponentProvenance::source_sha256`]. See that field's own
 //!   documentation for what is and is not obtainable today.
 //!
+//! Every field v1beta1 added is `Option` for a second, different reason:
+//! a v1alpha1 manifest is a real document this build still reads, and it
+//! cannot answer questions its writer was never asked. See "Two schema
+//! versions, one Rust type" below — `None` on a v1alpha1 manifest means
+//! "not recorded", and the manifest's own `schemaVersion` is what says
+//! which of the two `None` means here.
+//!
 //! # Canonical serialization, and what each `*_sha256` field hashes
 //!
 //! Four fields are digests, and a digest is only reproducible if the
@@ -155,14 +162,56 @@
 //!
 //! # Schema
 //!
-//! [`run_manifest_v1alpha1_json_schema`] generates
-//! `schemas/run-manifest-v1alpha1.json` from the same derives that govern
+//! [`run_manifest_v1beta1_json_schema`] generates
+//! `schemas/run-manifest-v1beta1.json` from the same derives that govern
 //! serialization, so the published schema can never describe a shape
 //! Admission Lab does not actually write. `tests/run_manifest.rs`
 //! regenerates it and compares byte-for-byte, exactly as
 //! `admissionlab-spec`'s `tests/schema.rs` does for the configuration
 //! schema; see that crate's `schema.rs` for the determinism argument,
 //! which applies here unchanged.
+//!
+//! `schemas/run-manifest-v1alpha1.json` is **frozen**, not generated: it
+//! describes the shape a v1alpha1 writer produced, and no Rust type
+//! writes that shape any more. It stays checked in because manifests in
+//! that shape still exist in users' artifact directories and this build
+//! still reads them, and `tests/run_manifest_beta.rs` keeps it honest by
+//! asserting the generated v1beta1 schema is a backward-compatible
+//! *superset* of it — every v1alpha1 property still present, every
+//! v1alpha1 requirement still required, and every addition optional.
+//! That is `docs/schema-migrations.md`'s pre-v1.0 compatibility rule as
+//! an executable test rather than a promise.
+//!
+//! # Two schema versions, one Rust type (Task 7.3)
+//!
+//! [`SCHEMA_VERSION`] is `admissionlab.io/run-manifest/v1beta1` and is
+//! the only version this crate ever *writes*. It reads both that and
+//! [`SCHEMA_VERSION_V1ALPHA1`], because a manifest is a record of
+//! something that already happened: refusing to reproduce a run because
+//! Admission Lab has since promoted its own provenance document would
+//! throw away exactly the artifact the document exists to preserve.
+//!
+//! [`read_run_manifest`] is the reader, and it dispatches on the
+//! document's own `schemaVersion` **before** deserializing the body:
+//!
+//! - `v1beta1` — read in full.
+//! - `v1alpha1` — read into the same type, with every field v1beta1 added
+//!   left `None`. A v1alpha1 document that carries a v1beta1-only field
+//!   is rejected rather than accepted leniently: it is not a document any
+//!   version of Admission Lab ever wrote, and guessing which half of it
+//!   to believe is the silent wrongness this whole module avoids.
+//! - anything else — [`ManifestReadError::UnsupportedSchemaVersion`],
+//!   naming every version this build supports.
+//!
+//! [`RunManifest::schema_version`] is preserved exactly as the document
+//! carried it rather than normalized to [`SCHEMA_VERSION`] on read, and
+//! that is what makes the `None`s above honest instead of ambiguous. In a
+//! v1beta1 manifest, [`RunManifest::gateway`] `= None` means "this run
+//! had no Gateway suite"; in a v1alpha1 manifest it means "the build that
+//! recorded this run could not say either way" (Global Constraint 15).
+//! A reader that needs to tell those apart has the version right there in
+//! the same value; a reader that normalized it away would have destroyed
+//! the only evidence of which claim it is holding.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -172,20 +221,44 @@ use admissionlab_spec::PolicySpec;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use thiserror::Error;
 
 use crate::artifact::{ArtifactError, ArtifactStore, RunPaths};
 use crate::ids::{FixtureId, RunId};
 use crate::tool::{DoctorReport, ToolName};
 
-/// The `schemaVersion` value every manifest this crate writes carries.
+/// The `schemaVersion` value every manifest this crate writes carries
+/// (ROADMAP Task 7.3).
 ///
 /// Namespaced and versioned the same way `admissionlab-report`'s own
-/// `SCHEMA_VERSION` is (`admissionlab.io/result/v1alpha1`), so a consumer
-/// holding an arbitrary Admission Lab JSON document can tell the two
-/// apart from this field alone. Like that one, `v1alpha1` is
-/// **experimental**: Alpha makes no compatibility promise across a
-/// version bump.
-pub const SCHEMA_VERSION: &str = "admissionlab.io/run-manifest/v1alpha1";
+/// `SCHEMA_VERSION` is, so a consumer holding an arbitrary Admission Lab
+/// JSON document can tell the two apart from this field alone.
+///
+/// Promoted from `v1alpha1` for Public Beta. Beta's compatibility rule —
+/// written out in full in `docs/schema-migrations.md` — is that optional
+/// fields may be added, existing field semantics may never change
+/// silently, and a removal or rename requires another version bump with a
+/// migration note. The v1alpha1 → v1beta1 step obeys it: nothing was
+/// removed, nothing was renamed, nothing changed meaning, and every
+/// addition is optional.
+pub const SCHEMA_VERSION: &str = "admissionlab.io/run-manifest/v1beta1";
+
+/// The previous `schemaVersion` this build still **reads**
+/// ([`read_run_manifest`]) and never writes.
+///
+/// Kept as a named constant rather than spelled inline at the one match
+/// arm that needs it, because it also appears in the supported-version
+/// list a rejection message prints and in `docs/schema-migrations.md`'s
+/// version table: three places that must agree, and one of them is a
+/// user-visible string.
+pub const SCHEMA_VERSION_V1ALPHA1: &str = "admissionlab.io/run-manifest/v1alpha1";
+
+/// Every `schemaVersion` [`read_run_manifest`] accepts, newest first.
+///
+/// Newest first because this is also the order a rejection message lists
+/// them in, and the version a user most likely wants is the one this
+/// build writes.
+pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &[SCHEMA_VERSION, SCHEMA_VERSION_V1ALPHA1];
 
 /// Everything needed to say what produced one run, and (Task 5.3) to
 /// attempt reproducing it.
@@ -238,6 +311,31 @@ pub struct RunManifest {
     /// The candidate environment as provisioned.
     #[serde(rename = "candidate")]
     pub candidate: EnvironmentProvenance,
+    /// The `apiVersion` of the lab configuration document this run was
+    /// driven by, verbatim (for example
+    /// `"admissionlab.io/v1alpha1"`) — v1beta1, honestly `None` on a
+    /// v1alpha1 manifest.
+    ///
+    /// # Why a byte digest is not enough
+    ///
+    /// [`RunManifest::config_sha256`] already pins the configuration's
+    /// content, and two documents that differ in their `apiVersion` line
+    /// necessarily differ in that digest — so this field can never
+    /// contradict it and is not what catches a changed configuration.
+    /// What it adds is **self-description**: Admission Lab now accepts
+    /// more than one configuration `apiVersion`, and a digest says which
+    /// bytes were read without saying which vocabulary they were read
+    /// under. A build that has since dropped support for a version can
+    /// therefore say so from the manifest alone — "this run used
+    /// `admissionlab.io/v1alpha1`, which this build no longer loads" —
+    /// instead of surfacing a parse error from inside
+    /// `admissionlab_spec::load_lab` that reads as a broken file.
+    ///
+    /// Recorded verbatim rather than parsed into a version type, for the
+    /// same reason [`ToolProvenance`]'s versions are: the manifest should
+    /// say what the document said.
+    #[serde(rename = "configApiVersion", default)]
+    pub config_api_version: Option<String>,
     /// SHA-256 (lowercase hex) of the lab configuration file's own bytes.
     /// See this module's "Canonical serialization" section.
     #[serde(rename = "configSha256")]
@@ -266,6 +364,11 @@ pub struct RunManifest {
     /// section, and [`policy_sha256`] for the exact encoding.
     #[serde(rename = "policySha256")]
     pub policy_sha256: String,
+    /// The Gateway behavior suite this run replayed, or `None` — v1beta1,
+    /// and see [`GatewayProvenance`] for what `None` means at each schema
+    /// version.
+    #[serde(rename = "gateway", default)]
+    pub gateway: Option<GatewayProvenance>,
     /// When the run began.
     #[serde(rename = "startedAt", with = "rfc3339")]
     #[schemars(with = "String")]
@@ -277,6 +380,35 @@ pub struct RunManifest {
     #[serde(rename = "completedAt", with = "rfc3339_option")]
     #[schemars(with = "Option<String>")]
     pub completed_at: Option<SystemTime>,
+}
+
+impl RunManifest {
+    /// The wire name of the first v1beta1-only field this value carries,
+    /// or `None` if it carries none.
+    ///
+    /// The whole of "what v1beta1 added", in one place a compiler can
+    /// point at. [`read_run_manifest`] uses it to refuse a v1alpha1
+    /// document that carries a newer field; the next version bump adds
+    /// its own equivalent rather than editing this one, because this
+    /// answers a question about v1beta1 specifically.
+    ///
+    /// Checks presence, not truthfulness: `Some(vec![])` for
+    /// [`EnvironmentProvenance::images`] counts as present, because the
+    /// distinction between "recorded, and there were none" and "not
+    /// recorded" is exactly what that field's `Option` exists to carry.
+    #[must_use]
+    fn v1beta1_only_field(&self) -> Option<&'static str> {
+        if self.config_api_version.is_some() {
+            return Some("configApiVersion");
+        }
+        if self.gateway.is_some() {
+            return Some("gateway");
+        }
+        if self.baseline.images.is_some() || self.candidate.images.is_some() {
+            return Some("images");
+        }
+        None
+    }
 }
 
 /// Whether the run a manifest describes is still going, finished, or
@@ -498,6 +630,38 @@ pub struct EnvironmentProvenance {
     /// this module's "Honest absence" section.
     #[serde(rename = "nodeImageDigest")]
     pub node_image_digest: Option<String>,
+    /// The container images this side side-loaded from the operator's
+    /// **local** image store before anything was installed
+    /// (`admissionlab_spec::EnvironmentSpec::images`), in the order they
+    /// were loaded — v1beta1, honestly `None` on a v1alpha1 manifest.
+    ///
+    /// # Why this is provenance and not configuration trivia
+    ///
+    /// Every other artifact a run depends on is fetchable from somewhere:
+    /// a node image from a registry, a chart from a repository. These are
+    /// not. A side-loaded image is, by construction, one that a registry
+    /// *cannot* answer for — Admission Lab's own Gateway suites side-load
+    /// `admissionlab-echo:dev`, which `scripts/build-test-images.sh`
+    /// builds locally and never pushes — so it is the one input a
+    /// reproduction on another machine cannot obtain by asking. Recording
+    /// the names is what turns "the reproduction died with
+    /// `ErrImageNeverPull`" into "the recorded run loaded
+    /// `admissionlab-echo:dev`, and this machine has no such image".
+    ///
+    /// It is also the input with the *weakest* pin in the whole document:
+    /// a local tag is mutable and carries no digest, so two runs can name
+    /// the same image and load different bytes. Recording the names does
+    /// not fix that, and does not pretend to — it makes the un-pinnable
+    /// dependency visible, which is the same thing
+    /// [`EnvironmentProvenance::node_image_digest`] does for a node image
+    /// that was never digest-pinned.
+    ///
+    /// `Some([])` and `None` are different claims: the first is "this
+    /// side side-loaded nothing", which is the overwhelmingly common
+    /// case and a real observation; the second is "the build that
+    /// recorded this run did not record it" (Global Constraint 15).
+    #[serde(rename = "images", default)]
+    pub images: Option<Vec<String>>,
     /// This side's components, in install order. Empty before the install
     /// stage has run — Task 5.2's `stage` field is what distinguishes
     /// "nothing installed yet" from "this side genuinely has no
@@ -535,6 +699,101 @@ pub struct ComponentProvenance {
     /// That is the seam to fill this field through when it is made.
     #[serde(rename = "sourceSha256")]
     pub source_sha256: Option<String>,
+}
+
+/// The Gateway behavior suite a run replayed, as far as this document may
+/// describe it (ROADMAP Task 7.3; the suite itself is Phase 6).
+///
+/// # Why a v1alpha1 manifest could not have said this
+///
+/// Phase 6 added a second kind of evidence to a run.
+/// [`RunManifest::fixture_hashes`] enumerates the admission corpus, and
+/// before Phase 6 that *was* the corpus — so a manifest listing it had
+/// listed everything the run replayed. A Gateway suite adds route
+/// contracts, which are compared and reported exactly like fixtures
+/// (`admissionlab-cli`'s `pipeline::compare::gateway_fixture_id` gives
+/// each one a report identity from its own id) and appear nowhere in
+/// `fixture_hashes`. A v1alpha1 manifest of a Gateway run therefore
+/// under-describes what ran, and the fix is a version bump, not a
+/// reinterpretation of `fixture_hashes`.
+///
+/// # What `None` means, at each version
+///
+/// [`RunManifest::gateway`] is `None` on a **v1beta1** manifest exactly
+/// when the run's configuration had no `gateway:` section — the run never
+/// entered [`RunStage::GatewaySuite`] at all. On a **v1alpha1** manifest
+/// it means "not recorded", which is a different claim; the manifest's
+/// own [`RunManifest::schema_version`] is what distinguishes them (see
+/// this module's "Two schema versions, one Rust type" section).
+///
+/// # What is deliberately not here
+///
+/// - **The suite's manifest files.** `GatewaySuiteSpec::manifests` is a
+///   list of [`PathBuf`]s, and no type in this module may hold a path
+///   (see this module's "What this document may never contain"). Their
+///   *content* is genuinely unrecorded — it is not covered by
+///   [`RunManifest::config_sha256`] either, since they are separate files
+///   — which is a real reproduction gap and an honest one to leave
+///   visible rather than paper over with a path-free hash this crate has
+///   nothing to compute from.
+/// - **A Gateway API version or a recipe version.** The Gateway API CRDs
+///   enter a lab as an ordinary component, so their pinned version is
+///   already in that side's [`ComponentProvenance`]; and
+///   `admissionlab.yaml` performs no recipe resolution at all
+///   (`ComponentSpec::recipe` is carried through unresolved), so there is
+///   no recipe version a run could truthfully record. Recording either
+///   would be a guess wearing a citation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GatewayProvenance {
+    /// Every route contract's id, in the order the configuration declared
+    /// them.
+    ///
+    /// Ids rather than the contracts themselves: an id is what the
+    /// comparison, the report, and the policy all key on, and everything
+    /// else about a contract (its Gateway, its listener, its probes)
+    /// lives in the configuration whose digest this document already
+    /// records. Declaration order is preserved because it is the order
+    /// the run observed them in.
+    #[serde(rename = "routes")]
+    pub routes: Vec<String>,
+    /// How long the run was willing to wait for a route to reach a
+    /// stable, current status, in whole milliseconds
+    /// (`GatewaySuiteSpec::reconciliation_timeout`).
+    ///
+    /// Recorded because it is the one Gateway input that can differ
+    /// between two runs of the *same* configuration: a suite that omits
+    /// `reconciliationTimeout` inherits `admissionlab-spec`'s own
+    /// default, and a build that changes that default changes whether a
+    /// slow route is recorded as converged. That is precisely the
+    /// "resolution behavior changed between builds" case
+    /// [`crate::ReproductionPin::apply`] exists to make loud, and it
+    /// cannot be made loud from a value nothing wrote down.
+    ///
+    /// Whole milliseconds, matching the unit the field is written in in
+    /// YAML, rather than serde's `{secs, nanos}` shape.
+    #[serde(rename = "reconciliationTimeoutMillis")]
+    pub reconciliation_timeout_millis: u64,
+    /// How the run located the `Service` fronting each Gateway's data
+    /// plane, as the strategy's own discriminator
+    /// (`"serviceBySelector"` or `"serviceByName"`), or `None` when the
+    /// suite declared no endpoint at all.
+    ///
+    /// `None` is the load-bearing case, and it is why a bare "the suite
+    /// ran" is not enough: a suite with no `gatewayEndpoint` sends **no
+    /// traffic probe**, and every declared probe is recorded as an
+    /// explicit skip. Two runs of one configuration therefore produce
+    /// entirely different evidence depending on this one value, and a
+    /// reader comparing them needs to see it without re-reading the lab
+    /// file.
+    ///
+    /// The discriminator only — never the namespace, selector, or port.
+    /// Those are configuration detail this document's digest already
+    /// covers, and the question this field answers is "was traffic
+    /// observed, and by which mechanism", not "how was the Service
+    /// addressed".
+    #[serde(rename = "endpointStrategy", default)]
+    pub endpoint_strategy: Option<String>,
 }
 
 /// Splits a node image reference into its tag part and its digest part.
@@ -944,9 +1203,152 @@ impl RunManifestWriter {
 /// See this module's "Schema" section, and `admissionlab-spec`'s
 /// `schema.rs` for why generating this twice always produces
 /// byte-for-byte identical output.
+///
+/// There is deliberately no `run_manifest_v1alpha1_json_schema`
+/// counterpart. A generator can only ever describe the type that exists
+/// now, so a v1alpha1 generator would silently start describing v1beta1
+/// the moment a field was added — which is exactly how a "frozen" schema
+/// stops being frozen. `schemas/run-manifest-v1alpha1.json` is a
+/// checked-in artifact with no generator behind it, and the test that
+/// keeps it meaningful compares it against *this* schema rather than
+/// regenerating it (see this module's "Schema" section).
 #[must_use]
-pub fn run_manifest_v1alpha1_json_schema() -> schemars::Schema {
+pub fn run_manifest_v1beta1_json_schema() -> schemars::Schema {
     schemars::schema_for!(RunManifest)
+}
+
+/// Why a run manifest document could not be read (ROADMAP Task 7.3).
+///
+/// Separate from [`crate::ReproduceError`], which is about a manifest
+/// that parsed fine and disagrees with a source tree. This is about the
+/// bytes.
+#[derive(Debug, Error)]
+pub enum ManifestReadError {
+    /// The document is not JSON, or carries no readable `schemaVersion`.
+    ///
+    /// Reported before any field-level complaint, because a document this
+    /// reader cannot even find a version in is one it cannot say anything
+    /// else about honestly.
+    #[error("not a run manifest: {source}")]
+    NotAManifest {
+        /// The underlying parse failure.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// The `schemaVersion` names a schema this build does not read.
+    ///
+    /// Lists every supported version, because the actionable question a
+    /// user has here is "which Admission Lab do I need" and a bare
+    /// "unsupported" answers none of it.
+    #[error(
+        "run manifest declares schemaVersion {found:?}, which this build of Admission Lab does \
+         not read; it reads {}",
+        supported.join(", ")
+    )]
+    UnsupportedSchemaVersion {
+        /// The `schemaVersion` the document carries.
+        found: String,
+        /// Every version this build reads, newest first
+        /// ([`SUPPORTED_SCHEMA_VERSIONS`]).
+        supported: &'static [&'static str],
+    },
+    /// The `schemaVersion` is supported, but the document does not match
+    /// that version's shape.
+    #[error(
+        "run manifest declares schemaVersion {schema_version:?} but does not match it: {source}"
+    )]
+    Malformed {
+        /// The version the document claimed.
+        schema_version: String,
+        /// The underlying deserialization failure.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// A v1alpha1 document carries a field that only exists in v1beta1.
+    ///
+    /// No version of Admission Lab ever wrote such a document, so it was
+    /// assembled or edited by hand, and there is no honest way to read
+    /// it: believing the field contradicts the version it is filed
+    /// under, and ignoring it discards a value someone deliberately put
+    /// there. Named rather than generic, so the fix (correct the
+    /// `schemaVersion`, or drop the field) is obvious from the message.
+    #[error(
+        "run manifest declares schemaVersion {schema_version:?} but carries {field:?}, which \
+         exists only in {beta:?}"
+    )]
+    FieldFromNewerVersion {
+        /// The version the document claimed.
+        schema_version: String,
+        /// The offending field, in its wire spelling.
+        field: &'static str,
+        /// The version that field belongs to.
+        beta: &'static str,
+    },
+}
+
+/// Just enough of any run manifest to learn which version it is.
+///
+/// Deliberately *not* `deny_unknown_fields`: every other key is the rest
+/// of the document, which this pass has no business judging yet.
+#[derive(Deserialize)]
+struct SchemaVersionProbe {
+    #[serde(rename = "schemaVersion")]
+    schema_version: String,
+}
+
+/// Reads a run manifest of any supported schema version.
+///
+/// **The one entry point for turning `run.json` bytes into a
+/// [`RunManifest`].** See this module's "Two schema versions, one Rust
+/// type" section for the dispatch and for what the v1alpha1 path leaves
+/// `None`. A caller that reached for `serde_json::from_str::<RunManifest>`
+/// instead would read a v1alpha1 document as though it were v1beta1 —
+/// silently, and with a `schemaVersion` field sitting right there saying
+/// otherwise.
+///
+/// # Errors
+///
+/// Returns [`ManifestReadError::NotAManifest`] if `json` is not JSON with
+/// a string `schemaVersion`, [`ManifestReadError::UnsupportedSchemaVersion`]
+/// if that version is not one of [`SUPPORTED_SCHEMA_VERSIONS`],
+/// [`ManifestReadError::Malformed`] if the body does not match the
+/// version it claims, and [`ManifestReadError::FieldFromNewerVersion`] if
+/// a v1alpha1 document carries a v1beta1-only field.
+pub fn read_run_manifest(json: &str) -> Result<RunManifest, ManifestReadError> {
+    let probe: SchemaVersionProbe =
+        serde_json::from_str(json).map_err(|source| ManifestReadError::NotAManifest { source })?;
+
+    if !SUPPORTED_SCHEMA_VERSIONS.contains(&probe.schema_version.as_str()) {
+        return Err(ManifestReadError::UnsupportedSchemaVersion {
+            found: probe.schema_version,
+            supported: SUPPORTED_SCHEMA_VERSIONS,
+        });
+    }
+
+    // One deserialization for both versions, because v1beta1 *is*
+    // v1alpha1 plus optional fields — that is the compatibility rule
+    // `docs/schema-migrations.md` states, and this is where it pays for
+    // itself. What the v1alpha1 path adds is the strictness a shared type
+    // cannot express: `#[serde(default)]` makes the new fields optional
+    // for every reader, so only an explicit check can refuse them on a
+    // document that predates them.
+    let manifest: RunManifest =
+        serde_json::from_str(json).map_err(|source| ManifestReadError::Malformed {
+            schema_version: probe.schema_version.clone(),
+            source,
+        })?;
+
+    if probe.schema_version == SCHEMA_VERSION_V1ALPHA1
+        && let Some(field) = manifest.v1beta1_only_field()
+    {
+        return Err(ManifestReadError::FieldFromNewerVersion {
+            schema_version: probe.schema_version,
+            field,
+            beta: SCHEMA_VERSION,
+        });
+    }
+
+    Ok(manifest)
 }
 
 /// RFC 3339 encoding for a required [`SystemTime`] field. See this

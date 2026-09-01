@@ -429,6 +429,7 @@ programming need durable objects — which is one reason Gateway support is
 | [`docs/fixtures.md`](docs/fixtures.md) | Fixture format, discovery globs, identity and hashing, the setup-outside-the-glob pattern, and the dogfood webhook's annotation vocabulary |
 | [`docs/github-action.md`](docs/github-action.md) | The composite action: pinned/checksummed installation, every input, the artifacts it uploads on a failing run, exit-code behavior, and what the job summary says |
 | [`docs/recipes.md`](docs/recipes.md) | What a recipe is, the certified set, the capability model, override directories, and why recipes may never classify regressions |
+| [`docs/schema-migrations.md`](docs/schema-migrations.md) | The three versioned document families, the pre-v1.0 compatibility rule, how a reader must behave on a version it does not know, and the migration note for every version step |
 | [`docs/security.md`](docs/security.md) | Threat model, the trust boundary around third-party charts, exactly what is redacted and what is not, and the audit-policy Secret exclusion |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | Real failure modes and their fixes, keyed to the exit codes above |
 

@@ -99,7 +99,7 @@ use std::time::Duration;
 use admissionlab_core::{
     ArtifactStore, DiscoveredFixture, DoctorReport, ReproduceError, ReproducePlan, ReproductionPin,
     RunDisposition, RunManifest, RunPaths, plan_reproduction, plan_reproduction_from_config,
-    verify_effective_digests, verify_fixtures,
+    read_run_manifest, verify_effective_digests, verify_fixtures,
 };
 use admissionlab_fixtures::{FixtureSource, discover_fixtures};
 use admissionlab_report::TerminalOptions;
@@ -390,12 +390,22 @@ fn plan(manifest: &RunManifest, args: &ReproduceArgs) -> Result<ReproducePlan, R
     }
 }
 
-/// Reads and parses the run manifest.
+/// Reads and parses the run manifest, at any schema version this build
+/// supports.
+///
+/// Goes through [`read_run_manifest`] rather than `serde_json` directly,
+/// which is what makes `admissionlab reproduce` work on a manifest older
+/// than the running build (ROADMAP Task 7.3): that function dispatches on
+/// the document's own `schemaVersion` and leaves the fields a v1alpha1
+/// writer never recorded honestly absent. Its errors already name the
+/// problem precisely — including every schema version this build reads,
+/// when the document's is not one of them — so this only adds which file
+/// they are about.
 ///
 /// `RunManifest` is `deny_unknown_fields`, so a document carrying a field
-/// this build does not know fails here rather than being silently read
-/// with that field ignored — which for a provenance document would mean
-/// reproducing from a record this build only partly understood.
+/// this build does not know still fails here rather than being silently
+/// read with that field ignored — which for a provenance document would
+/// mean reproducing from a record this build only partly understood.
 fn read_manifest(path: &Path, err: &mut dyn std::io::Write) -> Result<RunManifest, RunDisposition> {
     let text = std::fs::read_to_string(path).map_err(|error| {
         let _ = writeln!(
@@ -405,10 +415,10 @@ fn read_manifest(path: &Path, err: &mut dyn std::io::Write) -> Result<RunManifes
         );
         RunDisposition::InvalidInput
     })?;
-    serde_json::from_str(&text).map_err(|error| {
+    read_run_manifest(&text).map_err(|error| {
         let _ = writeln!(
             err,
-            "{PREFIX} {} is not a valid Admission Lab run manifest: {error}",
+            "{PREFIX} {} is not a run manifest this build can reproduce: {error}",
             path.display()
         );
         RunDisposition::InvalidInput

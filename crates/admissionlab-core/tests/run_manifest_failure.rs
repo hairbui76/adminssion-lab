@@ -202,6 +202,7 @@ fn initial_manifest(
             kubernetes_version: kubernetes.to_owned(),
             node_image,
             node_image_digest,
+            images: Some(Vec::new()),
             components: vec![ComponentProvenance {
                 name: "configured".to_owned(),
                 version: "1.0.0".to_owned(),
@@ -225,6 +226,7 @@ fn initial_manifest(
         },
         baseline: environment(&lab.baseline.kubernetes, baseline_image),
         candidate: environment(&lab.candidate.kubernetes, candidate_image),
+        config_api_version: Some("admissionlab.io/v1alpha1".to_owned()),
         config_sha256: sha256_hex(b"apiVersion: admissionlab.io/v1alpha1\n"),
         fixture_hashes: BTreeMap::new(),
         expectations_sha256: None,
@@ -234,6 +236,7 @@ fn initial_manifest(
             user: Vec::new(),
         }),
         policy_sha256: policy_sha256(&lab.policy),
+        gateway: None,
         started_at: SystemTime::UNIX_EPOCH + Duration::new(1_788_264_000, 0),
         completed_at: None,
     }

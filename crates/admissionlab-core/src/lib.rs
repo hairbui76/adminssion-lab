@@ -42,10 +42,11 @@ pub use run::{
     StackInstallFailure, StackInstaller, preserved_cluster_report,
 };
 pub use run_manifest::{
-    ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, HostProvenance,
-    NormalizationRuleRecord, RunManifest, RunManifestWriter, RunStage, RunStatus, ToolProvenance,
-    canonical_sha256, file_sha256, normalization_sha256, policy_sha256,
-    run_manifest_v1alpha1_json_schema, sha256_hex, split_node_image_reference,
+    ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, GatewayProvenance,
+    HostProvenance, ManifestReadError, NormalizationRuleRecord, RunManifest, RunManifestWriter,
+    RunStage, RunStatus, SUPPORTED_SCHEMA_VERSIONS, ToolProvenance, canonical_sha256, file_sha256,
+    normalization_sha256, policy_sha256, read_run_manifest, run_manifest_v1beta1_json_schema,
+    sha256_hex, split_node_image_reference,
 };
 pub use side::Side;
 pub use timing::{

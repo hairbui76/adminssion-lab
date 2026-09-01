@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "RunManifest",
+  "description": "Everything needed to say what produced one run, and (Task 5.3) to\nattempt reproducing it.\n\nSee this module's documentation for what this document may never\ncontain, for where each `*_sha256` digest's bytes come from, and for\nthe pinned timestamp encoding.\n\n# No `Default`\n\nDeliberately absent, and not an oversight: every field here is\n*evidence*, and a defaulted manifest would be a document full of\nempty strings asserting things nothing observed. There is no\nconstructor either — a caller fills the struct literally, so adding a\nfield is a compile error at every construction site rather than a\nsilently-defaulted blank.",
+  "type": "object",
+  "properties": {
+    "admissionlabVersion": {
+      "description": "The Admission Lab version that produced this run, as its binary\nreports it.",
+      "type": "string"
+    },
+    "baseline": {
+      "description": "The baseline environment as provisioned.",
+      "$ref": "#/$defs/EnvironmentProvenance"
+    },
+    "candidate": {
+      "description": "The candidate environment as provisioned.",
+      "$ref": "#/$defs/EnvironmentProvenance"
+    },
+    "completedAt": {
+      "description": "When the run finished, or `None` while it is still running or if\nit failed before finishing. Task 5.2 makes this the load-bearing\nsignal that a manifest describes an *incomplete* run, so it is\nnever filled speculatively.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "configApiVersion": {
+      "description": "The `apiVersion` of the lab configuration document this run was\ndriven by, verbatim (for example\n`\"admissionlab.io/v1alpha1\"`) — v1beta1, honestly `None` on a\nv1alpha1 manifest.\n\n# Why a byte digest is not enough\n\n[`RunManifest::config_sha256`] already pins the configuration's\ncontent, and two documents that differ in their `apiVersion` line\nnecessarily differ in that digest — so this field can never\ncontradict it and is not what catches a changed configuration.\nWhat it adds is **self-description**: Admission Lab now accepts\nmore than one configuration `apiVersion`, and a digest says which\nbytes were read without saying which vocabulary they were read\nunder. A build that has since dropped support for a version can\ntherefore say so from the manifest alone — \"this run used\n`admissionlab.io/v1alpha1`, which this build no longer loads\" —\ninstead of surfacing a parse error from inside\n`admissionlab_spec::load_lab` that reads as a broken file.\n\nRecorded verbatim rather than parsed into a version type, for the\nsame reason [`ToolProvenance`]'s versions are: the manifest should\nsay what the document said.",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "configSha256": {
+      "description": "SHA-256 (lowercase hex) of the lab configuration file's own bytes.\nSee this module's \"Canonical serialization\" section.",
+      "type": "string"
+    },
+    "expectationsSha256": {
+      "description": "SHA-256 (lowercase hex) of the expectations file's own bytes, or\n`None` when the configuration declared no `expectationsFile`.\n`None` here means \"there was no such file\", which is a different\nclaim from \"there was one and we could not read it\" — the latter\nfails the run before a manifest is ever completed.",
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "fixtureHashes": {
+      "description": "One SHA-256 (lowercase hex) per replayed fixture, keyed by\nfixture identifier and therefore written in identifier order (see\n[`FixtureId`]'s own `Ord` note) rather than discovery order.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "gateway": {
+      "description": "The Gateway behavior suite this run replayed, or `None` — v1beta1,\nand see [`GatewayProvenance`] for what `None` means at each schema\nversion.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GatewayProvenance"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "host": {
+      "description": "The machine the run executed on.",
+      "$ref": "#/$defs/HostProvenance"
+    },
+    "normalizationSha256": {
+      "description": "SHA-256 (lowercase hex) of the canonical encoding of the\n*effective* normalization profile ([`EffectiveNormalization`]) —\nbuilt-in rules plus whatever the run's recipes and the user\ncontributed. See this module's \"Canonical serialization\" section.",
+      "type": "string"
+    },
+    "policySha256": {
+      "description": "SHA-256 (lowercase hex) of the canonical encoding of the effective\nregression policy. See this module's \"Canonical serialization\"\nsection, and [`policy_sha256`] for the exact encoding.",
+      "type": "string"
+    },
+    "runId": {
+      "description": "The run this manifest describes.",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "description": "Always [`SCHEMA_VERSION`] for documents this crate writes; kept as\na field rather than implied so a reader that only has the file can\ntell what it is holding.",
+      "type": "string"
+    },
+    "stage": {
+      "description": "Where this run got to — the last stage that completed while it is\nin progress, or the stage that failed once it has (Task 5.2). See\n[`RunStage`].",
+      "$ref": "#/$defs/RunStage"
+    },
+    "startedAt": {
+      "description": "When the run began.",
+      "type": "string"
+    },
+    "status": {
+      "description": "Whether this run is still going, finished, or failed (Task 5.2).",
+      "$ref": "#/$defs/RunStatus"
+    },
+    "tools": {
+      "description": "The external tool versions this run actually used.",
+      "$ref": "#/$defs/ToolProvenance"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "admissionlabVersion",
+    "status",
+    "stage",
+    "host",
+    "tools",
+    "baseline",
+    "candidate",
+    "configSha256",
+    "fixtureHashes",
+    "normalizationSha256",
+    "policySha256",
+    "startedAt"
+  ],
+  "$defs": {
+    "ComponentProvenance": {
+      "description": "One installed component's identity.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The component's name, as written in the lab configuration.",
+          "type": "string"
+        },
+        "sourceSha256": {
+          "description": "A content hash of the component's *source*, when one is\nobtainable, and `None` otherwise — never `\"\"`.\n\n`None` for every component today, and that is honest rather than\nunimplemented. A pinned Helm chart's content hash is not knowable\nwithout fetching and hashing the chart, which no stage of a run\ncurrently does; a raw-manifests component *does* have one —\n`admissionlab_installer::ManifestBundle::source_hash`, computed at\ninstall time — but that value does not cross the\n[`crate::StackInstaller`] boundary into\n[`crate::InstalledComponent`], and widening that trait is\n`admissionlab-installer`'s change to make, not this module's.\nThat is the seam to fill this field through when it is made.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "version": {
+          "description": "The version actually installed. For a Helm component this is the\npinned chart version (`admissionlab-spec` guarantees a Helm\nversion is an exact pin, never a floating range); after the\ninstall stage it is `InstalledComponent::resolved_version`, which\nthe installer confirms against the cluster where it can.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "EnvironmentProvenance": {
+      "description": "One side's environment, as provisioned rather than as requested.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "This side's components, in install order. Empty before the install\nstage has run — Task 5.2's `stage` field is what distinguishes\n\"nothing installed yet\" from \"this side genuinely has no\ncomponents\".",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentProvenance"
+          }
+        },
+        "images": {
+          "description": "The container images this side side-loaded from the operator's\n**local** image store before anything was installed\n(`admissionlab_spec::EnvironmentSpec::images`), in the order they\nwere loaded — v1beta1, honestly `None` on a v1alpha1 manifest.\n\n# Why this is provenance and not configuration trivia\n\nEvery other artifact a run depends on is fetchable from somewhere:\na node image from a registry, a chart from a repository. These are\nnot. A side-loaded image is, by construction, one that a registry\n*cannot* answer for — Admission Lab's own Gateway suites side-load\n`admissionlab-echo:dev`, which `scripts/build-test-images.sh`\nbuilds locally and never pushes — so it is the one input a\nreproduction on another machine cannot obtain by asking. Recording\nthe names is what turns \"the reproduction died with\n`ErrImageNeverPull`\" into \"the recorded run loaded\n`admissionlab-echo:dev`, and this machine has no such image\".\n\nIt is also the input with the *weakest* pin in the whole document:\na local tag is mutable and carries no digest, so two runs can name\nthe same image and load different bytes. Recording the names does\nnot fix that, and does not pretend to — it makes the un-pinnable\ndependency visible, which is the same thing\n[`EnvironmentProvenance::node_image_digest`] does for a node image\nthat was never digest-pinned.\n\n`Some([])` and `None` are different claims: the first is \"this\nside side-loaded nothing\", which is the overwhelmingly common\ncase and a real observation; the second is \"the build that\nrecorded this run did not record it\" (Global Constraint 15).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "default": null,
+          "items": {
+            "type": "string"
+          }
+        },
+        "kubernetesVersion": {
+          "description": "The Kubernetes version this side ran, as configured and resolved\n(for example `\"1.36.4\"`).",
+          "type": "string"
+        },
+        "nodeImage": {
+          "description": "The node image reference **without** its digest (for example\n`\"kindest/node:v1.36.4\"`), as split out by\n[`split_node_image_reference`].",
+          "type": "string"
+        },
+        "nodeImageDigest": {
+          "description": "The node image's content digest (for example `\"sha256:099e04...\"`),\nor `None` when the backend did not digest-pin the reference. See\nthis module's \"Honest absence\" section.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kubernetesVersion",
+        "nodeImage",
+        "components"
+      ]
+    },
+    "GatewayProvenance": {
+      "description": "The Gateway behavior suite a run replayed, as far as this document may\ndescribe it (ROADMAP Task 7.3; the suite itself is Phase 6).\n\n# Why a v1alpha1 manifest could not have said this\n\nPhase 6 added a second kind of evidence to a run.\n[`RunManifest::fixture_hashes`] enumerates the admission corpus, and\nbefore Phase 6 that *was* the corpus — so a manifest listing it had\nlisted everything the run replayed. A Gateway suite adds route\ncontracts, which are compared and reported exactly like fixtures\n(`admissionlab-cli`'s `pipeline::compare::gateway_fixture_id` gives\neach one a report identity from its own id) and appear nowhere in\n`fixture_hashes`. A v1alpha1 manifest of a Gateway run therefore\nunder-describes what ran, and the fix is a version bump, not a\nreinterpretation of `fixture_hashes`.\n\n# What `None` means, at each version\n\n[`RunManifest::gateway`] is `None` on a **v1beta1** manifest exactly\nwhen the run's configuration had no `gateway:` section — the run never\nentered [`RunStage::GatewaySuite`] at all. On a **v1alpha1** manifest\nit means \"not recorded\", which is a different claim; the manifest's\nown [`RunManifest::schema_version`] is what distinguishes them (see\nthis module's \"Two schema versions, one Rust type\" section).\n\n# What is deliberately not here\n\n- **The suite's manifest files.** `GatewaySuiteSpec::manifests` is a\n  list of [`PathBuf`]s, and no type in this module may hold a path\n  (see this module's \"What this document may never contain\"). Their\n  *content* is genuinely unrecorded — it is not covered by\n  [`RunManifest::config_sha256`] either, since they are separate files\n  — which is a real reproduction gap and an honest one to leave\n  visible rather than paper over with a path-free hash this crate has\n  nothing to compute from.\n- **A Gateway API version or a recipe version.** The Gateway API CRDs\n  enter a lab as an ordinary component, so their pinned version is\n  already in that side's [`ComponentProvenance`]; and\n  `admissionlab.yaml` performs no recipe resolution at all\n  (`ComponentSpec::recipe` is carried through unresolved), so there is\n  no recipe version a run could truthfully record. Recording either\n  would be a guess wearing a citation.",
+      "type": "object",
+      "properties": {
+        "endpointStrategy": {
+          "description": "How the run located the `Service` fronting each Gateway's data\nplane, as the strategy's own discriminator\n(`\"serviceBySelector\"` or `\"serviceByName\"`), or `None` when the\nsuite declared no endpoint at all.\n\n`None` is the load-bearing case, and it is why a bare \"the suite\nran\" is not enough: a suite with no `gatewayEndpoint` sends **no\ntraffic probe**, and every declared probe is recorded as an\nexplicit skip. Two runs of one configuration therefore produce\nentirely different evidence depending on this one value, and a\nreader comparing them needs to see it without re-reading the lab\nfile.\n\nThe discriminator only — never the namespace, selector, or port.\nThose are configuration detail this document's digest already\ncovers, and the question this field answers is \"was traffic\nobserved, and by which mechanism\", not \"how was the Service\naddressed\".",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "reconciliationTimeoutMillis": {
+          "description": "How long the run was willing to wait for a route to reach a\nstable, current status, in whole milliseconds\n(`GatewaySuiteSpec::reconciliation_timeout`).\n\nRecorded because it is the one Gateway input that can differ\nbetween two runs of the *same* configuration: a suite that omits\n`reconciliationTimeout` inherits `admissionlab-spec`'s own\ndefault, and a build that changes that default changes whether a\nslow route is recorded as converged. That is precisely the\n\"resolution behavior changed between builds\" case\n[`crate::ReproductionPin::apply`] exists to make loud, and it\ncannot be made loud from a value nothing wrote down.\n\nWhole milliseconds, matching the unit the field is written in in\nYAML, rather than serde's `{secs, nanos}` shape.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "routes": {
+          "description": "Every route contract's id, in the order the configuration declared\nthem.\n\nIds rather than the contracts themselves: an id is what the\ncomparison, the report, and the policy all key on, and everything\nelse about a contract (its Gateway, its listener, its probes)\nlives in the configuration whose digest this document already\nrecords. Declaration order is preserved because it is the order\nthe run observed them in.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "routes",
+        "reconciliationTimeoutMillis"
+      ]
+    },
+    "HostProvenance": {
+      "description": "The machine a run executed on.\n\nExactly the two values Rust can state without probing anything: the\ntarget OS and architecture this binary was compiled for. Deliberately\nnot a hostname, a username, a kernel build string, or an IP address —\nnone of those help reproduce a run, and every one of them is a small\nprivacy leak in a document users attach to public bug reports.",
+      "type": "object",
+      "properties": {
+        "arch": {
+          "description": "The target architecture, from [`std::env::consts::ARCH`] (for\nexample `\"x86_64\"`, `\"aarch64\"`).",
+          "type": "string"
+        },
+        "os": {
+          "description": "The target operating system, from [`std::env::consts::OS`] (for\nexample `\"linux\"`, `\"macos\"`).",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "os",
+        "arch"
+      ]
+    },
+    "RunStage": {
+      "description": "The stages of a run, in execution order (Task 5.2).\n\nRead together with [`RunManifest::status`]:\n\n- [`RunStatus::InProgress`] — the last stage that **completed**. A\n  manifest at [`RunStage::Started`] has recorded its inputs, tools,\n  and node images and has not yet created a cluster.\n- [`RunStatus::Failed`] — the stage that **failed**.\n- [`RunStatus::Completed`] — always [`RunStage::Completed`].\n\nWire values are pinned snake-case literals, matching how\n`admissionlab-normalize`'s `RuleTier` pins its own text form and for\nthe same reason: a variant rename must never silently change a\nchecked-in golden file or a consumer's parser.",
+      "oneOf": [
+        {
+          "description": "The run workspace exists and every pre-cluster input has been\nrecorded: configuration, fixtures, expectations, normalization,\npolicy, host, tool versions, and both sides' resolved node images.\nNothing has been provisioned.",
+          "type": "string",
+          "const": "started"
+        },
+        {
+          "description": "Both ephemeral clusters were created.",
+          "type": "string",
+          "const": "cluster_creation"
+        },
+        {
+          "description": "Both sides' component stacks were installed and became ready.",
+          "type": "string",
+          "const": "installation"
+        },
+        {
+          "description": "Every fixture was replayed through both sides and its evidence\nwritten.",
+          "type": "string",
+          "const": "fixture_capture"
+        },
+        {
+          "description": "The configured Gateway suite was applied to both sides, every\nroute's reconciliation was observed, and every traffic probe was\nsent or explicitly skipped. Absent from a run whose configuration\nhas no `gateway:` section, which never enters this stage at all.",
+          "type": "string",
+          "const": "gateway_suite"
+        },
+        {
+          "description": "Both sides' evidence was normalized, compared, and graded.",
+          "type": "string",
+          "const": "comparison"
+        },
+        {
+          "description": "The run's reports were rendered and written.",
+          "type": "string",
+          "const": "reporting"
+        },
+        {
+          "description": "The run finished. Paired only with [`RunStatus::Completed`].",
+          "type": "string",
+          "const": "completed"
+        }
+      ]
+    },
+    "RunStatus": {
+      "description": "Whether the run a manifest describes is still going, finished, or\nfailed (Task 5.2).\n\nDeliberately separate from [`RunStage`]: \"we are at the install stage\"\nand \"we failed at the install stage\" are different claims, and a\nsingle enum trying to encode both would either lose one of them or\ndouble the variant count. Wire values are pinned literals so renaming\na Rust variant cannot change what a written manifest says.\n\nThis carries no verdict. Whether the regression *policy* passed is\n`admissionlab-report`'s `result.json`, not this document:\n[`RunStatus::Completed`] means \"the run finished\", never \"the run\npassed\".",
+      "oneOf": [
+        {
+          "description": "The run is still executing (or was interrupted so abruptly that\nnothing got to record an outcome — a `SIGKILL`, a lost machine).",
+          "type": "string",
+          "const": "in_progress"
+        },
+        {
+          "description": "Every stage finished. [`RunManifest::completed_at`] is `Some` for\nexactly this variant and no other.",
+          "type": "string",
+          "const": "completed"
+        },
+        {
+          "description": "A stage failed; [`RunManifest::stage`] names which.",
+          "type": "string",
+          "const": "failed"
+        }
+      ]
+    },
+    "ToolProvenance": {
+      "description": "The external tools this run used, by self-reported version.\n\nEvery field is `Option` — see this module's \"Honest absence\" section\nfor why, and [`ToolProvenance::from_doctor_report`] for where the\nvalues come from. The versions are recorded *verbatim* as each tool\nprinted them (`kind`'s `v0.33.0`, `helm`'s `v3.16.2`, `kubectl`'s\n`v1.36.4`), leading `v` and all: normalizing them here would make the\nmanifest disagree with what a user sees when they run the same probe\nby hand.",
+      "type": "object",
+      "properties": {
+        "docker": {
+          "description": "The Docker *server* (daemon) version — what `docker version\n--format {{json .Server.Version}}` reports, which is the version\nthat actually runs the ephemeral nodes, not the client binary's.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "helm": {
+          "description": "`helm`'s version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "description": "`kind`'s version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kubectl": {
+          "description": "`kubectl`'s client version.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

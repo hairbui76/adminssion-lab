@@ -43,6 +43,22 @@
 //! failure here fails the run rather than being recorded as an absent
 //! digest.
 //!
+//! # What v1beta1 added, and where it comes from (Task 7.3)
+//!
+//! Three fields, all filled here from values the run already holds before
+//! it provisions anything, and each `Option` in the model because a
+//! v1alpha1 manifest cannot answer for them (see
+//! `admissionlab_core::run_manifest`'s "Honest absence" section):
+//!
+//! - `configApiVersion` — carried in from the load site, because
+//!   [`ResolvedLab`] deliberately does not keep the raw document's
+//!   `apiVersion`. This is the only one of the three that needs a
+//!   parameter rather than a field of a value already passed.
+//! - each side's `images` — `ResolvedEnvironment::images`, the local
+//!   images side-loaded into that side's cluster.
+//! - `gateway` — the resolved `gateway:` section, reduced to the three
+//!   things that document may hold (see [`gateway_provenance`]).
+//!
 //! # Components are recorded twice, from two different sources
 //!
 //! Before installation, a side's [`ComponentProvenance`] entries come
@@ -65,10 +81,10 @@ use admissionlab_core::{
     RunStatus, SideInstall, ToolProvenance, file_sha256, normalization_sha256, policy_sha256,
     split_node_image_reference,
 };
-use admissionlab_core::{FixtureId, run_manifest::SCHEMA_VERSION};
+use admissionlab_core::{FixtureId, GatewayProvenance, run_manifest::SCHEMA_VERSION};
 use admissionlab_fixtures::FixtureSource;
 use admissionlab_normalize::{NormalizationProfile, NormalizeRule};
-use admissionlab_spec::{ResolvedComponent, ResolvedLab};
+use admissionlab_spec::{GatewayEndpointSpec, GatewaySuiteSpec, ResolvedEnvironment, ResolvedLab};
 
 /// The Admission Lab version recorded in every manifest this binary
 /// writes.
@@ -190,11 +206,18 @@ fn normalization_rule_record(rule: &NormalizeRule) -> NormalizationRuleRecord {
 ///
 /// Stamped [`RunStatus::InProgress`] at [`RunStage::Started`] here rather
 /// than by the writer, which deliberately decides nothing on its own.
+///
+/// `config_api_version` is the `apiVersion` the lab configuration
+/// document declared, carried in from the load site because a
+/// [`ResolvedLab`] does not keep it — see
+/// [`RunManifest::config_api_version`] for why the manifest wants it even
+/// though `config_sha256` already pins the same file's bytes.
 #[must_use]
 pub fn initial_manifest(
     run_id: &RunId,
     doctor: &DoctorReport,
     lab: &ResolvedLab,
+    config_api_version: &str,
     images: &ResolvedNodeImages,
     digests: InputDigests,
     started_at: SystemTime,
@@ -207,39 +230,40 @@ pub fn initial_manifest(
         stage: RunStage::Started,
         host: HostProvenance::detect(),
         tools: ToolProvenance::from_doctor_report(doctor),
-        baseline: configured_environment(
-            &lab.baseline.kubernetes,
-            &images.baseline,
-            &lab.baseline.components,
-        ),
-        candidate: configured_environment(
-            &lab.candidate.kubernetes,
-            &images.candidate,
-            &lab.candidate.components,
-        ),
+        baseline: configured_environment(&lab.baseline, &images.baseline),
+        candidate: configured_environment(&lab.candidate, &images.candidate),
+        config_api_version: Some(config_api_version.to_owned()),
         config_sha256: digests.config_sha256,
         fixture_hashes: digests.fixture_hashes,
         expectations_sha256: digests.expectations_sha256,
         normalization_sha256: digests.normalization_sha256,
         policy_sha256: digests.policy_sha256,
+        gateway: lab.gateway.as_ref().map(gateway_provenance),
         started_at,
         completed_at: None,
     }
 }
 
-/// One side's environment as *configured*: the resolved node image, plus
-/// the components and pinned versions this side is about to install.
+/// One side's environment as *configured*: the resolved node image, the
+/// images this side side-loads, and the components and pinned versions it
+/// is about to install.
 fn configured_environment(
-    kubernetes: &str,
+    environment: &ResolvedEnvironment,
     node_image: &str,
-    components: &[ResolvedComponent],
 ) -> EnvironmentProvenance {
     let (node_image, node_image_digest) = split_node_image_reference(node_image);
     EnvironmentProvenance {
-        kubernetes_version: kubernetes.to_owned(),
+        kubernetes_version: environment.kubernetes.clone(),
         node_image,
         node_image_digest,
-        components: components
+        // `Some`, always — including for the empty list, which is the
+        // usual case. This build *did* look, and "this side side-loaded
+        // nothing" is an observation; `None` is reserved for the v1alpha1
+        // manifests that could not answer at all (see
+        // `EnvironmentProvenance::images`).
+        images: Some(environment.images.clone()),
+        components: environment
+            .components
             .iter()
             .map(|component| ComponentProvenance {
                 name: component.name.clone(),
@@ -251,6 +275,47 @@ fn configured_environment(
             })
             .collect(),
     }
+}
+
+/// The Gateway suite this run is about to replay, as the manifest records
+/// it.
+///
+/// Read from the *resolved* suite rather than from the run's outcome, for
+/// the reason this module's "Components are recorded twice" section gives
+/// for components: the manifest is written before anything is
+/// provisioned, and a run that dies at install must still say what it was
+/// going to replay. Nothing here is observed from a cluster, so unlike
+/// components there is nothing to re-record afterwards.
+fn gateway_provenance(suite: &GatewaySuiteSpec) -> GatewayProvenance {
+    GatewayProvenance {
+        routes: suite
+            .routes
+            .iter()
+            .map(|contract| contract.id.clone())
+            .collect(),
+        // Saturating rather than panicking on a duration no user can
+        // write (the field is parsed from a `u64` of milliseconds, so
+        // this conversion cannot actually fail), matching
+        // `admissionlab_core::policy_sha256`'s handling of the same
+        // millisecond conversion.
+        reconciliation_timeout_millis: u64::try_from(suite.reconciliation_timeout.as_millis())
+            .unwrap_or(u64::MAX),
+        endpoint_strategy: suite.gateway_endpoint.as_ref().map(endpoint_strategy_name),
+    }
+}
+
+/// One endpoint strategy's discriminator, exactly as it is written in
+/// YAML.
+///
+/// Total and wildcard-free, like [`normalization_rule_record`]: a third
+/// `GatewayEndpointSpec` variant must fail to compile here rather than be
+/// silently recorded as one of the two that already exist.
+fn endpoint_strategy_name(endpoint: &GatewayEndpointSpec) -> String {
+    match endpoint {
+        GatewayEndpointSpec::ServiceBySelector { .. } => "serviceBySelector",
+        GatewayEndpointSpec::ServiceByName { .. } => "serviceByName",
+    }
+    .to_owned()
 }
 
 /// One side's components as *installed*, in install order.

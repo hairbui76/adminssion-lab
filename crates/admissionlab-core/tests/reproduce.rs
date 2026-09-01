@@ -22,7 +22,7 @@ use admissionlab_core::reproduce::{
     UNCONFIRMED_COMPONENT_VERSION, incomplete_run_warning, plan_reproduction,
     plan_reproduction_from_config, verify_effective_digests, verify_fixtures,
 };
-use admissionlab_core::run_manifest::SCHEMA_VERSION;
+use admissionlab_core::run_manifest::{SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS};
 use admissionlab_core::{
     ComponentProvenance, EnvironmentProvenance, FixtureId, HostProvenance, RunId, RunManifest,
     RunStage, RunStatus, ToolProvenance, file_sha256, sha256_hex,
@@ -117,6 +117,7 @@ fn bare_manifest(chart_version: &str) -> RunManifest {
         kubernetes_version: "1.36.4".to_owned(),
         node_image: NODE_IMAGE.to_owned(),
         node_image_digest: Some(NODE_DIGEST.to_owned()),
+        images: Some(Vec::new()),
         components: vec![ComponentProvenance {
             name: "kyverno".to_owned(),
             version: version.to_owned(),
@@ -138,11 +139,13 @@ fn bare_manifest(chart_version: &str) -> RunManifest {
         },
         baseline: environment(chart_version),
         candidate: environment(chart_version),
+        config_api_version: Some("admissionlab.io/v1alpha1".to_owned()),
         config_sha256: sha256_hex(b"config"),
         fixture_hashes: BTreeMap::new(),
         expectations_sha256: Some(sha256_hex(b"expectations")),
         normalization_sha256: sha256_hex(b"normalization"),
         policy_sha256: sha256_hex(b"policy"),
+        gateway: None,
         started_at: std::time::SystemTime::UNIX_EPOCH,
         completed_at: Some(std::time::SystemTime::UNIX_EPOCH),
     }
@@ -301,8 +304,9 @@ fn a_manifest_from_another_schema_is_refused_rather_than_read_hopefully() {
 
     let error = plan_reproduction(&manifest, &source).expect_err("an unknown schema is refused");
     assert!(
-        matches!(&error, ReproduceError::UnsupportedSchema { found, expected }
-            if found == "admissionlab.io/run-manifest/v2" && *expected == SCHEMA_VERSION),
+        matches!(&error, ReproduceError::UnsupportedSchema { found, supported }
+            if found == "admissionlab.io/run-manifest/v2"
+                && *supported == SUPPORTED_SCHEMA_VERSIONS),
         "{error:?}"
     );
 

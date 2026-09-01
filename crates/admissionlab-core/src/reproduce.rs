@@ -93,7 +93,7 @@ use crate::diagnostic::{Diagnostic, RedactedValue};
 use crate::ids::FixtureId;
 use crate::run::ResolvedNodeImages;
 use crate::run_manifest::{
-    EnvironmentProvenance, RunManifest, RunStatus, SCHEMA_VERSION, file_sha256,
+    EnvironmentProvenance, RunManifest, RunStatus, SUPPORTED_SCHEMA_VERSIONS, file_sha256,
 };
 use crate::side::Side;
 
@@ -218,20 +218,31 @@ impl ReproducePlan {
 pub enum ReproduceError {
     /// The document is not a run manifest this build understands.
     ///
-    /// `v1alpha1` makes no cross-version compatibility promise (see
-    /// [`SCHEMA_VERSION`]), so a manifest carrying a different schema is
-    /// refused rather than read hopefully: reproducing from a document
-    /// whose field meanings may have changed is exactly the silent
-    /// wrongness this command exists to avoid.
+    /// A manifest carrying an unknown schema is refused rather than read
+    /// hopefully: reproducing from a document whose field meanings may
+    /// have changed is exactly the silent wrongness this command exists
+    /// to avoid. Which versions *are* understood is
+    /// [`SUPPORTED_SCHEMA_VERSIONS`] — as of ROADMAP Task 7.3 that is
+    /// both `v1beta1` and `v1alpha1`, because a manifest records
+    /// something that already happened and a run recorded before the
+    /// promotion is exactly as reproducible as one recorded after it.
+    ///
+    /// Reached only by a [`RunManifest`] built in memory: a manifest read
+    /// from bytes has already been through
+    /// [`crate::read_run_manifest`], which rejects an unsupported version
+    /// with its own richer error. Kept anyway, because
+    /// [`plan_reproduction`] takes a value rather than bytes and must not
+    /// depend on its caller having checked.
     #[error(
         "run manifest declares schemaVersion {found:?}, but this build of Admission Lab \
-         reproduces {expected:?} manifests only"
+         reproduces {} manifests only",
+        supported.join(", ")
     )]
     UnsupportedSchema {
         /// The `schemaVersion` the document carries.
         found: String,
-        /// The schema this build reads.
-        expected: &'static str,
+        /// Every schema this build reads, newest first.
+        supported: &'static [&'static str],
     },
     /// A file the reproduction had to read could not be read.
     #[error("failed to read {}: {source}", .path.display())]
@@ -348,8 +359,9 @@ pub enum ReproduceError {
 ///
 /// # Errors
 ///
-/// Returns [`ReproduceError::UnsupportedSchema`] if `manifest` is not a
-/// `v1alpha1` document, [`ReproduceError::Unreadable`] if the
+/// Returns [`ReproduceError::UnsupportedSchema`] if `manifest`'s schema
+/// version is not one of [`SUPPORTED_SCHEMA_VERSIONS`],
+/// [`ReproduceError::Unreadable`] if the
 /// configuration or the expectations file could not be read,
 /// [`ReproduceError::Config`] if the configuration did not load or
 /// resolve, and [`ReproduceError::ExpectationsPresenceChanged`] if the
@@ -374,10 +386,10 @@ pub fn plan_reproduction_from_config(
     manifest: &RunManifest,
     config: &Path,
 ) -> Result<ReproducePlan, ReproduceError> {
-    if manifest.schema_version != SCHEMA_VERSION {
+    if !SUPPORTED_SCHEMA_VERSIONS.contains(&manifest.schema_version.as_str()) {
         return Err(ReproduceError::UnsupportedSchema {
             found: manifest.schema_version.clone(),
-            expected: SCHEMA_VERSION,
+            supported: SUPPORTED_SCHEMA_VERSIONS,
         });
     }
 

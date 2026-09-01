@@ -191,7 +191,9 @@ use admissionlab_policy::{
     resolve_policy, validate_policy_spec,
 };
 use admissionlab_report::TerminalOptions;
-use admissionlab_spec::{GatewaySuiteSpec, ResolvedLab, load_lab, resolve_lab};
+use admissionlab_spec::{
+    GatewaySuiteSpec, ResolvedLab, declared_api_version, load_any_supported_lab,
+};
 use async_trait::async_trait;
 
 pub use capture::OutcomeCapture;
@@ -387,6 +389,12 @@ pub trait LabBackend: Send + Sync {
 struct Inputs {
     /// The resolved configuration.
     lab: ResolvedLab,
+    /// The `apiVersion` the configuration document declared, read from
+    /// the document itself: a [`ResolvedLab`] is version-independent and
+    /// carries no `apiVersion`, and the run manifest records which
+    /// configuration schema drove the run (Task 7.3 — see
+    /// `admissionlab_core::RunManifest::config_api_version`).
+    config_api_version: String,
     /// The compiled `policy` section.
     policy: ResolvedPolicy,
     /// The loaded `expectationsFile`, or none.
@@ -398,13 +406,6 @@ struct Inputs {
     /// that already read the same files, rather than later — by the time
     /// a cluster exists the manifest already needs them.
     digests: provenance::InputDigests,
-}
-
-/// One invocation, and the stopwatch measuring it.
-///
-/// The two values every stage below needs and none of them owns: the
-/// request the user made, and the recorder each stage reports its own
-/// duration to (Task 5.7). They travel together because they have the
     /// Advisory warnings about recipe/Kubernetes combinations Admission
     /// Lab has not certified (Task 7.4 step 3). Never a reason to stop:
     /// see [`certification`]'s own documentation. Left empty by
@@ -414,6 +415,13 @@ struct Inputs {
     /// would answer the wrong question, and it still happens before
     /// anything is provisioned.
     certification: Vec<Diagnostic>,
+}
+
+/// One invocation, and the stopwatch measuring it.
+///
+/// The two values every stage below needs and none of them owns: the
+/// request the user made, and the recorder each stage reports its own
+/// duration to (Task 5.7). They travel together because they have the
 /// same lifetime and the same reach — from the first file read to the
 /// last cluster deleted — and because threading the recorder as a ninth
 /// independent parameter through functions that already take seven would
@@ -490,13 +498,6 @@ pub async fn run_lab<B: LabBackend>(
         return disposition;
     }
 
-    let doctor = match check_prerequisites(backend, console).await {
-        Ok(report) => report,
-        Err(disposition) => {
-            return no_verdict(
-                request,
-                console,
-                None,
     // Task 7.4 step 3. Still part of validating the user's input —
     // nothing has been provisioned yet — but deliberately after the
     // reproduction pin, which can replace the very Kubernetes version
@@ -509,6 +510,13 @@ pub async fn run_lab<B: LabBackend>(
         console.problem(&warning.message);
     }
 
+    let doctor = match check_prerequisites(backend, console).await {
+        Ok(report) => report,
+        Err(disposition) => {
+            return no_verdict(
+                request,
+                console,
+                None,
                 "prerequisites",
                 "This host does not meet the prerequisites `admissionlab test` needs. Run \
                  `admissionlab doctor` for the full report.",
@@ -703,6 +711,7 @@ async fn provision<C: ClusterManager>(
         &run_id,
         doctor,
         &inputs.lab,
+        &inputs.config_api_version,
         &images,
         inputs.digests.clone(),
         started_at,
@@ -853,12 +862,20 @@ fn prepare_inputs(
     request: &RunRequest<'_>,
     console: &mut Console<'_>,
 ) -> Result<Inputs, RunDisposition> {
-    let loaded = load_lab(request.config).map_err(|error| {
+    // Read separately from the load: `ResolvedLab` is version-independent
+    // by construction (every supported document is migrated to the current
+    // model before resolution), so it carries no `apiVersion` for the
+    // manifest to record which configuration schema drove this run.
+    let config_api_version = declared_api_version(request.config).map_err(|error| {
         console.problem(&format!("failed to load lab configuration: {error}"));
         crate::exit::disposition_for_spec_error(&error)
     })?;
-    let lab = resolve_lab(loaded).map_err(|error| {
-        console.problem(&format!("invalid lab configuration: {error}"));
+    // Accepts every `apiVersion` this build still reads — a Public Alpha
+    // `admissionlab.io/v1alpha1` file as well as today's
+    // `admissionlab.io/v1beta1` — migrating the former before resolving it
+    // (ROADMAP Task 7.1 Step 2).
+    let lab = load_any_supported_lab(request.config).map_err(|error| {
+        console.problem(&format!("failed to load lab configuration: {error}"));
         crate::exit::disposition_for_spec_error(&error)
     })?;
 
@@ -946,10 +963,12 @@ fn prepare_inputs(
 
     Ok(Inputs {
         lab,
+        config_api_version,
         policy,
         expectations,
         fixtures,
         digests,
+        certification: Vec::new(),
     })
 }
 
@@ -967,7 +986,6 @@ fn prepare_inputs(
 /// - it must not collide with a discovered fixture's id, since two
 ///   entries under one identifier would make a per-fixture drill-down
 ///   ambiguous and would attribute one's changes to the other.
-        certification: Vec::new(),
 ///
 /// Both are checked here, at exit 2, before any cluster is created —
 /// the same placement, and for the same reason, as every other input
