@@ -54,6 +54,11 @@
 //!   explains what `converged` is not, how parents and probes are
 //!   paired, why stale evidence silences absence claims, and which half
 //!   of the direction rule belongs to `admissionlab-policy`.
+//! - [`tls`] (Task 8.6) mints an ephemeral CA and leaf certificate for
+//!   a `.test` hostname, and builds the `rustls::ClientConfig` that
+//!   trusts only that CA. Read its "Where the private key may go" before
+//!   calling [`TestCertificate::expose_key_pem`], and its "The handoff
+//!   to Task 8.7" before wiring TLS into [`probe`].
 //! - [`migration`] (Task 8.3) is the Ingress-to-Gateway migration
 //!   suite's configuration surface: explicit baseline/candidate manifest
 //!   pairings, the probes replayed through both, and the non-portable
@@ -98,6 +103,7 @@ pub mod model;
 pub mod port_forward;
 pub mod probe;
 pub mod reconcile;
+pub mod tls;
 
 pub use apply::{
     AppliedGatewayFixture, ApplyCategory, FIELD_MANAGER, GatewayApplyPlan, PlannedObject,
@@ -147,4 +153,8 @@ pub use reconcile::{
 pub use model::{
     ALLOWED_HTTP_METHODS, DEFAULT_RECONCILIATION_TIMEOUT, GatewayIdentity, GatewaySuiteSpec,
     HttpProbeContract, RouteContract, contract_gateway_identity, is_valid_http_status,
+};
+pub use tls::{
+    CERTIFICATE_VALIDITY, NOT_BEFORE_SKEW, TEST_TLD, TestCertificate, generate_test_certificate,
+    probe_server_name, test_certificate_client_config,
 };

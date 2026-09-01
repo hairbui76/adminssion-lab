@@ -17,6 +17,25 @@
 //! otherwise be tempted to attach a secret "for debugging" have no way to
 //! do so: the only two things a context value can be are a public string
 //! or the fact that a value was withheld.
+//!
+//! # The other secret-safety primitive
+//!
+//! [`SensitiveBytes`] (ROADMAP Task 8.6, and §1.2's registry name) is
+//! this module's second export, and it applies the same discipline one
+//! step earlier. [`RedactedValue`] answers "may this value be
+//! *rendered*?" by making a withheld value carry no payload at all;
+//! [`SensitiveBytes`] is for the case where the payload genuinely has to
+//! be carried — a generated TLS private key has to reach the one place
+//! that writes it — and makes every *rendering* of it (`Debug`,
+//! `Display`, `Serialize`) produce the identical [`REDACTED`] literal,
+//! with the real bytes reachable only through one explicit, greppable
+//! accessor.
+//!
+//! Both live here rather than in whichever crate happens to produce a
+//! secret, because "how Admission Lab handles material it must not
+//! print" is one vocabulary and Global Constraint 14 is one rule. A
+//! second, crate-local version of either would be free to drift into
+//! disagreeing with this one about what `[REDACTED]` even means.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -101,6 +120,114 @@ impl Serialize for RedactedValue {
             Self::Public(value) => serializer.serialize_str(value),
             Self::Sensitive => serializer.serialize_str(REDACTED),
         }
+    }
+}
+
+/// A byte string that must never be rendered: every format prints
+/// [`REDACTED`], and the bytes are reachable only through
+/// [`SensitiveBytes::expose`].
+///
+/// §1.2's registry freezes the name and the shape
+/// (`SensitiveBytes(Vec<u8>)`). ROADMAP Task 8.6 is the first producer —
+/// `admissionlab_gateway::tls` generates a TLS private key that has to
+/// be *written somewhere* and so cannot use [`RedactedValue::Sensitive`],
+/// which deliberately keeps nothing.
+///
+/// # What this guarantees, and what it does not
+///
+/// **Guaranteed:** no formatting of this value reveals it. `Debug`,
+/// `Display`, and `Serialize` are hand-written to emit the same
+/// [`REDACTED`] literal that [`RedactedValue::Sensitive`] emits, so a
+/// struct holding one can derive `Debug` and be logged, `dbg!`-ed, or
+/// serialized into a report without a reviewer having to check each
+/// call site. That is the property worth having: leaks of this kind
+/// happen through a `{:?}` somebody added to an unrelated struct, not
+/// through a deliberate print.
+///
+/// **Not guaranteed:** that the bytes are unreachable, or that they are
+/// erased from memory. [`SensitiveBytes::expose`] exists precisely so a
+/// caller *can* reach them, because a private key that could never be
+/// written would be useless; and this type does not zeroize on drop, so
+/// it makes no claim about memory residency. Both are stated rather than
+/// implied — a security primitive that overstates its scope is worse
+/// than one that is narrow and honest (Global Constraint 15's habit,
+/// applied to this crate's own guarantees).
+///
+/// # Deliberately not derived
+///
+/// - **No `Deserialize`.** Its `Serialize` is lossy on purpose, so a
+///   round trip could only ever produce the literal `[REDACTED]` bytes
+///   and call them a key. There is no format this value is *read* from;
+///   it is constructed from freshly generated material.
+/// - **No `PartialEq`/`Ord`/`Hash`.** Comparing secrets is not something
+///   this project needs to do, and offering it invites both a timing
+///   oracle and the habit of using a secret as a map key. A caller with
+///   a real reason compares `expose()` slices explicitly, where the
+///   choice is visible.
+#[derive(Clone)]
+pub struct SensitiveBytes(Vec<u8>);
+
+impl SensitiveBytes {
+    /// Wraps `bytes` as sensitive material.
+    #[must_use]
+    pub const fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// The raw bytes.
+    ///
+    /// **This is the leak.** Every call is a place where secret material
+    /// escapes the wrapper, so the name is deliberately blunt and
+    /// deliberately greppable: `expose` in a diff is a reviewable event,
+    /// where `as_bytes` or a `Deref` impl would not be. Call it at the
+    /// one site that writes the material to its destination, and nowhere
+    /// else — never to build a log line, an error message, or a report
+    /// field.
+    #[must_use]
+    pub fn expose(&self) -> &[u8] {
+        &self.0
+    }
+
+    /// How many bytes are held. Safe to render: a length is not the
+    /// material, and "the key is 1704 bytes" is a genuinely useful thing
+    /// for a diagnostic to be able to say.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether no bytes are held at all — which for generated key
+    /// material means something went wrong upstream.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+// Hand-written for the same reason `RedactedValue`'s are, and to the
+// same literal: a derived `Debug` would print the byte vector, which is
+// exactly the accident this type exists to prevent. The length is not
+// included -- not because it is secret, but because `[REDACTED]` reading
+// identically everywhere is what makes "a redacted value looks like
+// this" a fact a reader can rely on rather than a family of formats.
+impl fmt::Debug for SensitiveBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(REDACTED)
+    }
+}
+
+impl fmt::Display for SensitiveBytes {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(REDACTED)
+    }
+}
+
+impl Serialize for SensitiveBytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(REDACTED)
     }
 }
 

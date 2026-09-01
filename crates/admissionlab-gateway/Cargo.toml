@@ -134,6 +134,32 @@ hyper-util = { workspace = true }
 # build-script panic (see the root `Cargo.toml`'s own comment).
 k8s-openapi = { workspace = true }
 kube = { workspace = true }
+# `tls.rs` (Task 8.6) generates an ephemeral CA plus a leaf certificate
+# for a `.test` hostname, entirely in process -- never by shelling out to
+# a system `openssl`, and never from checked-in key material. `rcgen` is
+# the standard pure-Rust X.509 generator and is **already a direct
+# dependency of `admissionlab-test-webhook`** for the same job (see the
+# root `Cargo.toml`'s own entry for the crypto-backend reasoning), so
+# this adds a workspace edge rather than a crate: `Cargo.lock` is
+# unchanged by it.
+rcgen = { workspace = true }
+# The generated certificate's validity window is set with `time`'s
+# `OffsetDateTime`, which `rcgen` does not re-export -- the same direct
+# dependency, for the same reason, `admissionlab-test-webhook` declares.
+time = { workspace = true }
+# `tls.rs` also builds the `rustls::ClientConfig` a TLS probe will dial
+# with: a root store containing *only* the generated CA. Task 8.7 is
+# what wires that into `probe.rs`; this crate ships the builder and the
+# tests that prove it trusts the right thing and rejects the wrong ones.
+# Same version, same `default-features = false` + `ring` backend, as
+# `admissionlab-test-webhook`'s serving side -- so the two halves of this
+# workspace's TLS story cannot resolve to different rustls builds.
+rustls = { workspace = true }
+# Parses the PEM certificate `rcgen` emits into `rustls`'s own
+# `CertificateDer` for the root store, via `PemObject`. Not
+# `rustls-pemfile`: `rustls-pki-types` absorbed that parsing and is
+# already resolved through `rustls` itself.
+rustls-pki-types = { workspace = true }
 # ROADMAP Task 7.2 freezes the `admissionlab.io/result/v1beta1` result
 # schema and generates it from the Rust result model with `schemars`.
 # This crate's evidence types are embedded verbatim in that document, so
@@ -181,4 +207,11 @@ http = "1.5.0"
 # why the wire contract is shared but the Rust type is not.
 admissionlab-echo = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
+# `tests/tls.rs` and `tls.rs`'s own unit tests run a real TLS server over
+# an in-memory duplex pipe, presenting the generated leaf certificate to
+# a client built by this crate's own `test_certificate_client_config` --
+# so what is asserted is a completed handshake, not the shape of some
+# PEM text. Dev-only *for now*: Task 8.7 needs the connector half in
+# shipped code to send a probe over TLS, and will promote this entry.
+tokio-rustls = { workspace = true }
 tower-test = "0.4.0"

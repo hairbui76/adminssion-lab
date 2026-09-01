@@ -21,7 +21,7 @@ pub use cache::{
 pub use cluster::{
     ClusterDiagnostics, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, RollbackOutcome,
 };
-pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue};
+pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue, SensitiveBytes};
 pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};
 pub use process::{

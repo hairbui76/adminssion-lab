@@ -473,6 +473,37 @@ pub enum GatewayError {
         /// The cap that was exceeded, in bytes.
         limit: usize,
     },
+
+    /// Test TLS material could not be produced or used: the requested
+    /// host is not one [`crate::tls::generate_test_certificate`] will
+    /// issue for, certificate generation itself failed, or a generated
+    /// CA could not be turned into a trust store.
+    ///
+    /// One variant for the whole of [`crate::tls`] rather than three,
+    /// because every case has the same shape and the same remedy: a
+    /// caller asked for TLS material that cannot exist as described, and
+    /// `reason` says which part. Nothing here is ever an observation
+    /// about a server -- a *handshake* that fails against a real data
+    /// plane is a probe result, and belongs to
+    /// [`GatewayError::ProbeUnavailable`]'s side of this module's
+    /// "refused this" / "no answer at all" line.
+    ///
+    /// **`reason` never quotes key material.** The only secret
+    /// [`crate::tls`] handles is the generated private key, which
+    /// `admissionlab_core::SensitiveBytes` will not render in the first
+    /// place; `host` and a library's own message are all that reach
+    /// here.
+    #[error("cannot produce test TLS material for {host:?}: {reason}")]
+    TestCertificate {
+        /// The host that was asked for, trimmed -- or a short
+        /// description of what was being built when the request was not
+        /// about a host at all (see
+        /// [`crate::tls::test_certificate_client_config`]).
+        host: String,
+        /// What could not be done, from this crate's own words or the
+        /// underlying library's `Display`.
+        reason: String,
+    },
 }
 
 /// What a Gateway data-plane `Service` lookup was looking for, and
