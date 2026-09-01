@@ -182,6 +182,13 @@ thiserror = { workspace = true }
 # `port_forward.rs` (Task 6.7) bounds its readiness wait against a
 # `tokio::time::Instant` deadline.
 tokio = { workspace = true, features = ["time"] }
+# `probe.rs`'s TLS transport (Task 8.7) wraps the same `TcpStream` the
+# plaintext path dials in a `tokio_rustls::TlsConnector` before handing
+# it to `hyper`'s handshake -- exactly the seam `tls.rs`'s "The handoff
+# to Task 8.7" documents. Promoted from `dev-dependencies`, which is
+# what that entry said would happen: the connector half is shipped code
+# now, not only test code.
+tokio-rustls = { workspace = true }
 # `port_forward.rs` warns when a `kubectl port-forward` could not be
 # killed, naming the pid and the exact `kill <pid>` an operator should
 # run. That is a runtime degradation an operator has to see as it
@@ -229,11 +236,4 @@ http = "1.5.0"
 # why the wire contract is shared but the Rust type is not.
 admissionlab-echo = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
-# `tests/tls.rs` and `tls.rs`'s own unit tests run a real TLS server over
-# an in-memory duplex pipe, presenting the generated leaf certificate to
-# a client built by this crate's own `test_certificate_client_config` --
-# so what is asserted is a completed handshake, not the shape of some
-# PEM text. Dev-only *for now*: Task 8.7 needs the connector half in
-# shipped code to send a probe over TLS, and will promote this entry.
-tokio-rustls = { workspace = true }
 tower-test = "0.4.0"

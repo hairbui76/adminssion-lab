@@ -1,0 +1,116 @@
+# Portable Gateway contracts: the ISTIO overlay (ROADMAP Task 8.7).
+#
+# One of exactly two per-implementation files in this directory; its
+# counterpart is `gateway-nginx.yaml`. Everything else here --
+# `backends.yaml` and `routes.yaml` -- is shared byte for byte, and a
+# diff of these two overlay files is the complete, honest list of what
+# an implementation change costs a fixture author. See `README.md` for
+# the convention and for why there is no templating engine involved.
+#
+# Against `gateway-nginx.yaml`, ignoring comments, this file differs in:
+#
+#   1. `gatewayClassName: istio` (there: `nginx`);
+#   2. a `ConfigMap` and the `Gateway.spec.infrastructure.parametersRef`
+#      that points at it, which NGINX Gateway Fabric needs no equivalent
+#      of.
+#
+# Nothing else. Same listeners, same ports, same TLS configuration, same
+# `allowedRoutes`.
+#
+# # Why the ConfigMap, and the finding behind it
+#
+# Istio provisions one `Deployment` + `Service` per `Gateway`, and that
+# `Service` defaults to `type: LoadBalancer`. On a bare `kind` cluster
+# there is no load-balancer controller, so the external address is never
+# assigned and Istio reports -- correctly, and permanently:
+#
+#     Programmed=False (AddressNotAssigned: ... address pending for
+#     hostname "lab-gateway-istio.<ns>.svc.cluster.local")
+#
+# That is the terminal state of a LoadBalancer Service on a cluster with
+# nothing to fulfil it, not a slow one. The `ConfigMap` below, referenced
+# from `Gateway.spec.infrastructure.parametersRef`, is Istio's own
+# documented per-Gateway override for exactly this, and with it the same
+# Gateway reaches `Programmed=True` in about two seconds. The finding is
+# recorded in full in `fixtures/gateway/istio/same-namespace.yaml`'s own
+# header, where it was first measured (ROADMAP Task 6.10).
+#
+# NGINX Gateway Fabric's `Service` defaults to `LoadBalancer` too and its
+# address stays `<pending>` just the same, but it reports
+# `Programmed=True` regardless -- its `Programmed` is about the data
+# plane it started, not about an address. So this object has no NGF
+# counterpart, and adding one "for symmetry" would be vendor
+# configuration that fixture has no need of.
+#
+# This is precisely the kind of thing the overlay split exists for: it is
+# environment-specific vendor configuration, it is unavoidable, and
+# keeping it out of `routes.yaml` is what lets the seven behavior
+# contracts stay implementation-agnostic.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gateway-infrastructure
+  namespace: admissionlab-portable
+data:
+  service: |
+    spec:
+      type: ClusterIP
+---
+# The Gateway. Two listeners, because the corpus contains a TLS
+# termination contract and a plaintext one and they must be the same
+# Gateway: a second Gateway object would prove that Istio can serve TLS,
+# not that this Gateway terminates it alongside HTTP.
+#
+# The provisioned data-plane `Service` is named `<gateway>-<class>` --
+# `lab-gateway-istio` here -- and carries
+# `gateway.networking.k8s.io/gateway-name: lab-gateway`. The portable
+# suite selects it by that label and by PORT NUMBER (80 and 443) rather
+# than by port name, because port *names* are the one part of a
+# provisioned Service that is genuinely vendor-specific: Istio names the
+# listener port `http`, NGF derives `port-<number>`. See `README.md`
+# ("Resolving the data plane").
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-portable
+spec:
+  gatewayClassName: istio
+  infrastructure:
+    parametersRef:
+      # An empty `group` is the core API group -- ConfigMap. Written out
+      # rather than omitted because the field is required by the Gateway
+      # API schema, not because the empty string means anything unusual.
+      group: ""
+      kind: ConfigMap
+      name: gateway-infrastructure
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      # No `hostname` on the listener: it accepts any authority, and the
+      # ROUTES are what narrow it. Keeping the hostname decision in one
+      # object means an unexpected 404 has exactly one place to look.
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        # `Terminate` is Core support in Gateway API; `Passthrough` is
+        # Extended and would defeat the point -- a terminated listener
+        # is what lets the same backend answer the same way over both
+        # listeners, which is what the TLS contract asserts.
+        mode: Terminate
+        certificateRefs:
+          # The Secret this names is GENERATED PER RUN and applied from
+          # the run workspace, never checked into this repository. See
+          # `README.md` ("The TLS Secret is generated, never checked
+          # in") and `admissionlab_gateway::tls`.
+          - group: ""
+            kind: Secret
+            name: portable-tls
+      allowedRoutes:
+        namespaces:
+          from: Same

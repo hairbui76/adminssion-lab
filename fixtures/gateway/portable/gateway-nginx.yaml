@@ -1,0 +1,80 @@
+# Portable Gateway contracts: the NGINX GATEWAY FABRIC overlay
+# (ROADMAP Task 8.7).
+#
+# One of exactly two per-implementation files in this directory; its
+# counterpart is `gateway-istio.yaml`. Everything else here --
+# `backends.yaml` and `routes.yaml` -- is shared byte for byte, and a
+# diff of these two overlay files is the complete, honest list of what an
+# implementation change costs a fixture author. See `README.md` for the
+# convention and for why there is no templating engine involved.
+#
+# Against `gateway-istio.yaml`, ignoring comments, this file differs in:
+#
+#   1. `gatewayClassName: nginx` (there: `istio`);
+#   2. the absence of a `ConfigMap` and of the
+#      `Gateway.spec.infrastructure.parametersRef` pointing at it.
+#
+# Nothing else. Same listeners, same ports, same TLS configuration, same
+# `allowedRoutes`.
+#
+# (2) is a finding rather than a simplification, and it was measured for
+# ROADMAP Task 8.1: NGF provisions its data-plane `Service` as
+# `type: LoadBalancer` exactly as Istio does, and on `kind` that
+# Service's external address stays `<pending>` exactly the same way --
+# but NGF reports `Programmed=True` regardless, because its `Programmed`
+# is a statement about the data plane it started rather than about an
+# address having been assigned to it. So the environment problem that
+# forces a vendor object into the Istio overlay does not arise here, and
+# adding an equivalent NGF object "for symmetry" would be vendor
+# configuration this fixture has no need of. See
+# `fixtures/gateway/nginx/same-namespace.yaml`'s own header for the
+# live-cluster measurement.
+#
+# The port-forward the probes run through is unaffected either way: it
+# targets the Service's own ports on its ClusterIP, which a
+# `LoadBalancer` Service has just as much as a `ClusterIP` one does.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-portable
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      # No `hostname` on the listener: it accepts any authority, and the
+      # ROUTES are what narrow it. Keeping the hostname decision in one
+      # object means an unexpected 404 has exactly one place to look.
+      allowedRoutes:
+        namespaces:
+          from: Same
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        # `Terminate` is Core support in Gateway API; `Passthrough` is
+        # Extended and would defeat the point -- a terminated listener
+        # is what lets the same backend answer the same way over both
+        # listeners, which is what the TLS contract asserts.
+        mode: Terminate
+        certificateRefs:
+          # The Secret this names is GENERATED PER RUN and applied from
+          # the run workspace, never checked into this repository. See
+          # `README.md` ("The TLS Secret is generated, never checked
+          # in") and `admissionlab_gateway::tls`.
+          - group: ""
+            kind: Secret
+            name: portable-tls
+      allowedRoutes:
+        namespaces:
+          from: Same
+# The provisioned data-plane `Service` is named `<gateway>-nginx` --
+# `lab-gateway-nginx` here -- and carries
+# `gateway.networking.k8s.io/gateway-name: lab-gateway`. The portable
+# suite selects it by that label and by PORT NUMBER (80 and 443) rather
+# than by port name, because port *names* are the one part of a
+# provisioned Service that is genuinely vendor-specific: NGF derives
+# `port-<number>` from the listener port, Istio names it `http`. See
+# `README.md` ("Resolving the data plane").

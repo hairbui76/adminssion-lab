@@ -1,0 +1,373 @@
+# Portable Gateway contracts: every `HTTPRoute` (ROADMAP Task 8.7).
+#
+# Shared by BOTH certified implementations, byte for byte. Not one field
+# in this file is vendor-specific, and that is the claim Task 8.7 exists
+# to test rather than assert: `crates/admissionlab-gateway/tests/
+# portable_contracts.rs` applies exactly these documents to a real Istio
+# cluster and to a real NGINX Gateway Fabric cluster and probes the same
+# behaviors through both. See `README.md` in this directory for the
+# per-implementation overlay convention and for the measured portability
+# findings.
+#
+# Every route:
+#
+#   - lives in `admissionlab-portable`, beside the Gateway
+#     (`allowedRoutes.namespaces.from: Same` on both listeners, so no
+#     route crosses a namespace boundary -- it is the cross-namespace
+#     route's *backend reference* that crosses, which is what a
+#     `ReferenceGrant` governs);
+#   - names its parent listener explicitly with `sectionName`, so that
+#     the Gateway's second listener cannot silently make an existing
+#     contract's parent lookup ambiguous
+#     (`admissionlab_gateway::conditions::ParentLookup::Ambiguous`);
+#   - carries a hostname under `.test`, which RFC 6761 §6.2 reserves and
+#     guarantees is never delegated in the global DNS. The probe sends it
+#     as a `Host` header over a port-forward to 127.0.0.1, so nothing
+#     ever resolves it -- but a copy of this fixture that escaped into an
+#     environment with real DNS still cannot reach a real service.
+#
+# One hostname per contract, deliberately. A route that answered on a
+# shared hostname and differed only by path would make an unexpected
+# result ambiguous between "the wrong rule matched" and "the right rule
+# behaved wrongly"; one hostname each means a probe reaches exactly one
+# route, by construction.
+
+# =====================================================================
+# 1. Basic host/path routing.
+#
+# The contract every other one depends on, and the one that exists in
+# both per-implementation packs already; the portable version lives here
+# now. Two probes, and the second is what makes it a *path* contract
+# rather than only a host one: `/basic/...` reaches `echo-a`, and a path
+# outside the prefix on the same hostname matches no rule, which Gateway
+# API answers with 404 rather than by falling through to a backend.
+# =====================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: basic-route
+  namespace: admissionlab-portable
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - basic.portable.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /basic
+      backendRefs:
+        # No `namespace` -- the backend is in this route's own
+        # namespace, which needs no `ReferenceGrant`. That absence is
+        # the single difference between this route and the next.
+        - name: echo-a
+          port: 80
+---
+# =====================================================================
+# 2. ReferenceGrant cross-namespace backend.
+#
+# Identical to the route above except that its one `backendRef` names
+# another namespace. The permission half is `backends.yaml`'s single
+# `ReferenceGrant`; the evidence half is the backend identity, because
+# the remote workload answers `echo-b-remote` while the local `echo-b`
+# answers `echo-b`. A probe that reaches `echo-b-remote` crossed a
+# namespace boundary with permission, which is the whole contract.
+# =====================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: cross-namespace-route
+  namespace: admissionlab-portable
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - cross.portable.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: echo-b
+          namespace: admissionlab-portable-remote
+          port: 80
+---
+# =====================================================================
+# 3. TLS termination.
+#
+# The only route parented to the `https` listener. Everything that makes
+# this a TLS contract is on the Gateway (`tls.mode: Terminate` plus a
+# `certificateRefs` entry naming the `portable-tls` Secret) and in the
+# probe (which trusts the generated CA, sends this hostname as SNI, and
+# verifies the certificate against it). The route itself is deliberately
+# ordinary: a TLS listener that terminated correctly must route exactly
+# as the plaintext one does, and any difference here would confuse
+# "termination worked" with "routing worked".
+#
+# The `portable-tls` Secret is NOT in this directory. It is generated per
+# run by `admissionlab_gateway::tls::generate_test_certificate` and
+# applied from the run workspace -- see `README.md` ("The TLS Secret is
+# generated, never checked in").
+# =====================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: tls-route
+  namespace: admissionlab-portable
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: https
+  hostnames:
+    # This exact name is what the generated leaf certificate's only DNS
+    # subject alternative name is issued for. The three must agree --
+    # this hostname, the certificate's, and the probe's SNI -- and the
+    # test derives all three from one constant so they cannot drift.
+    - tls.portable.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: echo-a
+          port: 80
+---
+# =====================================================================
+# 4. RequestHeaderModifier + ResponseHeaderModifier.
+#
+# Two filters of different types on one rule, which Gateway API allows
+# (it forbids two of the *same* type). `RequestHeaderModifier` is
+# Core support in Gateway API v1.5.1; `ResponseHeaderModifier` is
+# Extended (`HTTPRouteResponseHeaderModification`), and both certified
+# implementations list that feature as supported -- see `README.md`'s
+# support table for the provenance.
+#
+# NGINX Gateway Fabric documents that where MULTIPLE filters of one type
+# are configured it uses the first and ignores the rest. That rule is not
+# engaged here: this rule carries one filter of each type, which is what
+# Gateway API itself permits and NGF's own row describes as supported.
+#
+# `add` and `set` are both exercised, because they differ in exactly the
+# case a contract should pin: the probe sends its own
+# `x-admissionlab-request-set` value, and `set` must overwrite it while
+# `add` must appear on a request that carried no such header. Asserting
+# only `add` would pass against an implementation that silently ignored
+# `set`.
+#
+# The request half is observable only in the echo response body's
+# `headers` map -- what the BACKEND received -- and the response half
+# only in the probe's own response headers. Those are two different
+# pieces of evidence for two different filters, and the test asserts
+# both.
+# =====================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: header-route
+  namespace: admissionlab-portable
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - headers.portable.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestHeaderModifier
+          requestHeaderModifier:
+            add:
+              - name: X-Admissionlab-Request-Added
+                value: request-added
+            set:
+              - name: X-Admissionlab-Request-Set
+                value: request-set
+        - type: ResponseHeaderModifier
+          responseHeaderModifier:
+            add:
+              - name: X-Admissionlab-Response-Added
+                value: response-added
+            set:
+              - name: X-Admissionlab-Response-Set
+                value: response-set
+      backendRefs:
+        - name: echo-a
+          port: 80
+---
+# =====================================================================
+# 5. HTTP redirect.
+#
+# A Core `RequestRedirect` filter changing the hostname and nothing
+# else. The rule has no `backendRefs` at all -- a redirect is answered by
+# the Gateway itself, and adding a backend would describe a route that
+# can never reach it.
+#
+# `statusCode: 301` is written out rather than defaulted (the default is
+# 302). Gateway API v1.5.1 admits 301, 302, 303, 307 and 308, but only
+# 301 and 302 are the Core pair -- 303/307/308 each carry their own
+# Extended conformance feature. Stating one means the contract asserts a
+# specific code rather than whichever an implementation prefers.
+#
+# `scheme`, `path` and `port` are deliberately NOT set: all three carry
+# Extended support on this filter, and `hostname`/`statusCode` alone are
+# the Core pair. Leaving `path` unset also makes the contract sharper,
+# because the redirect must then preserve the request's own path.
+#
+# # THE FINDING: the two implementations disagree about the port, and the
+# # contract normalizes it away on purpose
+#
+# Gateway API says an implementation SHOULD NOT put the port in
+# `Location` for HTTP-on-80. Read at the pinned tags, then MEASURED on
+# real clusters by `tests/portable_contracts.rs`, which prints the raw
+# header on every run:
+#
+#   - Istio 1.30.4 strips it (`pilot/pkg/networking/core/route/route.go`,
+#     `ApplyRedirect`: "Do not put explicit :80 or :443 when its
+#     http/https"). Observed:
+#     `http://redirected.portable.gateway.admissionlab.test/redirect-probe`
+#   - NGF 2.6.7 keeps it whenever `scheme` is unset
+#     (`internal/controller/nginx/config/servers.go`, where the
+#     port-stripping branch is reached only when `filter.Scheme != nil`).
+#     Observed:
+#     `http://redirected.portable.gateway.admissionlab.test:80/redirect-probe`
+#
+# Both are conforming: Gateway API's own conformance helper accepts
+# either for an HTTP redirect. So the portable contract compares
+# scheme, host and path and drops the port, which is what
+# `admissionlab_gateway::probe::normalize_location` does and documents.
+# The alternative -- setting `scheme: http` on the filter to force the
+# two into agreement -- would buy byte-equality by moving the contract
+# onto an Extended field, which is a worse trade for a corpus whose
+# subject is portability.
+#
+# The probe does not follow it: `admissionlab_gateway::probe` has no
+# redirect-following code at all (see that module's own documentation for
+# why that is a property rather than a setting), so the 301 and its
+# `Location` are recorded as observations.
+# =====================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: redirect-route
+  namespace: admissionlab-portable
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - redirect.portable.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            hostname: redirected.portable.gateway.admissionlab.test
+            statusCode: 301
+---
+# =====================================================================
+# 6. URL rewrite.
+#
+# `URLRewrite` with `path.type: ReplacePrefixMatch`, which replaces
+# exactly the prefix the rule matched on and leaves the rest of the path
+# alone: a request for `/rewrite-me/probe` must reach the backend as
+# `/rewritten/probe`.
+#
+# The prefix match and the replacement are different lengths on purpose.
+# A same-length replacement would pass against an implementation that
+# rewrote nothing but happened to route correctly, and it would pass
+# against one that replaced the whole path rather than the prefix.
+#
+# Gateway API v1.5.1 validates at the CRD level that
+# `replacePrefixMatch` is used with exactly one `PathPrefix` match, so
+# pairing it with the wrong match type is an API-server rejection rather
+# than a silently ignored field.
+#
+# `URLRewrite` carries EXTENDED support, so "where portable" is a real
+# question here rather than a formality. Both pinned implementations
+# publish `HTTPRoutePathRewrite` among their supported conformance
+# features -- see `README.md`'s support table -- and this contract is
+# what turns that published claim into a measurement.
+#
+# The evidence is the echo response body's own `path` field: what the
+# BACKEND saw. Nothing the Gateway returns in a header would do, because
+# a rewrite is by definition invisible from the client side.
+# =====================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: rewrite-route
+  namespace: admissionlab-portable
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - rewrite.portable.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /rewrite-me
+      filters:
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /rewritten
+      backendRefs:
+        - name: echo-a
+          port: 80
+---
+# =====================================================================
+# 7. Two-backend weighted routing.
+#
+# Core support: `backendRefs[].weight`. 80/20 rather than 50/50 because
+# an even split is the one a bug can accidentally produce -- a Gateway
+# that ignored `weight` entirely and round-robined two backends would
+# pass a 50/50 contract and fail this one.
+#
+# The assertion is statistical and is stated in ROADMAP Task 8.7 Step 5:
+# with expected proportion `p` over `n` requests, an observed proportion
+# is accepted when
+#
+#     abs(observed - p) <= max(0.05, 4 * sqrt(p * (1-p) / n))
+#
+# at `n >= 1000`. A single request is never classified: reaching
+# `echo-b` under an 80/20 split is not a failure, it is one of the
+# twenty. `admissionlab_gateway::probe::probe_many` sends the sample and
+# tallies it; `weighted_routing_within_tolerance` is the inequality.
+# =====================================================================
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: weighted-route
+  namespace: admissionlab-portable
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - weighted.portable.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: echo-a
+          port: 80
+          weight: 80
+        - name: echo-b
+          port: 80
+          weight: 20

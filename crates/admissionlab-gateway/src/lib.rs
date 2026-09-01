@@ -39,12 +39,18 @@
 //!   endpoint and manages its lifetime. Read that module's "Timeout
 //!   ownership" and "Termination" sections before changing anything
 //!   about when the child dies.
-//! - [`probe`] (Task 6.8) sends one real HTTP request through that
+//! - [`probe`] (Tasks 6.8 and 8.7) sends real HTTP requests through that
 //!   forward and records what came back: a status, a backend identity
 //!   when the response identified itself, normalized headers, a body
 //!   hash, and an honest attempt count. Read that module before
 //!   assuming anything about retries, redirects, or what `backend: None`
-//!   means.
+//!   means. Task 8.7 added, without changing any of that: a
+//!   [`ProbeTransport`] so the same probe can speak TLS through the seam
+//!   [`tls`] documents, the [`EchoObservation`] a header or rewrite
+//!   contract needs (what the *backend* saw), [`normalize_location`] for
+//!   comparing redirects across implementations, and [`probe_many`] plus
+//!   [`weighted_routing_tolerance`] for the one contract that cannot be
+//!   observed from a single request.
 //! - [`case`] bundles Tasks 6.4 and 6.8's evidence into the
 //!   [`GatewayCaseResult`] Tasks 6.9 and 6.11 consume.
 //! - [`diff`] (Task 6.9) is the only module here that looks at *two*
@@ -159,9 +165,12 @@ pub use port_forward::{
     start_service_port_forward,
 };
 pub use probe::{
-    HttpProbeResult, MAX_PROBE_BODY_BYTES, PROBE_READINESS_WINDOW, PROBE_REQUEST_TIMEOUT,
-    PROBE_RETRY_INTERVAL, REDACTED_REQUEST_HEADERS, describe_probe_request, execute_http_probe,
-    is_redirect, redacted_probe_headers,
+    EchoObservation, HttpProbeResult, MAX_PROBE_BODY_BYTES, MIN_WEIGHTED_ROUTING_SAMPLES,
+    NormalizedLocation, PROBE_READINESS_WINDOW, PROBE_REQUEST_TIMEOUT, PROBE_RETRY_INTERVAL,
+    ProbeObservation, ProbeTally, ProbeTransport, REDACTED_REQUEST_HEADERS, describe_probe_request,
+    execute_http_probe, execute_probe, is_redirect, normalize_location, probe_many,
+    redacted_probe_headers, redirect_location, response_header, weighted_routing_tolerance,
+    weighted_routing_within_tolerance,
 };
 pub use reconcile::{
     DIAGNOSTIC_GATEWAY_CLASS_ABSENT, DIAGNOSTIC_PARENT_ABSENT, DIAGNOSTIC_PARENT_AMBIGUOUS,

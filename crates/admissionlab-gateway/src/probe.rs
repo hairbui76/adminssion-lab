@@ -131,23 +131,103 @@
 //! [`HttpProbeResult`] contains no copy of the request at all, so the
 //! stored evidence path has nothing to redact in the first place — the
 //! strongest version of this guarantee available.
+//!
+//! # TLS (Task 8.7)
+//!
+//! [`ProbeTransport`] is the one thing that differs between a plaintext
+//! probe and a probe of an HTTPS listener, and it is deliberately the
+//! *only* thing: the same request building, the same retry rule, the
+//! same body limit, the same result. [`ProbeTransport::Tls`] carries a
+//! `rustls::ClientConfig` — in practice the one
+//! [`crate::tls::test_certificate_client_config`] builds, which trusts
+//! the generated CA and nothing else — and the connection is dialled
+//! exactly as the plaintext one is and then wrapped, per the recipe
+//! [`crate::tls`]'s "The handoff to Task 8.7" writes out:
+//!
+//! ```text
+//!   TcpStream::connect(local_addr)  ->  TlsConnector::connect(name, _)
+//!                                   ->  hyper::client::conn::http1::handshake
+//! ```
+//!
+//! The load-bearing asymmetry is the same one this module already
+//! documents for the `Host` header, one layer down: the socket goes to
+//! `127.0.0.1:<forwarded port>`, while SNI and certificate verification
+//! use [`HttpProbeContract::host`] through
+//! [`crate::tls::probe_server_name`]. A host that is not a name TLS can
+//! verify against is a *configuration* error, reported once up front as
+//! [`GatewayError::ProbeRequestInvalid`] rather than retried for five
+//! seconds.
+//!
+//! A failed handshake is a failure *before any response*, so it falls
+//! under this module's existing retry rule and, if it never succeeds,
+//! surfaces as [`GatewayError::ProbeUnavailable`] naming the handshake
+//! error. That is the honest classification: nothing was observed about
+//! the route, because nothing got as far as sending a request.
+//!
+//! # What the backend echoed back
+//!
+//! [`HttpProbeResult::backend`] answers "which workload", and for a
+//! header or rewrite contract that is not enough: the question is what
+//! the *backend saw*. [`execute_probe`] therefore returns a
+//! [`ProbeObservation`], which pairs the result with the whole parsed
+//! [`EchoObservation`] — method, path, host and every request header the
+//! echo backend recorded — when the response was an echo answer, and
+//! `None` when it was not. `None` here means exactly what
+//! `backend: None` means: unknown, never guessed.
+//!
+//! This is additive and deliberately kept *outside* [`HttpProbeResult`].
+//! That type is embedded verbatim in the frozen
+//! `admissionlab.io/result/v1beta1` document, and a sixth field on it
+//! would be a schema change; a request's echoed path is evidence a
+//! portable-contract suite asserts on, not something Task 6.9's
+//! comparator reports.
+//!
+//! # Many probes, and the one question they answer together
+//!
+//! [`probe_many`] sends the same contract `n` times and returns a
+//! [`ProbeTally`]. It exists for weighted routing, which is the one
+//! Gateway behavior that *cannot* be observed from a single request: a
+//! request that reached `echo-b` under an 80/20 split is not a failure,
+//! it is one of the twenty. [`weighted_routing_tolerance`] is ROADMAP
+//! Task 8.7 Step 5's bound, verbatim, and
+//! [`MIN_WEIGHTED_ROUTING_SAMPLES`] its stated minimum sample count.
+//!
+//! Sequential, one connection at a time, for the same reason a single
+//! probe opens its own connection: a `kubectl port-forward` is one
+//! process multiplexing one local socket, and concurrent probes through
+//! it would measure the forwarder as much as the data plane.
+//!
+//! # Redirects
+//!
+//! `Location` needs no capture code: it is an ordinary response header,
+//! and this module already records every one of them, lowercased, in
+//! [`HttpProbeResult::response_headers`]. What a cross-implementation
+//! comparison does need is a *normal form* for it, which
+//! [`normalize_location`] supplies — and which deliberately drops the
+//! port. See that function for why.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use admissionlab_core::{RedactedValue, sha256_hex};
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Empty};
 use hyper::body::Incoming;
-use hyper::header::{CONTENT_TYPE, HOST, HeaderName, HeaderValue};
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::header::{CONTENT_TYPE, HOST, HeaderName, HeaderValue, LOCATION};
+use hyper::{Method, Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use serde::Deserialize;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
+use tokio_rustls::TlsConnector;
 
 use crate::error::GatewayError;
 use crate::model::HttpProbeContract;
+use crate::tls::probe_server_name;
 
 /// The largest response body a probe will read.
 ///
@@ -236,7 +316,8 @@ pub struct HttpProbeResult {
     pub attempts: u32,
 }
 
-/// The echo backend's frozen response body, as this module parses it.
+/// The echo backend's frozen response body, as this module parses it:
+/// what the workload that answered says it *received*.
 ///
 /// A second declaration of `admissionlab_echo::echo::EchoBody`'s five
 /// keys rather than an import of that type — see this module's
@@ -246,17 +327,68 @@ pub struct HttpProbeResult {
 /// Every field is required (that is what distinguishes an echo answer
 /// from arbitrary JSON); unknown fields are tolerated (no
 /// `deny_unknown_fields`, deliberately).
-#[derive(Debug, Deserialize)]
-struct EchoBody {
-    backend: String,
-    #[allow(dead_code, reason = "required for the shape to match, never read")]
-    method: String,
-    #[allow(dead_code, reason = "required for the shape to match, never read")]
-    path: String,
-    #[allow(dead_code, reason = "required for the shape to match, never read")]
-    host: String,
-    #[allow(dead_code, reason = "required for the shape to match, never read")]
-    headers: BTreeMap<String, String>,
+///
+/// [`backend`](Self::backend) is what [`HttpProbeResult::backend`]
+/// carries. The other four are what a header, rewrite or redirect
+/// contract asserts on, and they are reachable only through
+/// [`ProbeObservation`] — see this module's "What the backend echoed
+/// back".
+///
+/// No `Serialize`: this is observed evidence a test suite reads, not a
+/// field of the frozen result document.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct EchoObservation {
+    /// Which backend answered — `ADMISSIONLAB_BACKEND_ID`, verbatim.
+    pub backend: String,
+    /// The request method as it reached the backend, so a Gateway that
+    /// rewrote it is visible.
+    pub method: String,
+    /// The request path as it reached the backend, **without the
+    /// query**. This is what a `URLRewrite` filter changes, and the
+    /// only place a rewrite is observable: the probe knows what it
+    /// asked for, and this is what arrived.
+    pub path: String,
+    /// The `Host` header as it reached the backend, verbatim.
+    pub host: String,
+    /// Every non-hop-by-hop request header the backend received,
+    /// lowercased and sorted. This is where a `RequestHeaderModifier`
+    /// filter's effect is observable.
+    pub headers: BTreeMap<String, String>,
+}
+
+/// One probe's [`HttpProbeResult`] together with what the backend
+/// echoed, when the response was an echo answer.
+///
+/// See this module's "What the backend echoed back" for why the echoed
+/// request is carried beside [`HttpProbeResult`] rather than inside it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeObservation {
+    /// What came back: status, backend identity, headers, body hash.
+    pub result: HttpProbeResult,
+    /// What the backend says it received, or `None` when the response
+    /// was not an identifiable echo answer — unknown, never guessed
+    /// (Global Constraint 15).
+    pub echo: Option<EchoObservation>,
+}
+
+/// How a probe's bytes reach the data plane.
+///
+/// The only difference between probing an HTTP listener and an HTTPS
+/// one. See this module's "TLS (Task 8.7)".
+#[derive(Debug, Clone)]
+pub enum ProbeTransport {
+    /// Plain HTTP/1.1 over TCP, which is what
+    /// [`execute_http_probe`] uses.
+    Plaintext,
+    /// HTTP/1.1 over TLS, verified against the supplied
+    /// `rustls::ClientConfig`'s roots and against
+    /// [`HttpProbeContract::host`] as the server name.
+    ///
+    /// `Arc` rather than an owned configuration because `rustls`
+    /// itself takes one: a `TlsConnector` is built from an
+    /// `Arc<ClientConfig>`, and [`probe_many`] builds one connector for
+    /// a thousand connections rather than a thousand configurations.
+    Tls(Arc<ClientConfig>),
 }
 
 /// Sends `contract`'s request to `endpoint` and reports what came back.
@@ -281,11 +413,43 @@ pub async fn execute_http_probe(
     endpoint: SocketAddr,
     contract: &HttpProbeContract,
 ) -> Result<HttpProbeResult, GatewayError> {
+    execute_probe(endpoint, contract, &ProbeTransport::Plaintext)
+        .await
+        .map(|observation| observation.result)
+}
+
+/// [`execute_http_probe`], over `transport`, and reporting what the
+/// backend echoed as well as what came back.
+///
+/// The whole of the probe path; [`execute_http_probe`] is this with
+/// [`ProbeTransport::Plaintext`] and the echoed request dropped. Every
+/// rule that module documentation states — the retry window, the
+/// never-retried response, the body limit, the redaction discipline —
+/// holds here unchanged, because there is only one implementation of
+/// them.
+///
+/// # Errors
+///
+/// As [`execute_http_probe`], plus: a [`ProbeTransport::Tls`] probe of a
+/// [`HttpProbeContract::host`] that is not a DNS name TLS can be
+/// verified against is [`GatewayError::ProbeRequestInvalid`], reported
+/// before any connection is attempted. A TLS handshake that fails
+/// against a server that *is* reachable is a failure before any
+/// response, so it is retried within [`PROBE_READINESS_WINDOW`] and then
+/// reported as [`GatewayError::ProbeUnavailable`] naming the handshake
+/// error.
+pub async fn execute_probe(
+    endpoint: SocketAddr,
+    contract: &HttpProbeContract,
+    transport: &ProbeTransport,
+) -> Result<ProbeObservation, GatewayError> {
     let described = describe_probe_request(contract);
-    // Built once, up front: a contract that cannot be turned into a
-    // request is a configuration error, and retrying it five seconds'
-    // worth of times would only delay saying so.
+    // Both built once, up front: a contract that cannot be turned into a
+    // request, or whose host is not a name TLS can verify against, is a
+    // configuration error, and retrying it five seconds' worth of times
+    // would only delay saying so.
     build_request(contract, &described)?;
+    let transport = resolve_transport(contract, transport, &described)?;
 
     let started = Instant::now();
     let deadline = started + PROBE_READINESS_WINDOW;
@@ -294,16 +458,20 @@ pub async fn execute_http_probe(
     loop {
         attempts = attempts.saturating_add(1);
         let request = build_request(contract, &described)?;
-        match attempt(endpoint, request).await {
+        match attempt(endpoint, &transport, request).await {
             Ok(response) => {
                 let (status, headers, body) = read_response(endpoint, &described, response).await?;
-                return Ok(HttpProbeResult {
-                    status,
-                    backend: parse_backend(&headers, &body),
-                    response_headers: headers,
-                    response_body_sha256: sha256_hex(&body),
-                    elapsed: started.elapsed(),
-                    attempts,
+                let echo = parse_echo(&headers, &body);
+                return Ok(ProbeObservation {
+                    result: HttpProbeResult {
+                        status,
+                        backend: echo.as_ref().map(|echo| echo.backend.clone()),
+                        response_headers: headers,
+                        response_body_sha256: sha256_hex(&body),
+                        elapsed: started.elapsed(),
+                        attempts,
+                    },
+                    echo,
                 });
             }
             Err(not_ready) => {
@@ -324,42 +492,118 @@ pub async fn execute_http_probe(
     }
 }
 
-/// One attempt: connect, handshake, send. `Err(reason)` means *no
-/// response was received*, which is the only thing this module retries.
+/// A [`ProbeTransport`] with everything that can fail resolved: the
+/// connector built, and the server name a TLS probe verifies against
+/// derived from the contract's own host.
 ///
-/// The connection task is spawned and then dropped along with the
-/// response: `hyper`'s low-level client needs the connection future
-/// driven concurrently with the request, and nothing here wants to reuse
-/// it afterwards.
+/// A private twin of the public enum rather than a field on it, so that
+/// the impossible state — "TLS, but we never worked out what name to
+/// verify" — cannot be constructed at all rather than being handled at
+/// every use.
+enum ResolvedTransport {
+    Plaintext,
+    Tls {
+        connector: TlsConnector,
+        server_name: ServerName<'static>,
+    },
+}
+
+/// Resolves `transport` against `contract`'s host, once per probe.
+fn resolve_transport(
+    contract: &HttpProbeContract,
+    transport: &ProbeTransport,
+    described: &str,
+) -> Result<ResolvedTransport, GatewayError> {
+    match transport {
+        ProbeTransport::Plaintext => Ok(ResolvedTransport::Plaintext),
+        ProbeTransport::Tls(config) => {
+            // `crate::tls`'s own half of the seam, called rather than
+            // re-derived: it is where the rule that a probe verifies a
+            // DNS name and not the IP it dialled is written down, and
+            // where the error explaining that rule already lives.
+            let server_name = probe_server_name(&contract.host).map_err(|error| {
+                GatewayError::ProbeRequestInvalid {
+                    request: described.to_owned(),
+                    reason: format!("this probe was asked to connect over TLS, and {error}"),
+                }
+            })?;
+            Ok(ResolvedTransport::Tls {
+                connector: TlsConnector::from(Arc::clone(config)),
+                server_name,
+            })
+        }
+    }
+}
+
+/// One attempt: connect, (optionally) shake hands over TLS, then send.
+/// `Err(reason)` means *no response was received*, which is the only
+/// thing this module retries.
 async fn attempt(
     endpoint: SocketAddr,
+    transport: &ResolvedTransport,
     request: Request<Empty<Bytes>>,
 ) -> Result<Response<Incoming>, String> {
     let attempt = async {
         let stream = TcpStream::connect(endpoint)
             .await
             .map_err(|source| format!("could not connect: {source}"))?;
-        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-            .await
-            .map_err(|source| format!("HTTP/1.1 handshake failed: {source}"))?;
-        // Driven on its own task for as long as the response body is
-        // being read; it ends when the connection closes. Its result is
-        // deliberately ignored: a connection that ends after the
-        // response has been read is normal, and a connection that fails
-        // before then surfaces on `send_request` or on the body read.
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
-        sender
-            .send_request(request)
-            .await
-            .map_err(|source| format!("the request could not be sent: {source}"))
+        match transport {
+            ResolvedTransport::Plaintext => send_request(stream, request).await,
+            ResolvedTransport::Tls {
+                connector,
+                server_name,
+            } => {
+                // The connection went to `endpoint` (a local, forwarded
+                // address); the name verified is the contract's own
+                // host. See this module's "TLS (Task 8.7)".
+                let stream = connector
+                    .connect(server_name.clone(), stream)
+                    .await
+                    .map_err(|source| format!("the TLS handshake failed: {source}"))?;
+                send_request(stream, request).await
+            }
+        }
     };
 
     match tokio::time::timeout(PROBE_REQUEST_TIMEOUT, attempt).await {
         Ok(result) => result,
         Err(_elapsed) => Err(format!("no response within {PROBE_REQUEST_TIMEOUT:?}")),
     }
+}
+
+/// Shakes hands and sends one request over an already-connected stream,
+/// whatever that stream is.
+///
+/// Generic over the stream so the plaintext and TLS paths share one
+/// implementation of everything above the socket — which is the property
+/// that makes a TLS probe the *same* probe rather than a second one.
+///
+/// The connection task is spawned and then dropped along with the
+/// response: `hyper`'s low-level client needs the connection future
+/// driven concurrently with the request, and nothing here wants to reuse
+/// it afterwards.
+async fn send_request<S>(
+    stream: S,
+    request: Request<Empty<Bytes>>,
+) -> Result<Response<Incoming>, String>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        .await
+        .map_err(|source| format!("HTTP/1.1 handshake failed: {source}"))?;
+    // Driven on its own task for as long as the response body is
+    // being read; it ends when the connection closes. Its result is
+    // deliberately ignored: a connection that ends after the
+    // response has been read is normal, and a connection that fails
+    // before then surfaces on `send_request` or on the body read.
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    sender
+        .send_request(request)
+        .await
+        .map_err(|source| format!("the request could not be sent: {source}"))
 }
 
 /// Reads a response's status, normalized headers, and body.
@@ -486,18 +730,18 @@ fn normalize_headers(headers: &hyper::HeaderMap) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Reads the echo backend's identity out of a response, or `None`.
+/// Reads what the echo backend says it received out of a response, or
+/// `None`.
 ///
 /// Two gates, both required: the response must declare a JSON content
 /// type, and the body must parse as the frozen five-key shape. See this
-/// module's "Identifying the backend" section.
-fn parse_backend(headers: &BTreeMap<String, String>, body: &[u8]) -> Option<String> {
+/// module's "Identifying the backend" section — everything it says about
+/// `backend: None` is a statement about this function.
+fn parse_echo(headers: &BTreeMap<String, String>, body: &[u8]) -> Option<EchoObservation> {
     if !is_json_content_type(headers.get(CONTENT_TYPE.as_str())?) {
         return None;
     }
-    serde_json::from_slice::<EchoBody>(body)
-        .ok()
-        .map(|echo| echo.backend)
+    serde_json::from_slice::<EchoObservation>(body).ok()
 }
 
 /// Whether a `Content-Type` value names JSON.
@@ -581,6 +825,234 @@ pub fn redacted_probe_headers(contract: &HttpProbeContract) -> BTreeMap<String, 
 #[must_use]
 pub fn is_redirect(status: u16) -> bool {
     StatusCode::from_u16(status).is_ok_and(|status| status.is_redirection())
+}
+
+/// One response header's value, looked up case-insensitively.
+///
+/// [`HttpProbeResult::response_headers`] is already normalized to
+/// lowercase keys, so this is a lowercase of `name` and a map lookup —
+/// written once here rather than at every assertion site, because a
+/// contract that asked for `X-Admissionlab-Response` and silently found
+/// nothing would read as "the implementation did not set the header"
+/// when the truth was "the caller did not lowercase".
+#[must_use]
+pub fn response_header<'a>(result: &'a HttpProbeResult, name: &str) -> Option<&'a str> {
+    result
+        .response_headers
+        .get(&name.to_ascii_lowercase())
+        .map(String::as_str)
+}
+
+/// A `Location` header reduced to the three parts two implementations
+/// can be expected to agree on.
+///
+/// See [`normalize_location`] for what is dropped and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NormalizedLocation {
+    /// The URI scheme, lowercased, or `None` for a relative `Location`.
+    pub scheme: Option<String>,
+    /// The host, lowercased and **without** the port, or `None` for a
+    /// relative `Location`.
+    pub host: Option<String>,
+    /// The path component, verbatim. Empty when the `Location` had
+    /// none.
+    pub path: String,
+}
+
+impl std::fmt::Display for NormalizedLocation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match (&self.scheme, &self.host) {
+            (Some(scheme), Some(host)) => write!(formatter, "{scheme}://{host}{}", self.path),
+            _ => write!(formatter, "{}", self.path),
+        }
+    }
+}
+
+/// Reduces a `Location` header value to scheme, host and path, dropping
+/// the port and everything after the path.
+///
+/// **The port is dropped deliberately, and it is the only interesting
+/// decision here.** A probe reaches a Gateway through a `kubectl
+/// port-forward`, so the origin the request arrives on is
+/// `127.0.0.1:<an ephemeral local port>` while the `Host` header says
+/// something like `redirect.gateway.admissionlab.test`. An
+/// implementation building an absolute redirect target may echo the
+/// authority it was given (no port), append the listener's port, or
+/// append the port it believes the client used — and all three are
+/// conforming answers to the same `HTTPRoute`. Comparing ports would
+/// therefore compare the port-forward, not the route, and would make a
+/// portable contract fail for an implementation that is behaving
+/// correctly. What the contract is actually about — *did the redirect go
+/// to the hostname and path the filter names* — is exactly scheme, host
+/// and path.
+///
+/// The query and fragment are dropped for the narrower reason that
+/// `admissionlab_echo::echo::EchoBody::path` already drops the query:
+/// one notion of "the path" across this project, not two.
+///
+/// Returns `None` if the value is not a URI at all — unparseable, never
+/// guessed.
+#[must_use]
+pub fn normalize_location(value: &str) -> Option<NormalizedLocation> {
+    let uri = value.trim().parse::<Uri>().ok()?;
+    Some(NormalizedLocation {
+        scheme: uri.scheme_str().map(str::to_ascii_lowercase),
+        host: uri.host().map(str::to_ascii_lowercase),
+        path: uri.path().to_owned(),
+    })
+}
+
+/// The normalized `Location` of a response that carried one.
+///
+/// `None` covers both "no `Location` header" and "a `Location` that is
+/// not a URI"; a redirect contract asserting on this must therefore say
+/// which it got, which is why the header itself stays available in
+/// [`HttpProbeResult::response_headers`].
+#[must_use]
+pub fn redirect_location(result: &HttpProbeResult) -> Option<NormalizedLocation> {
+    normalize_location(response_header(result, LOCATION.as_str())?)
+}
+
+/// The smallest sample count ROADMAP Task 8.7 Step 5 accepts for a
+/// weighted-routing contract.
+///
+/// The roadmap's words: "Use at least `n=1000` requests for 20/80 or
+/// 50/50 fixtures." Stated as a constant so a fixture that quietly used
+/// 200 would have to say so in a diff.
+pub const MIN_WEIGHTED_ROUTING_SAMPLES: u32 = 1000;
+
+/// What `n` probes of one contract reached.
+///
+/// Counts only. This type never decides whether a split is correct —
+/// that is [`weighted_routing_within_tolerance`]'s question, and it is
+/// asked of the whole tally, never of one request (ROADMAP Task 8.7
+/// Step 5: "Do not classify a single request as weighted-routing
+/// correctness").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProbeTally {
+    /// How many probes were sent, and — because [`probe_many`] returns
+    /// an error rather than a partial tally — how many answered.
+    pub requests: u32,
+    /// How many responses each identified backend answered.
+    pub by_backend: BTreeMap<String, u32>,
+    /// How many responses did not identify a backend at all. Reported
+    /// rather than dropped: a split that "passed" while a tenth of the
+    /// requests were answered by the Gateway's own error page is not a
+    /// pass, and only this field makes that visible.
+    pub unidentified: u32,
+    /// How many responses carried each status code. Recorded for the
+    /// same reason [`HttpProbeResult::status`] is: a `503` is an
+    /// observation.
+    pub by_status: BTreeMap<u16, u32>,
+    /// Wall-clock time for the whole run of probes.
+    pub elapsed: Duration,
+}
+
+impl ProbeTally {
+    /// The proportion of all requests that `backend` answered, in
+    /// `0.0..=1.0`.
+    ///
+    /// The denominator is [`requests`](Self::requests) — every probe
+    /// sent — and not the identified subset. Dividing by the identified
+    /// subset would let a run in which half the requests failed report
+    /// a perfect 80/20 split.
+    ///
+    /// Zero requests is `0.0`: a proportion of nothing, which is what a
+    /// caller comparing against a tolerance should treat as a failure,
+    /// rather than a `NaN` that compares false against everything
+    /// including itself.
+    #[must_use]
+    pub fn share(&self, backend: &str) -> f64 {
+        if self.requests == 0 {
+            return 0.0;
+        }
+        let count = self.by_backend.get(backend).copied().unwrap_or(0);
+        f64::from(count) / f64::from(self.requests)
+    }
+}
+
+/// ROADMAP Task 8.7 Step 5's tolerance, verbatim:
+///
+/// ```text
+/// abs(observed - p) <= max(0.05, 4 * sqrt(p * (1-p) / n))
+/// ```
+///
+/// This is the right-hand side. Four standard errors of a binomial
+/// proportion, floored at five percentage points so that a very large
+/// `n` cannot tighten the bound into flakiness: at `n = 1000` and
+/// `p = 0.2` the statistical term is about 0.0506, so the floor and the
+/// standard-error term are deliberately of the same order there rather
+/// than one of them being decorative.
+///
+/// `n = 0` yields infinity for the statistical term; the floor makes the
+/// result 0.05 only if that term is smaller, which it is not, so a
+/// zero-sample "contract" is never accepted by
+/// [`weighted_routing_within_tolerance`]. That is the correct answer: no
+/// samples is no evidence.
+#[must_use]
+pub fn weighted_routing_tolerance(expected: f64, samples: u32) -> f64 {
+    let statistical = 4.0 * (expected * (1.0 - expected) / f64::from(samples)).sqrt();
+    statistical.max(0.05)
+}
+
+/// Whether an observed proportion is within
+/// [`weighted_routing_tolerance`] of the expected one.
+///
+/// The left-hand side of the roadmap's inequality, and the comparison
+/// itself. A `NaN` observed proportion (which nothing here produces, but
+/// which arithmetic on a caller's own counts could) fails, because
+/// `NaN <= x` is false — the safe direction.
+#[must_use]
+pub fn weighted_routing_within_tolerance(observed: f64, expected: f64, samples: u32) -> bool {
+    (observed - expected).abs() <= weighted_routing_tolerance(expected, samples)
+}
+
+/// Sends `contract`'s request `requests` times and tallies what
+/// answered.
+///
+/// Sequential, each probe a fresh [`execute_probe`] with its own
+/// connection — see this module's "Many probes, and the one question
+/// they answer together". At the few milliseconds a local port-forward
+/// costs per request, [`MIN_WEIGHTED_ROUTING_SAMPLES`] probes is a
+/// matter of seconds.
+///
+/// # Errors
+///
+/// Any error from any single probe, immediately, rather than a partial
+/// tally: a run in which the port-forward died halfway through has not
+/// measured an 80/20 split, and reporting the first 500 requests as if
+/// it had would be exactly the fabricated evidence Global Constraint 15
+/// forbids. An HTTP error *status* is not an error here — it is counted
+/// in [`ProbeTally::by_status`], as everywhere else in this module.
+pub async fn probe_many(
+    endpoint: SocketAddr,
+    contract: &HttpProbeContract,
+    transport: &ProbeTransport,
+    requests: u32,
+) -> Result<ProbeTally, GatewayError> {
+    let started = Instant::now();
+    let mut tally = ProbeTally {
+        requests,
+        by_backend: BTreeMap::new(),
+        unidentified: 0,
+        by_status: BTreeMap::new(),
+        elapsed: Duration::ZERO,
+    };
+
+    for _ in 0..requests {
+        let observation = execute_probe(endpoint, contract, transport).await?;
+        *tally
+            .by_status
+            .entry(observation.result.status)
+            .or_insert(0) += 1;
+        match observation.result.backend {
+            Some(backend) => *tally.by_backend.entry(backend).or_insert(0) += 1,
+            None => tally.unidentified += 1,
+        }
+    }
+
+    tally.elapsed = started.elapsed();
+    Ok(tally)
 }
 
 /// Serializes a [`Duration`] as a plain integer number of milliseconds.

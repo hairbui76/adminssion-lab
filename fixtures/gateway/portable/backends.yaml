@@ -1,0 +1,370 @@
+# Portable Gateway contracts: the namespaces, the echo backends, and the
+# one `ReferenceGrant` (ROADMAP Task 8.7).
+#
+# Shared by BOTH certified implementations, byte for byte. Nothing in
+# this file names a vendor, a `GatewayClass`, or a controller -- that is
+# the entire point of the split this directory makes, and
+# `fixtures/gateway/portable/README.md` describes the convention. What
+# differs per implementation lives in `gateway-istio.yaml` /
+# `gateway-nginx.yaml` and nowhere else.
+#
+# Documents are applied by
+# `admissionlab_gateway::apply::apply_gateway_manifests`, which sorts
+# every document from every file into one fixed category order
+# (`Namespace` -> `Secret`/`ConfigMap` -> `Service` -> `Deployment` ->
+# `GatewayClass` -> `Gateway` -> `ReferenceGrant` -> `HTTPRoute`) before
+# applying any of them. So the order documents appear in this file, and
+# the order the files themselves are passed, are both for a human
+# reader's benefit only.
+#
+# # Three backends, and why exactly three
+#
+#   - `echo-a` and `echo-b` in `admissionlab-portable`, beside the
+#     Gateway. Two are needed because the weighted-routing contract
+#     splits between two backends and tallies which one answered; one
+#     would make an 80/20 split unobservable.
+#   - `echo-b` in `admissionlab-portable-remote`, answering with the
+#     identity `echo-b-remote`. This is the cross-namespace contract's
+#     backend, and the changed identity is what makes that contract
+#     provable: a probe that reached "echo-b-remote" crossed a namespace
+#     boundary, while a probe that reached "echo-b" did not. Sharing the
+#     identity between the local and remote copies would have made the
+#     two indistinguishable in exactly the evidence the contract rests
+#     on.
+#
+# # Copies of `fixtures/gateway/backends/echo-{a,b}.yaml`, and what may
+# # differ
+#
+# That directory is the source of truth for what an echo backend *is*,
+# and it deliberately declares no namespace at all (see its own header):
+# the applying suite is expected to choose one.
+# `apply_gateway_manifests` has no such parameter -- it applies each
+# document to the namespace the document itself names -- so a namespaced
+# object naming none would land in `default`, silently, in a fixture
+# whose whole point is which namespace each object is in.
+#
+# The three workloads below are therefore copies, and exactly two fields
+# may differ from the shared definition:
+#
+#   1. `metadata.namespace`, added (every copy);
+#   2. the `ADMISSIONLAB_BACKEND_ID` env value, for the remote copy only,
+#      for the reason stated above.
+#
+# `crates/admissionlab-gateway/tests/portable_contracts.rs`'s
+# `the_portable_backends_match_the_shared_echo_definitions` parses this
+# file and both shared definitions and fails if anything else has
+# drifted, so the duplication is machine-checked rather than trusted to
+# reviewers -- the same discipline, and the same reasoning, as
+# `fixtures/gateway/istio/same-namespace.yaml`'s own header.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-portable
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+    # Deliberately NOT `istio-injection: enabled`. A Gateway data plane
+    # is provisioned from the `Gateway` object itself; sidecar injection
+    # is a different Istio feature entirely, it has no NGINX Gateway
+    # Fabric counterpart, and a label that only one implementation reads
+    # would make this a per-implementation file.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-portable-remote
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Service, with
+# --- metadata.namespace added.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: admissionlab-portable
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Deployment, with
+# --- metadata.namespace added.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: admissionlab-portable
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-a
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# --- Copy of fixtures/gateway/backends/echo-b.yaml's Service, with
+# --- metadata.namespace added.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: admissionlab-portable
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-b.yaml's Deployment, with
+# --- metadata.namespace added.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  namespace: admissionlab-portable
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-b
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# --- Copy of fixtures/gateway/backends/echo-b.yaml's Service, in the
+# --- REMOTE namespace. Same name, because the Service's own name is not
+# --- what identifies a backend in an echo answer.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: admissionlab-portable-remote
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-b.yaml's Deployment, in the
+# --- REMOTE namespace, and the ONE copy that also changes
+# --- ADMISSIONLAB_BACKEND_ID -- see this file's header for why the
+# --- cross-namespace contract needs a distinguishable identity.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  namespace: admissionlab-portable-remote
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-b-remote
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The one `ReferenceGrant`, and the whole of the cross-namespace
+# contract's permission half.
+#
+# It lives in the namespace that owns the referenced Service -- that is
+# where Gateway API requires it, because the namespace being referenced
+# INTO is the one whose owner gets to say yes -- and it names the single
+# Service it permits rather than every Service in the namespace. A grant
+# without `to[].name` would still make the contract pass while proving
+# something weaker than what it claims.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-portable-routes
+  namespace: admissionlab-portable-remote
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: admissionlab-portable
+  to:
+    # An empty `group` is the core API group -- Service. Written out
+    # rather than omitted because the field is required by the Gateway
+    # API schema.
+    - group: ""
+      kind: Service
+      name: echo-b
