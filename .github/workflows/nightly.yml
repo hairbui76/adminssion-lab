@@ -200,7 +200,28 @@ jobs:
   recipe-certification:
     name: Tier 2 recipe certification
     # ROADMAP Task 7.5 step 1: the nightly tier runs the *generated*
-    # matrix, not a duplicate of it. `recipe-matrix.yml` reads
+    # matrix, not a duplicate of it.
+    #
+    # ROADMAP Task 8.9 widened what that means for this suite, with no
+    # edit here beyond this note -- which is the property the `uses:`
+    # call was chosen for. Calling `recipe-matrix.yml` at `nightly` now
+    # additionally runs:
+    #
+    #   - NGINX Gateway Fabric on all three supported Kubernetes minors
+    #     rather than only the primary (its two other rows moved from
+    #     Tier 3 to Tier 2 in `compatibility/recipes.yaml`); and
+    #   - the `portable-contracts` job, which drives the byte-identical
+    #     `fixtures/gateway/portable/` corpus through BOTH certified
+    #     Gateway API implementations in one run. That is the Phase 8
+    #     exit gate's first must-be-true, and the weighted-routing
+    #     contract inside it (1,000 samples, an explicit tolerance) is
+    #     the gate's fifth -- which only a repeated schedule can speak
+    #     to at all.
+    #
+    # The archived legacy `ingress-nginx` stack is deliberately NOT in
+    # this tier and is not installed by this suite: it is Tier 3 only,
+    # in the migration-specific jobs `compatibility/recipes.yaml`'s own
+    # entry describes. `recipe-matrix.yml` reads
     # `compatibility/recipes.yaml`, selects every combination at
     # `nightly` or more frequent (tiers are cumulative downward), and
     # runs one real cluster per row -- so adding a certified combination

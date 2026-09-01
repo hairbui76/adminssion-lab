@@ -212,6 +212,29 @@ jobs:
           - package: admissionlab-cli
             test: gateway_demo
             timeout: 60
+          # DELIBERATELY ABSENT: `admissionlab-gateway`'s
+          # `portable_contracts` (Task 8.7) and `admissionlab-cli`'s
+          # `migration_demo` (Task 8.8). Both are real-cluster suites and
+          # both would fit this matrix mechanically; ROADMAP Task 8.9
+          # places them on schedules instead, and
+          # `.github/workflows/recipe-matrix.yml` runs them there --
+          # `portable-contracts` at Tier 2 (nightly) and
+          # `migration-demo` at Tier 3 (weekly).
+          #
+          # The reason is cost per pull request rather than confidence.
+          # `portable_contracts` installs BOTH Gateway implementations,
+          # one cluster each, and sends 1,000 sequential probes for its
+          # weighted-routing contract; `migration_demo` drives FOUR full
+          # lab runs (~175 s each, measured), eight clusters in total,
+          # installing an `ingress-nginx` chart and an OCI NGF chart
+          # every time. Together they would roughly double this
+          # workflow's per-PR real-cluster bill, and both answer
+          # questions -- "do two implementations agree?", "is a
+          # migration regression still observed?" -- that a daily and a
+          # weekly run answer within their own useful window. The
+          # non-cluster halves of both files (the fixture-tree checks and
+          # the example's declared shape) still run on every commit,
+          # under `cargo test --workspace` in `ci.yml`.
     steps:
       - name: Check out repository
         # v7.0.1: verified against the GitHub API

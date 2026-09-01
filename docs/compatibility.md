@@ -32,7 +32,7 @@ repository has actually run.
 ## The certified table
 
 Transcribed from [`compatibility/recipes.yaml`](../compatibility/recipes.yaml),
-which is the authority. Seven rows.
+which is the authority. Eleven rows.
 
 | Recipe | Recipe version | Kubernetes | Tier | Proven by |
 | --- | --- | --- | --- | --- |
@@ -43,6 +43,10 @@ which is the authority. Seven rows.
 | `istio-gateway` | `1.30.4` | `1.35.8` | `weeklyRelease` | `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs` |
 | `istio-gateway` | `1.30.4` | `1.36.4` | `perCommit` | `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs` |
 | `istio-gateway` | `1.30.4` | `1.37.0` | `weeklyRelease` | `crates/admissionlab-recipes/tests/istio_gateway_recipe.rs` |
+| `nginx-gateway-fabric` | `2.6.7` | `1.35.8` | `nightly` | `crates/admissionlab-recipes/tests/nginx_gateway_recipe.rs` |
+| `nginx-gateway-fabric` | `2.6.7` | `1.36.4` | `perCommit` | `crates/admissionlab-recipes/tests/nginx_gateway_recipe.rs` |
+| `nginx-gateway-fabric` | `2.6.7` | `1.37.0` | `nightly` | `crates/admissionlab-recipes/tests/nginx_gateway_recipe.rs` |
+| `ingress-nginx-legacy` | `4.15.1` | `1.36.4` | `weeklyRelease` | `crates/admissionlab-recipes/tests/ingress_nginx_legacy.rs` |
 
 **That is the complete list.** Nothing else in this repository is certified —
 not `test-webhook` (Admission Lab's own dogfood webhook, which is a test
@@ -51,8 +55,9 @@ installs CustomResourceDefinitions and has no behavior of its own to certify
 against a Kubernetes version independently of the implementation serving them),
 and no other chart, version or vendor at all.
 
-Two entries deserve calling out, because both are places where the honest
-answer is narrower than the convenient one:
+Four entries deserve calling out. Two are places where the honest answer is
+narrower than the convenient one; two are Phase 8's, and are where the tier
+column carries a decision rather than a default:
 
 - **`kyverno` is certified on `1.35.8` and nowhere else** — deliberately *not*
   on `1.36.4`, which is Admission Lab's own primary Kubernetes version. Kyverno's
@@ -65,9 +70,27 @@ answer is narrower than the convenient one:
   those two is the full provisionable set because every row in it was actually
   installed and verified, not because an absent constraint was read as
   permission.
+- **`nginx-gateway-fabric`'s two non-primary minors are Tier 2, where
+  `istio-gateway`'s are Tier 3.** They were Tier 3 too until ROADMAP Task 8.9
+  moved them, and the asymmetry is the decision rather than an oversight:
+  Task 8.9 asks for NGINX Gateway Fabric in Tier 2, the Phase 8 exit gate rests
+  on this implementation specifically (the portable `HTTPRoute` corpus must run
+  against Istio *and* NGF), and NGF's stack is the cheaper of the two to install
+  — 12.5 s for the Helm release against istiod's 22.5 s. Nothing about the
+  certification changed; only how often it runs.
+- **`ingress-nginx-legacy` is one row, on one Kubernetes version, at the least
+  frequent tier — and it is outside its own `documentedRange`.** The upstream
+  project is retired and its repository archived; this recipe exists so
+  Admission Lab can test migrations *away* from it, and Global Constraint 10
+  admits it at v1 only if it passes on the primary supported Kubernetes version,
+  which the vendor's own (now frozen) table stops short of. Both halves are
+  recorded: `documentedRange` still says `1.31`–`1.35`, and the certified row
+  says `1.36.4`, which is Admission Lab's own measurement. Task 8.9 step 2's
+  "migration-specific Tier 3" is this row plus the `migration-demo` job, and
+  nothing else installs the archived stack at all.
 
 The list is machine-checked against itself: `certified_combinations()` must
-equal exactly the seven rows above
+equal exactly the eleven rows above
 (`crates/admissionlab-recipes/tests/compatibility.rs`,
 `the_certified_combinations_are_exactly_the_reviewed_ones`), every certified
 Kubernetes version must be one `compatibility/kubernetes.yaml` marks
@@ -84,11 +107,18 @@ and the component was then observed *doing its job* — Kyverno enforcing this
 repository's fixture policies, Istio actually injecting a sidecar. Not "the
 chart installed".
 
-For the **Gateway** recipe (`istio-gateway`): the same, plus the Gateway API CRD
-bundle, plus a `Gateway` and an `HTTPRoute` reconciled to
-`Accepted`/`ResolvedRefs`/`Programmed`, plus a real HTTP request answered with
-`200` **by the expected backend** — in both the same-namespace and the
-cross-namespace/`ReferenceGrant` configuration.
+For a **Gateway** recipe (`istio-gateway`, `nginx-gateway-fabric`): the same,
+plus the Gateway API CRD bundle, plus a `Gateway` and an `HTTPRoute` reconciled
+to `Accepted`/`ResolvedRefs`/`Programmed`, plus a real HTTP request answered
+with `200` **by the expected backend** — in both the same-namespace and the
+cross-namespace/`ReferenceGrant` configuration, and for NGF additionally through
+its own `NginxProxy` data-plane override.
+
+For the **legacy migration** recipe (`ingress-nginx-legacy`): the chart
+installed at its defaults, real HTTP traffic routed through a real `Ingress` to
+the echo backend, and the validating admission webhook proven to *reject*
+`fixtures/migration/ingress-nginx/webhook-deny.yaml`. A run in which that apply
+succeeds is a failure, not a pass.
 
 What a certification does **not** assert: that the combination is bug-free, that
 the vendor supports it, or that your own values, policies and fixtures behave the
@@ -102,13 +132,21 @@ Every certified row carries the tier that runs it. A tier is a statement about
 
 | Tier | Wire spelling | Runs on | Rows |
 | --- | --- | --- | ---: |
-| Tier 1 | `perCommit` | Every push to `main`, and pull requests touching the code or metadata it covers | 3 |
-| Tier 2 | `nightly` | The nightly workflow | 5 |
-| Tier 3 | `weeklyRelease` | Weekly cron, manual dispatch, and every release candidate | 7 |
+| Tier 1 | `perCommit` | Every push to `main`, and pull requests touching the code or metadata it covers | 4 |
+| Tier 2 | `nightly` | The nightly workflow | 8 |
+| Tier 3 | `weeklyRelease` | Weekly cron, manual dispatch, and every release candidate | 11 |
 
 **Tiers are cumulative downward**: each tier runs its own rows *and* every more
-frequent tier's, so the counts grow 3 → 5 → 7 and each row appears exactly once,
-at its cheapest schedule. Tier 2 is deliberately arranged to cover every
+frequent tier's, so the counts grow 4 → 8 → 11 and each row appears exactly once,
+at its cheapest schedule.
+
+Three CI jobs are **not** rows in this table, and deliberately:
+`portable-contracts` (Tier 2), `gateway-demo` and `migration-demo` (Tier 3).
+None certifies a recipe × Kubernetes combination, which is the only thing this
+table describes. They certify that one `HTTPRoute` corpus behaves the same on
+both certified implementations, and that two regressions — a Gateway one and an
+Ingress-to-Gateway migration one — are still detected and still reported the
+same way. See [`.github/workflows/recipe-matrix.yml`](../.github/workflows/recipe-matrix.yml). Tier 2 is deliberately arranged to cover every
 supported Kubernetes minor at least once
 (`tier_2_covers_every_supported_kubernetes_minor`), and Tier 1 is capped at one
 Kubernetes version per recipe (`tier_1_certifies_at_most_one_kubernetes_version_per_recipe`) —

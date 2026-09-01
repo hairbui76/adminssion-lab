@@ -95,16 +95,27 @@ TESTS = {
     "kyverno": ("admissionlab-recipes", "kyverno_recipe"),
     "istio": ("admissionlab-recipes", "istio_recipe"),
     "istio-gateway": ("admissionlab-recipes", "istio_gateway_recipe"),
-    # Task 8.1. The second Gateway API implementation. Certified on the
-    # primary Kubernetes minor at Tier 1 and on the other two at Tier 3,
-    # exactly like `istio-gateway` above -- so `--tier perCommit` selects
-    # one row here and `--tier weeklyRelease` selects all three.
+    # Task 8.1, retiered by Task 8.9. The second Gateway API
+    # implementation: the primary Kubernetes minor at Tier 1 and the
+    # other two at Tier 2 -- so `--tier perCommit` selects one row here
+    # and `--tier nightly` selects all three.
     "nginx-gateway-fabric": ("admissionlab-recipes", "nginx_gateway_recipe"),
     # Task 8.2. A retired upstream, certified at Tier 3 only -- so this
     # row is selected by `--tier weeklyRelease` and by nothing more
     # frequent.
     "ingress-nginx-legacy": ("admissionlab-recipes", "ingress_nginx_legacy"),
 }
+
+# Two jobs `.github/workflows/recipe-matrix.yml` runs that are
+# deliberately NOT in this mapping, and one that already was:
+# `portable-contracts` (Tier 2) and `migration-demo` / `gateway-demo`
+# (Tier 3). None of them certifies a recipe x Kubernetes combination,
+# which is the only thing `compatibility/recipes.yaml` describes -- they
+# certify that one HTTPRoute corpus behaves the same on two
+# implementations, and that two regressions are still detected and
+# reported the same way. Adding them here would require inventing rows
+# for recipes they do not correspond to, and the workflow would then
+# have to filter them back out.
 
 
 def load(root, name):

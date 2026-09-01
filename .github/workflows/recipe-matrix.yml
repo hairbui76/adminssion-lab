@@ -16,19 +16,34 @@
 # `tier` is recorded per certified combination in
 # `compatibility/recipes.yaml` and is cumulative downward (see
 # `admissionlab_recipes::CertificationTier`): each tier runs its own rows
-# and every more frequent tier's, so the row count grows 3 -> 5 -> 7.
+# and every more frequent tier's, so the row count grows 4 -> 8 -> 11.
 #
 #   Tier 1 (perCommit)      Every push to `main`, plus any pull request
 #                           that touches the compatibility metadata or
-#                           the matrix machinery itself. 3 clusters.
+#                           the matrix machinery itself. 4 certification
+#                           clusters.
 #   Tier 2 (nightly)        Called by `.github/workflows/nightly.yml`
 #                           (`workflow_call`, below), so the nightly
 #                           suite runs *this* generated matrix rather
-#                           than a second copy of it. 5 clusters.
-#   Tier 3 (weeklyRelease)  Weekly cron and manual dispatch: all 7
+#                           than a second copy of it. 8 certification
+#                           clusters, plus the `portable-contracts` job.
+#   Tier 3 (weeklyRelease)  Weekly cron and manual dispatch: all 11
 #                           combinations, each certified three times
-#                           over for reliability, plus the canonical
-#                           Gateway regression demo.
+#                           over for reliability, plus `portable-contracts`
+#                           and both Gateway demos -- the Istio regression
+#                           demo and the Ingress-to-Gateway migration one.
+#
+# # Three jobs that are not matrix rows (ROADMAP Tasks 6.12, 8.8, 8.9)
+#
+# `portable-contracts`, `gateway-demo` and `migration-demo` are separate
+# jobs rather than rows of the generated matrix, and for the same reason
+# in all three cases: none of them certifies a recipe x Kubernetes
+# combination, which is the only thing `compatibility/recipes.yaml`
+# describes. They certify, respectively, that one HTTPRoute corpus
+# behaves the same on two implementations, that a Gateway regression is
+# still detected and reported the same way, and that an
+# Ingress-to-Gateway migration's behavior change is still observed
+# through real traffic. A row cannot say any of that.
 #
 # # Why the pull_request path filter is so narrow
 #
@@ -452,6 +467,149 @@ jobs:
         # has rather than a copy of it -- see
         # `scripts/verify-cleanup.sh`'s own header for why
         # `--check-only` reports a leak instead of tidying it away.
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  portable-contracts:
+    name: Portable Gateway contracts on both implementations (Tier 2)
+    needs: generate-matrix
+    # THE PHASE 8 EXIT GATE'S FIRST BULLET, on a schedule: "same portable
+    # HTTPRoute corpus runs against Istio and NGINX Gateway Fabric".
+    # `crates/admissionlab-gateway/tests/portable_contracts.rs` installs
+    # BOTH implementations, each in its own disposable cluster, applies
+    # the byte-identical `fixtures/gateway/portable/` corpus to each, and
+    # drives all seven contracts through both -- including the weighted
+    # routing contract, whose 1,000-sample tolerance
+    # (`MIN_WEIGHTED_ROUTING_SAMPLES`, `weighted_routing_tolerance`) is
+    # the gate's fifth bullet and is exactly what needs a *repeated*
+    # schedule to be evidence about flakiness rather than one lucky run.
+    #
+    # Tier 2 rather than Tier 3 (ROADMAP Task 8.9 step 3). It is the
+    # claim Phase 8 rests on hardest, it is two clusters rather than
+    # eleven, and running it weekly would mean a portability regression
+    # could sit undetected for six days. Not Tier 1: two clusters and two
+    # full Gateway stacks per pull request is more than the signal adds,
+    # and `integration.yml` already runs each implementation's own
+    # certification on the pull requests that touch it.
+    #
+    # One Kubernetes version, by the suite's own design: its subject is
+    # two implementations of one API, and the per-implementation matrix
+    # rows above already sweep the minors.
+    if: needs.generate-matrix.outputs.tier != 'perCommit'
+    runs-on: ubuntu-latest
+    # Two clusters, two Gateway stacks, a vendored 1 MB CRD bundle each,
+    # and 1,000 sequential probes for the weighted contract. Sized like
+    # the demo jobs below rather than like a single certification row.
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: recipe-matrix-portable-contracts
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind ${{ env.KIND_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Run the portable corpus against both implementations
+        run: |
+          set -euo pipefail
+          mkdir -p portable-contract-logs
+          cargo test -p admissionlab-gateway --test portable_contracts -- --ignored --nocapture 2>&1 \
+            | tee portable-contract-logs/portable-contracts.log
+
+      - name: Upload the failed run's evidence
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: portable-contract-logs
+          path: portable-contract-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
+        run: ./scripts/verify-cleanup.sh --check-only
+
+  migration-demo:
+    name: Ingress-to-Gateway migration demo (Tier 3)
+    needs: generate-matrix
+    # ROADMAP Task 8.9's "migration demo into Tier 3", and the ONLY
+    # migration-specific job this workflow has. It is where the archived
+    # legacy `ingress-nginx` stack is installed outside its own
+    # certification row -- which is what
+    # `compatibility/recipes.yaml`'s legacy entry means by
+    # "migration-specific Tier 3", stated there in full.
+    #
+    # `crates/admissionlab-cli/tests/migration_demo.rs` drives
+    # `examples/ingress-to-gateway/` through the compiled binary against
+    # two real clusters, twice over, and asserts the three behaviors the
+    # example demonstrates: one preserved, one accepted non-portability,
+    # and one unintended backend regression that exits 1.
+    #
+    # A separate job rather than a matrix row, for the reason this file's
+    # header gives: it certifies that a *migration regression is still
+    # observed through real traffic*, which no recipe x Kubernetes row
+    # describes.
+    if: needs.generate-matrix.outputs.tier == 'weeklyRelease'
+    runs-on: ubuntu-latest
+    # Measured locally at ~175 s per lab run on a warm image cache, and
+    # this test file drives four of them (the three-behavior assertion,
+    # two runs for the determinism assertion, and one for the
+    # published-artifact secret scan). A 60-minute ceiling for the same
+    # reason `gateway-demo` has one: a cold GitHub runner pulls an
+    # `ingress-nginx` chart, an OCI NGF chart and both their images
+    # before the first request is sent.
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Cache Cargo registry, git deps, and target directory
+        uses: Swatinem/rust-cache@v2.9.2
+        with:
+          key: recipe-matrix-migration-demo
+
+      - name: Verify Docker is reachable
+        run: docker version
+
+      - name: Install kind ${{ env.KIND_VERSION }}
+        run: |
+          set -euo pipefail
+          curl -fsSLo /tmp/kind "https://github.com/kubernetes-sigs/kind/releases/download/${KIND_VERSION}/kind-linux-amd64"
+          echo "${KIND_SHA256}  /tmp/kind" | sha256sum -c -
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          kind version
+
+      - name: Run the canonical Ingress-to-Gateway migration demo
+        run: |
+          set -euo pipefail
+          mkdir -p migration-demo-logs
+          cargo test -p admissionlab-cli --test migration_demo -- --ignored --nocapture 2>&1 \
+            | tee migration-demo-logs/migration-demo.log
+
+      - name: Upload the failed demo's evidence
+        if: failure()
+        uses: actions/upload-artifact@v4.6.2
+        with:
+          name: migration-demo-logs
+          path: migration-demo-logs
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Verify no adlab-* cluster was left behind
+        if: always()
         run: ./scripts/verify-cleanup.sh --check-only
 
   gateway-demo:

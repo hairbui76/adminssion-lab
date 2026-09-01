@@ -142,6 +142,27 @@ The row is Tier 3 (`weeklyRelease`), matching ROADMAP Task 8.9, which
 places the legacy stack in a migration-specific tier rather than in the
 general recipe matrix.
 
+Task 8.9 landed that placement without inventing a fourth tier word or a
+`migrationOnly:` flag, because what makes it migration-specific is what
+runs rather than a marker. This recipe is installed in exactly two CI
+jobs, both Tier 3:
+
+- its own certification row, which runs
+  `crates/admissionlab-recipes/tests/ingress_nginx_legacy.rs` — install
+  the chart, route real traffic through a real `Ingress`, and prove the
+  validating webhook rejects
+  `fixtures/migration/ingress-nginx/webhook-deny.yaml`. It exercises no
+  general fixture corpus; this recipe claims the `legacyIngress`
+  capability and deliberately not `admission`;
+- `.github/workflows/recipe-matrix.yml`'s `migration-demo` job, which
+  drives `examples/ingress-to-gateway/` end to end against two real
+  clusters (ROADMAP Task 8.8).
+
+"Do not multiply every general matrix by legacy versions" (Task 8.9
+step 2) would look like extra rows in this recipe's `certified` list.
+There is exactly one, on one Kubernetes version, at the least frequent
+tier.
+
 ## Installed at chart defaults — a finding
 
 This recipe sets no Helm values at all. The recipe schema has no

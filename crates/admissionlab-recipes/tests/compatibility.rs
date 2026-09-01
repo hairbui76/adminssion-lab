@@ -247,28 +247,25 @@ fn the_certified_combinations_are_exactly_the_reviewed_ones() {
             combination("1.35.8", "istio-gateway", CertificationTier::WeeklyRelease),
             combination("1.36.4", "istio-gateway", CertificationTier::PerCommit),
             combination("1.37.0", "istio-gateway", CertificationTier::WeeklyRelease),
-            // Task 8.1. The second Gateway API implementation, tiered
-            // exactly like `istio-gateway` above and for the same
-            // reasons -- the primary minor per commit, the other two
-            // weekly as "expanded Gateway combinations".
-            combination(
-                "1.35.8",
-                "nginx-gateway-fabric",
-                CertificationTier::WeeklyRelease
-            ),
+            // Task 8.1, retiered by Task 8.9. The primary minor per
+            // commit; the other two at Tier 2 rather than Tier 3, which
+            // is where they sat when 8.1 landed. The asymmetry with
+            // `istio-gateway` above is deliberate and its reasons are in
+            // the entry's own comment -- 8.9 step 1 asks for NGF in
+            // Tier 2, the Phase 8 gate rests on NGF specifically, and
+            // NGF's stack is the cheaper of the two to install.
+            combination("1.35.8", "nginx-gateway-fabric", CertificationTier::Nightly),
             combination(
                 "1.36.4",
                 "nginx-gateway-fabric",
                 CertificationTier::PerCommit
             ),
-            combination(
-                "1.37.0",
-                "nginx-gateway-fabric",
-                CertificationTier::WeeklyRelease
-            ),
-            // Task 8.2. One row, Tier 3, on the Tier-1 primary
-            // Kubernetes version only -- see that entry's own comment
-            // for why a retired upstream gets exactly one weekly row.
+            combination("1.37.0", "nginx-gateway-fabric", CertificationTier::Nightly),
+            // Task 8.2, confirmed by Task 8.9 step 2. One row, Tier 3,
+            // on the Tier-1 primary Kubernetes version only -- the
+            // migration-specific placement, and the only place the
+            // archived stack is installed outside the Tier-3 migration
+            // demo. See that entry's own comment.
             combination(
                 "1.36.4",
                 "ingress-nginx-legacy",

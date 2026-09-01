@@ -589,18 +589,29 @@ is gone rather than left to reappear on a slower runner.
 ## Kubernetes certification
 
 `compatibility/recipes.yaml`'s `nginx-gateway-fabric` entry certifies
-1.35.8, 1.36.4 and 1.37.0 — the full Admission Lab supported set. Tiers
-mirror the `istio-gateway` entry: 1.36.4 `perCommit` (Admission Lab's
-Tier-1 primary), the other two `weeklyRelease` (Tier 3, "expanded
-supported combinations"), because each row builds the echo image, applies
-a 1 MB CRD bundle, pulls both NGF images from a network registry and then
-drives three full apply/reconcile/probe cycles. Nightly Tier 2 already
-covers all three supported minors through the `istio` and `kyverno`
-entries, so scheduling these weekly costs no minor its coverage.
+1.35.8, 1.36.4 and 1.37.0 — the full Admission Lab supported set. 1.36.4
+is `perCommit` (Admission Lab's Tier-1 primary); the other two are
+`nightly` (Tier 2).
+
+Those two were `weeklyRelease` when Task 8.1 wrote this recipe, mirroring
+`istio-gateway`. **ROADMAP Task 8.9 moved them to Tier 2, and only this
+recipe** — `istio-gateway`'s two non-primary minors stay at Tier 3.
+Task 8.9 step 1 asks in as many words for NGINX Gateway Fabric in
+"Tier 2/Tier 3", and a Tier-2 claim nothing schedules daily is a claim
+rather than evidence; the Phase 8 exit gate rests on this
+implementation specifically (the portable HTTPRoute corpus must run
+against Istio *and* NGF); and this is the cheaper of the two stacks to
+install — 12.5 s for the Helm release against istiod's 22.5 s, with no
+per-Gateway `ConfigMap` override needed to reach `Programmed=True` on
+`kind` at all. Nothing about the certification itself changed: a tier is
+a statement about schedule, never about confidence.
 
 `.github/workflows/integration.yml` runs the test as its own matrix
 entry; `scripts/recipe-matrix.py` turns the rows above into the tiered
-job matrix.
+job matrix. Tier 2 additionally runs `recipe-matrix.yml`'s
+`portable-contracts` job, which drives
+`fixtures/gateway/portable/` through this recipe *and* `istio-gateway`
+in one run.
 
 ---
 

@@ -79,11 +79,21 @@
 #                 the supported minors for the admission recipes, so
 #                 every supported minor is exercised by a certified
 #                 recipe once a day (the Phase 7 exit gate's "run Tier 2
-#                 across all three Kubernetes minors").
+#                 across all three Kubernetes minors") -- and, from
+#                 ROADMAP Task 8.9, NGINX Gateway Fabric's other two
+#                 minors, so the second certified Gateway API
+#                 implementation is exercised daily rather than weekly.
+#                 Tier 2 also runs the portable Gateway contract corpus
+#                 against BOTH implementations; that job is not a row
+#                 here, because it certifies an API rather than a
+#                 recipe x Kubernetes combination.
 #   weeklyRelease Tier 3. Weekly cron plus manual dispatch, and every
 #                 release candidate. The expanded Gateway combinations,
 #                 run alongside reliability repetition and the Gateway
-#                 demos.
+#                 demos -- which as of Task 8.9 are two: the Istio
+#                 regression demo and the Ingress-to-Gateway migration
+#                 demo. It is also the only tier that installs the
+#                 archived legacy `ingress-nginx` at all.
 #
 # A tier is a statement about SCHEDULE, never about confidence: every
 # row below has actually been installed and verified by a test in this
@@ -103,6 +113,11 @@
 #
 # Tiers assigned 2026-09-01 for Task 7.4, from the certification tests
 # that already existed rather than from intent -- see each entry.
+# Revised 2026-09-01 for Task 8.9: NGINX Gateway Fabric's two
+# non-primary minors moved from Tier 3 to Tier 2, and the legacy
+# `ingress-nginx` entry's Tier-3 placement documented as the
+# migration-specific one it is. Both changes are to SCHEDULE only; no
+# row was added, removed, or re-certified.
 
 # The Kubernetes support-window escape hatch (Task 7.4 step 1; Global
 # Constraint 10, "support for the latest three upstream-supported
@@ -332,23 +347,41 @@ recipes:
       # namespace, cross namespace with a `ReferenceGrant`, and the
       # NGF-specific `NginxProxy` data-plane override.
       #
-      # The tiers mirror the `istio-gateway` entry above, and for the
-      # same reasons: 1.36.4 is Admission Lab's Tier-1 primary and the
-      # per-commit job installs the stack there; the other two minors are
-      # Tier 3 ("expanded supported combinations"), which is where the
-      # roadmap puts expanded Gateway combinations, because each row
-      # builds the echo image, applies a 1 MB CRD bundle, pulls both NGF
-      # images from a network registry and then drives three full
-      # apply/reconcile/probe cycles. Nightly Tier 2 already covers all
-      # three supported minors through the `istio` and `kyverno` entries,
-      # so scheduling these weekly costs no minor its coverage.
+      # 1.36.4 is Admission Lab's Tier-1 primary and the per-commit job
+      # installs the stack there.
+      #
+      # The other two minors were weeklyRelease when Task 8.1 wrote this
+      # entry, mirroring `istio-gateway` above. ROADMAP Task 8.9 moves
+      # them to NIGHTLY, and the asymmetry with `istio-gateway` is
+      # deliberate rather than an oversight:
+      #
+      #   - Task 8.9 step 1's own words are "add NGINX Gateway Fabric to
+      #     Tier 2/Tier 3". Tier 2 is `nightly`, and a Tier-2 claim that
+      #     nothing schedules daily is a claim rather than evidence --
+      #     the standard this file's header sets for every row in it.
+      #   - The Phase 8 exit gate requires the portable HTTPRoute corpus
+      #     to run against BOTH certified implementations. NGF is the
+      #     newly certified one, and it is the one whose per-minor
+      #     behavior this phase has the least history with; Istio's
+      #     Gateway recipe has been certified since Task 6.10.
+      #   - It is also the cheaper of the two. Measured by
+      #     `tests/nginx_gateway_recipe.rs`, NGF's Helm install returned
+      #     in 12.5 s against istiod's 22.5 s, and NGF needs no
+      #     per-Gateway `ConfigMap` override to reach `Programmed=True`
+      #     on `kind` at all.
+      #
+      # `istio-gateway`'s two non-primary minors stay at Tier 3, so this
+      # is one recipe moved for a stated reason and not a general
+      # loosening. Every version listed here is exactly as certified as
+      # it was: a tier is a statement about SCHEDULE, never about
+      # confidence.
       certified:
         - version: "1.35.8"
-          tier: weeklyRelease
+          tier: nightly
         - version: "1.36.4"
           tier: perCommit
         - version: "1.37.0"
-          tier: weeklyRelease
+          tier: nightly
   # Task 8.2. THE UPSTREAM PROJECT IS RETIRED AND ITS REPOSITORY IS
   # ARCHIVED -- `recipes/ingress-nginx-legacy/README.md` carries the
   # dates, the upstream's own wording, and Admission Lab's stance. This
@@ -418,6 +451,37 @@ recipes:
       #     minors here would buy coverage nothing needs -- and every one
       #     of them would be further outside a vendor window that is now
       #     frozen forever.
+      #
+      # # "Migration-specific", with no new tier word (Task 8.9 step 2)
+      #
+      # Task 8.9 step 2 asks for this recipe to appear "only in
+      # migration-specific Tier 3 jobs" and for the general matrix not to
+      # be multiplied by legacy versions. Both are true of the single row
+      # below, and neither needed a fourth tier spelling or a
+      # `migrationOnly:` flag -- which would have been a field the Rust
+      # loader, its schema, its validation and
+      # `scripts/recipe-matrix.py` all had to learn in order to express
+      # something the row's own shape already says.
+      #
+      # What makes it migration-specific is not a marker but WHAT RUNS:
+      #
+      #   - this row's certification job runs
+      #     `crates/admissionlab-recipes/tests/ingress_nginx_legacy.rs`,
+      #     which installs the chart, routes real traffic through a real
+      #     `Ingress`, and proves the validating webhook rejects
+      #     `fixtures/migration/ingress-nginx/webhook-deny.yaml`. It
+      #     certifies the legacy stack *as migration source material*
+      #     and exercises no general fixture corpus (this entry claims
+      #     the `legacyIngress` capability and deliberately not
+      #     `admission`);
+      #   - and `.github/workflows/recipe-matrix.yml`'s Tier-3
+      #     `migration-demo` job runs the end-to-end
+      #     Ingress-to-Gateway comparison
+      #     (`examples/ingress-to-gateway/`), which is the only other
+      #     place this recipe is installed at all.
+      #
+      # A general matrix multiplied by legacy versions would look like
+      # extra rows in THIS list, and there is exactly one.
       certified:
         - version: "1.36.4"
           tier: weeklyRelease
