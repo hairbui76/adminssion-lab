@@ -690,6 +690,7 @@ fn kubectl_command(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: KUBECTL_TIMEOUT,
+        spill_dir: None,
     }
 }
 

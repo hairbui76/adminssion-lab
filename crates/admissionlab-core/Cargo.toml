@@ -109,3 +109,13 @@ nix = { workspace = true }
 name = "process"
 path = "tests/process.rs"
 harness = false
+
+# `tests/process_hardening.rs` re-invokes itself as a child (and as a
+# grandchild) for the same reason `tests/process.rs` does, and needs the
+# same full control over `fn main`: the default libtest harness would
+# parse argv as test filters and print its banner into the byte-exact
+# stdout captures these tests assert on. See that file's module doc.
+[[test]]
+name = "process_hardening"
+path = "tests/process_hardening.rs"
+harness = false

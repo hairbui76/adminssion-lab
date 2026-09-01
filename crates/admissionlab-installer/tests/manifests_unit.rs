@@ -41,8 +41,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use admissionlab_core::{
-    ClusterHandle, ClusterSpec, CommandResult, CommandSpec, ProcessError, ProcessRunner, RunId,
-    RunPaths, Side,
+    ClusterHandle, ClusterSpec, CommandResult, CommandSpec, OutputOverflow, ProcessError,
+    ProcessRunner, RunId, RunPaths, Side,
 };
 use admissionlab_installer::{
     ComponentInstaller, InstallError, ManifestsInstaller, load_manifest_bundle,
@@ -217,12 +217,14 @@ impl ProcessRunner for FakeProcessRunner {
                 stdout: stdout.to_vec(),
                 stderr: Vec::new(),
                 elapsed: Duration::from_millis(1),
+                overflow: OutputOverflow::default(),
             }),
             Some(FakeOutcome::Failure(stderr)) => Ok(CommandResult {
                 status: exit_status(1),
                 stdout: Vec::new(),
                 stderr: stderr.to_vec(),
                 elapsed: Duration::from_millis(1),
+                overflow: OutputOverflow::default(),
             }),
             Some(FakeOutcome::Missing) | None => Err(ProcessError::Spawn {
                 context: Box::new(spec.context()),

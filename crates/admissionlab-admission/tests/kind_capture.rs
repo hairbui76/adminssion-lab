@@ -305,6 +305,7 @@ async fn build_and_load_image(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: BUILD_AND_LOAD_TIMEOUT,
+        spill_dir: None,
     };
     let result = runner
         .run(spec)

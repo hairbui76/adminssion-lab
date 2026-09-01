@@ -51,8 +51,9 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use admissionlab_core::{
-    CommandContext, CommandResult, CommandSpec, MAX_CAPTURED_STREAM_BYTES, ManagedChild,
-    ProcessError, ProcessRunner, ProcessSpawner, RedactedValue, TokioProcessRunner,
+    CommandContext, CommandResult, CommandSpec, MAX_CAPTURED_STREAM_BYTES,
+    MAX_RETAINED_OUTPUT_BYTES, ManagedChild, ProcessError, ProcessRunner, ProcessSpawner,
+    RedactedValue, TokioProcessRunner,
 };
 
 // =====================================================================
@@ -429,6 +430,7 @@ fn helper_spec(mode: &str, timeout: Duration) -> CommandSpec {
         env,
         sensitive_env_keys: BTreeSet::new(),
         timeout,
+        spill_dir: None,
     }
 }
 
@@ -599,10 +601,50 @@ fn large_concurrent_output_on_both_streams_does_not_deadlock(rt: &tokio::runtime
 
     let result = run_spec(rt, spec).expect("big-output must succeed without deadlocking");
     assert!(result.status.success());
-    assert_eq!(result.stdout.len(), LEN);
-    assert_eq!(result.stderr.len(), LEN);
-    assert_eq!(result.stdout, cycling_pattern(b'a'..=b'z', LEN));
-    assert_eq!(result.stderr, cycling_pattern(b'A'..=b'Z', LEN));
+
+    // What this test proves is unchanged by Task 9.4: both pipes kept
+    // moving past the OS buffer, so the child ran to completion instead
+    // of blocking forever on a full pipe nobody was reading. What
+    // changed is how much of that is *kept*: `run` now caps each stream
+    // at `MAX_RETAINED_OUTPUT_BYTES` and reports the remainder rather
+    // than holding an unbounded buffer (see `tests/process_hardening.rs`
+    // for the cap and spill behavior in full). Every byte the child
+    // wrote is still accounted for below -- retained plus omitted equals
+    // exactly what it sent -- which is the property that makes capping
+    // safe rather than lossy.
+    for (name, retained, omitted, first, last) in [
+        (
+            "stdout",
+            &result.stdout,
+            result.overflow.stdout.omitted_bytes,
+            b'a',
+            b'z',
+        ),
+        (
+            "stderr",
+            &result.stderr,
+            result.overflow.stderr.omitted_bytes,
+            b'A',
+            b'Z',
+        ),
+    ] {
+        assert_eq!(
+            retained.len(),
+            MAX_RETAINED_OUTPUT_BYTES,
+            "{name} must be retained up to the cap"
+        );
+        assert_eq!(
+            retained,
+            &cycling_pattern(first..=last, MAX_RETAINED_OUTPUT_BYTES),
+            "{name}'s retained prefix must be the child's own bytes, in order"
+        );
+        assert_eq!(
+            usize::try_from(omitted).expect("omitted byte count fits in usize")
+                + MAX_RETAINED_OUTPUT_BYTES,
+            LEN,
+            "{name}: retained + omitted must account for every byte the child wrote"
+        );
+    }
 }
 
 // =====================================================================
@@ -835,6 +877,7 @@ fn command_context_redacts_credential_like_env_keys(_rt: &tokio::runtime::Runtim
         env,
         sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
+        spill_dir: None,
     };
 
     let context: CommandContext = spec.context();
@@ -909,6 +952,7 @@ fn command_context_preserves_non_sensitive_env_values(_rt: &tokio::runtime::Runt
         env,
         sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
+        spill_dir: None,
     };
 
     let context = spec.context();
@@ -939,6 +983,7 @@ fn command_spec_debug_output_never_contains_a_redacted_raw_value(_rt: &tokio::ru
         env,
         sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
+        spill_dir: None,
     };
 
     let debug_output = format!("{spec:?}");
@@ -963,6 +1008,7 @@ fn process_error_display_never_contains_a_redacted_raw_value(rt: &tokio::runtime
         env,
         sensitive_env_keys: BTreeSet::new(),
         timeout: DEFAULT_TIMEOUT,
+        spill_dir: None,
     };
 
     let err = run_spec(rt, spec).expect_err("spawning a nonexistent binary must fail");

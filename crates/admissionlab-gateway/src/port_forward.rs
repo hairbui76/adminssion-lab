@@ -73,6 +73,17 @@
 //! `admissionlab_core::ManagedChild::kill` does not resolve until it
 //! has been.
 //!
+//! Since Task 9.4 that guarantee covers a little more ground than this
+//! module needs: `ManagedChild` places its child in its own process
+//! group and terminates the *group* (`SIGTERM`, a grace period, then
+//! `SIGKILL`), so nothing the child started can outlive it either.
+//! `kubectl port-forward` spawns no subprocesses of its own, so for
+//! this module the practical change is only that `close` gives
+//! `kubectl` a chance to shut its SPDY stream down cleanly before it is
+//! killed outright, instead of being `SIGKILL`ed immediately. Nothing
+//! here has to opt in, and nothing here may opt out: it is a property
+//! of the one chokepoint every child in this project goes through.
+//!
 //! Everything else is a backstop, because Rust's `Drop` is synchronous
 //! and killing a process is not — a `Drop` cannot await the termination
 //! it starts, so it cannot promise one. Rather than reimplement that
@@ -246,6 +257,12 @@ pub fn port_forward_command(kubeconfig: &Path, endpoint: &GatewayEndpoint) -> Co
         // arbitrary so the value in the struct is the one bound that
         // genuinely applies to starting this command.
         timeout: PORT_FORWARD_READY_TIMEOUT,
+        // Ignored by `ProcessSpawner::spawn`, exactly as `timeout` is:
+        // a long-lived child's capture is bounded by
+        // `MAX_CAPTURED_STREAM_BYTES` and is a diagnostic tail by
+        // design. `None` rather than a path, so the field states the
+        // truth rather than implying a spill that will never happen.
+        spill_dir: None,
     }
 }
 
@@ -443,11 +460,17 @@ impl PortForwardOutput for ManagedChild {
     }
 
     async fn stderr_text(&mut self) -> String {
-        // Lossily decoded for the reason `admissionlab_echo::echo`
-        // documents for header values: a byte sequence that is not UTF-8
-        // is still evidence that the tool said something, and dropping
-        // the whole message because of one byte would destroy it.
-        let text = String::from_utf8_lossy(&self.captured_stderr()).into_owned();
+        // A bounded tail (Task 9.4 Step 3), lossily decoded. The
+        // capture is already capped at `MAX_CAPTURED_STREAM_BYTES`, but
+        // this string ends up inside a `GatewayError`'s own `Display`
+        // and from there in a report, so it is bounded again to
+        // `MAX_ERROR_TAIL_BYTES` -- the tail, because `kubectl` says why
+        // it failed last. Decoded lossily for the reason
+        // `admissionlab_echo::echo` documents for header values: a byte
+        // sequence that is not UTF-8 is still evidence that the tool
+        // said something, and dropping the whole message because of one
+        // byte would destroy it.
+        let text = admissionlab_core::output_tail(&self.captured_stderr());
         if self.stderr_truncated() {
             format!("{text}\n[stderr truncated]")
         } else {
@@ -469,13 +492,18 @@ impl PortForwardOutput for ManagedChild {
 
     async fn terminate(&mut self) {
         if let Err(source) = self.kill().await {
+            // The same remedy string `ManagedChild`'s own leak warning
+            // prints, from the same function, so an operator who sees
+            // both is told to run one command rather than two different
+            // ones (Task 9.4: on Unix that command terminates the
+            // child's whole process group, not just the child).
+            let remedy = admissionlab_core::manual_termination_command(self.id);
             tracing::warn!(
                 pid = self.id,
                 error = %source,
                 "could not kill the port-forward process; if pid {} is still running, stop it \
-                 with: kill {}",
+                 with: {remedy}",
                 self.id,
-                self.id
             );
         }
     }

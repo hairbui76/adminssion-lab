@@ -229,6 +229,11 @@ pub async fn probe_tool(runner: &dyn ProcessRunner, name: ToolName) -> ToolStatu
         env: std::collections::BTreeMap::new(),
         sensitive_env_keys: std::collections::BTreeSet::new(),
         timeout: PROBE_TIMEOUT,
+        // No spill directory: a version probe's entire output is one
+        // line, this function is also called before any run (and so
+        // before any `RunPaths` exists), and a spill file is created
+        // only for output that outgrows memory anyway.
+        spill_dir: None,
     };
 
     match runner.run(spec).await {
@@ -406,7 +411,12 @@ fn describe_nonzero_exit(
         || "terminated by signal".to_owned(),
         |code| format!("exit code {code}"),
     );
-    let stderr_text = String::from_utf8_lossy(stderr);
+    // A bounded tail, never the whole stream (Task 9.4 Step 3): this
+    // string becomes a `ToolStatus::diagnostic` that is logged and
+    // rendered into a report, and a tool that answered a `--version`
+    // probe with a megabyte of stderr must not be able to put a megabyte
+    // there.
+    let stderr_text = crate::process::output_tail(stderr);
     let stderr_trimmed = stderr_text.trim();
     if stderr_trimmed.is_empty() {
         format!(

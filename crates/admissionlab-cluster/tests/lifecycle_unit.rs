@@ -49,7 +49,8 @@ use std::time::Duration;
 use admissionlab_cluster::{KindClusterManager, cluster_name, validate_cluster_name};
 use admissionlab_core::{
     ArtifactStore, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, CommandResult,
-    CommandSpec, ProcessError, ProcessRunner, RollbackOutcome, RunId, RunPaths, Side,
+    CommandSpec, OutputOverflow, ProcessError, ProcessRunner, RollbackOutcome, RunId, RunPaths,
+    Side,
 };
 use async_trait::async_trait;
 
@@ -218,6 +219,7 @@ impl ProcessRunner for FakeProcessRunner {
                     stdout: stdout.to_vec(),
                     stderr: Vec::new(),
                     elapsed: Duration::from_millis(1),
+                    overflow: OutputOverflow::default(),
                 })
             }
             Some(FakeOutcome::Failure(stderr)) => Ok(CommandResult {
@@ -225,6 +227,7 @@ impl ProcessRunner for FakeProcessRunner {
                 stdout: Vec::new(),
                 stderr: stderr.to_vec(),
                 elapsed: Duration::from_millis(1),
+                overflow: OutputOverflow::default(),
             }),
             Some(FakeOutcome::TimedOut) => Err(ProcessError::TimedOut {
                 context: Box::new(spec.context()),
@@ -232,6 +235,7 @@ impl ProcessRunner for FakeProcessRunner {
                 elapsed: spec.timeout,
                 stdout: Vec::new(),
                 stderr: Vec::new(),
+                overflow: Box::new(OutputOverflow::default()),
             }),
             Some(FakeOutcome::Missing) | None => Err(ProcessError::Spawn {
                 context: Box::new(spec.context()),

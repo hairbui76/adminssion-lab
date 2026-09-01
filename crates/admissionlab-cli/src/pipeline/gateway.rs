@@ -977,6 +977,7 @@ mod tests {
                     env: BTreeMap::new(),
                     sensitive_env_keys: BTreeSet::new(),
                     timeout: Duration::from_secs(60),
+                    spill_dir: None,
                 })
                 .await
         }

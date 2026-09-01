@@ -52,13 +52,16 @@
 //!   through as its own argv element. There is no code path that
 //!   concatenates arguments into a string and hands it to `sh -c`,
 //!   `bash -c`, or any shell (Global Constraint 12 / PRODUCT.md §29.4).
-//! - **A timeout kills and reaps the child; it never abandons it.**
-//!   Wrapping `child.wait()` in a timeout and simply returning once the
-//!   timeout elapses would leave the child running as an orphan —
-//!   exactly the failure mode that leaks a `kind` cluster. On timeout,
-//!   `run` calls `Child::kill`, which sends the kill signal *and* awaits
-//!   the child's exit, so control does not return to the caller until
-//!   the process is gone.
+//! - **A timeout kills and reaps the child — and everything the child
+//!   started; it never abandons either.** Wrapping `child.wait()` in a
+//!   timeout and simply returning once the timeout elapses would leave
+//!   the child running as an orphan — exactly the failure mode that
+//!   leaks a `kind` cluster. On timeout, `run` calls
+//!   [`terminate_child`], which signals the child's whole process group
+//!   and does not resolve until the direct child has been killed *and*
+//!   reaped, so control does not return to the caller until the process
+//!   is gone. See "Process groups" below for the sequence and for what
+//!   that guarantee reduces to on a non-Unix target.
 //! - **Draining stdout/stderr cannot deadlock.** `helm install` and
 //!   `kubectl apply` routinely write more than the OS pipe buffer
 //!   (~64 KiB) to stdout or stderr. Calling `child.wait()` before both
@@ -68,6 +71,77 @@
 //!   `run` drains both pipes on their own `tokio::spawn`ed tasks,
 //!   started before `wait()` is ever awaited, so both streams keep
 //!   moving regardless of how `wait()` resolves.
+//!
+//! # Process groups: killing the tree, not the trunk (Task 9.4)
+//!
+//! Killing the process this module spawned is not the same as killing
+//! everything it started. `kind create cluster` shells out to `docker`;
+//! `helm` can invoke a downloader plugin. Signalling only the direct
+//! child leaves those grandchildren running, reparented to init, holding
+//! exactly the cluster state a timeout exists to reclaim.
+//!
+//! Every child spawned here — bounded ([`ProcessRunner::run`]) and
+//! long-lived ([`ProcessSpawner::spawn`]) alike — is therefore placed in
+//! **its own process group** on Unix, via
+//! `tokio::process::Command::process_group(0)`. That is a *safe* method:
+//! tokio re-exposes `std::os::unix::process::CommandExt::process_group`
+//! (stable since Rust 1.64), and the `setpgid` call it performs in the
+//! forked child is made by the standard library itself, inside its own
+//! `unsafe` block. Nothing here needs `pre_exec`, so this crate's
+//! workspace-wide `unsafe_code = "forbid"` is honored rather than worked
+//! around. Because the group is created with `0`, its group id *is* the
+//! child's own pid, which is the number [`ManagedChild::id`] already
+//! reports.
+//!
+//! Termination then follows one sequence, shared by the bounded runner's
+//! timeout path and [`ManagedChild::kill`] (see [`terminate_child`]):
+//!
+//! 1. `SIGTERM` to the whole group, so a well-behaved tool gets to clean
+//!    up after itself (`kind` removes its container; `helm` releases its
+//!    lock).
+//! 2. Wait up to [`PROCESS_GROUP_TERMINATION_GRACE`] for the direct
+//!    child to exit.
+//! 3. `SIGKILL` to the whole group — unconditionally, even when the
+//!    child exited politely in step 2, because a *grandchild* that
+//!    ignored the `SIGTERM` is exactly the orphan this exists to
+//!    prevent, and an empty group makes this a no-op (`ESRCH`, treated
+//!    as success).
+//!
+//! Signals are sent with `nix::sys::signal::killpg`, a safe wrapper —
+//! the same reason `tool.rs` already depends on `nix` for `statvfs`. The
+//! child is only ever signalled *before* it is reaped, so its pid (and
+//! therefore its group id) cannot have been recycled by the OS onto some
+//! unrelated process in the meantime.
+//!
+//! **On a non-Unix target there are no process groups here.** The
+//! grouping call and the signal sequence both compile away, and
+//! termination degrades to what this module has always done: kill the
+//! direct child (`Child::kill`, backstopped by `kill_on_drop`). A
+//! grandchild of a Windows child is *not* cleaned up by this module; a
+//! future task wanting that would need a Job Object. This is stated
+//! rather than silently assumed because "the timeout killed it" means
+//! materially less there.
+//!
+//! One deliberate consequence on Unix: a child in its own process group
+//! no longer receives the terminal's `SIGINT` when an operator presses
+//! Ctrl-C. Lifetime is managed explicitly here — by timeout, by `kill`,
+//! by `kill_on_drop` — rather than by whichever signal the tty happened
+//! to broadcast, and that is the point of the isolation.
+//!
+//! # Output is bounded, and overflow goes to a file (Task 9.4)
+//!
+//! `run` used to accumulate stdout and stderr with no limit at all, so a
+//! tool that decided to print a gigabyte would be answered by this
+//! process allocating a gigabyte. Both streams are now capped at
+//! [`MAX_RETAINED_OUTPUT_BYTES`] in memory, and a caller that has a
+//! place to put the rest — a run's own `RunPaths::logs` directory — sets
+//! [`CommandSpec::spill_dir`], which makes the runner write the
+//! *complete* stream to a file there and report its path in
+//! [`CommandResult::overflow`]. Nothing is ever silently lost: with a
+//! spill directory the full output is on disk, and without one the
+//! number of bytes dropped is still reported (Global Constraint 15).
+//! [`output_tail`] is the matching rendering rule — an error quotes a
+//! bounded *tail* of a stream, never the whole thing.
 //!
 //! # Environment: inherited, not exclusive
 //!
@@ -169,13 +243,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use thiserror::Error;
-use tokio::io::AsyncReadExt as _;
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::Command as TokioCommand;
 
 use crate::diagnostic::RedactedValue;
@@ -224,6 +299,34 @@ pub struct CommandSpec {
     /// How long to let the child run before it is killed and
     /// [`ProcessError::TimedOut`] is reported.
     pub timeout: Duration,
+    /// Where [`ProcessRunner::run`] may write a stream that outgrows
+    /// [`MAX_RETAINED_OUTPUT_BYTES`], so that capping memory does not
+    /// mean losing evidence.
+    ///
+    /// `None` — the value every caller had before Task 9.4, and still
+    /// the right one for a command whose output is a handful of bytes —
+    /// means overflow is discarded, though still *counted* in
+    /// [`CommandResult::overflow`] rather than silently dropped.
+    /// `Some(dir)` means the runner writes each oversized stream in full
+    /// to a file under `dir` (created if missing) and reports the path.
+    /// The intended value is a run's own
+    /// [`crate::RunPaths::logs`] directory, which exists precisely for
+    /// "process and audit logs captured during the run"; no new artifact
+    /// location is introduced for this.
+    ///
+    /// Opting in is per call site and deliberate: only a caller that
+    /// both holds a `RunPaths` and runs a command capable of producing
+    /// real volume (`kind create cluster`, `helm upgrade --install`,
+    /// `kubectl apply`) sets it. A version probe or a `doctor` check
+    /// leaves it `None` rather than littering the logs directory with
+    /// empty files for output that was never going to exceed a line.
+    ///
+    /// Ignored by [`ProcessSpawner::spawn`], like `timeout`: a
+    /// long-lived child's capture is bounded by
+    /// [`MAX_CAPTURED_STREAM_BYTES`] and is a diagnostic tail by
+    /// design, not a transcript worth persisting for as long as a
+    /// `kubectl port-forward` lives.
+    pub spill_dir: Option<PathBuf>,
 }
 
 impl CommandSpec {
@@ -282,6 +385,7 @@ impl fmt::Debug for CommandSpec {
             // *names* the caller marked sensitive, never values.
             .field("sensitive_env_keys", &self.sensitive_env_keys)
             .field("timeout", &self.timeout)
+            .field("spill_dir", &self.spill_dir)
             .finish()
     }
 }
@@ -386,12 +490,86 @@ impl fmt::Display for CommandContext {
 pub struct CommandResult {
     /// The child's exit status.
     pub status: ExitStatus,
-    /// Everything the child wrote to stdout, in full.
+    /// What the child wrote to stdout, up to
+    /// [`MAX_RETAINED_OUTPUT_BYTES`]. See `overflow` for whether that
+    /// cap actually bit, and where the rest went.
     pub stdout: Vec<u8>,
-    /// Everything the child wrote to stderr, in full.
+    /// What the child wrote to stderr, up to
+    /// [`MAX_RETAINED_OUTPUT_BYTES`]. See `overflow`.
     pub stderr: Vec<u8>,
     /// Wall-clock time from spawn to exit.
     pub elapsed: Duration,
+    /// What (if anything) did not fit in `stdout`/`stderr`, and where
+    /// the complete stream was written if [`CommandSpec::spill_dir`] was
+    /// set. [`OutputOverflow::is_empty`] is the common case: the command
+    /// produced less than the cap and these two fields are exactly
+    /// everything it wrote.
+    pub overflow: OutputOverflow,
+}
+
+/// What a single stream lost to [`MAX_RETAINED_OUTPUT_BYTES`], and where
+/// to find it instead.
+///
+/// Default (and overwhelmingly common) is "nothing overflowed": zero
+/// bytes omitted, no spill file. Reported rather than inferred, because a
+/// truncated capture mistaken for a complete one is the kind of thing
+/// Global Constraint 15 exists to forbid — a caller parsing `stdout` can
+/// check this and say "the output was truncated" instead of "the tool
+/// printed nothing useful".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StreamOverflow {
+    /// How many bytes the child wrote to this stream beyond what was
+    /// retained in memory. Zero when the whole stream fit.
+    ///
+    /// Non-zero does **not** imply the bytes are gone: when `spill_path`
+    /// is `Some`, that file holds the stream in full, including these.
+    pub omitted_bytes: u64,
+    /// The file the complete stream was written to, when
+    /// [`CommandSpec::spill_dir`] was set *and* the stream actually
+    /// outgrew the in-memory cap. `None` when no spill directory was
+    /// configured, when the stream fit in memory (no file is created for
+    /// output that did not need one), or when writing the spill file
+    /// itself failed — in which case a `tracing::warn!` names the path
+    /// and the reason, and `omitted_bytes` still reports the loss.
+    pub spill_path: Option<PathBuf>,
+}
+
+impl StreamOverflow {
+    /// Whether the whole stream fit in memory.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.omitted_bytes == 0
+    }
+}
+
+impl fmt::Display for StreamOverflow {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_empty() {
+            return write!(f, "complete");
+        }
+        write!(f, "{} further bytes ", self.omitted_bytes)?;
+        match &self.spill_path {
+            Some(path) => write!(f, "written to {}", path.display()),
+            None => write!(f, "were discarded (no spill directory was configured)"),
+        }
+    }
+}
+
+/// Both of a [`CommandResult`]'s streams' [`StreamOverflow`]s.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutputOverflow {
+    /// What stdout lost, if anything.
+    pub stdout: StreamOverflow,
+    /// What stderr lost, if anything.
+    pub stderr: StreamOverflow,
+}
+
+impl OutputOverflow {
+    /// Whether both streams were captured in full.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.stdout.is_empty() && self.stderr.is_empty()
+    }
 }
 
 /// Failure modes of [`ProcessRunner::run`] itself, as opposed to a
@@ -427,10 +605,25 @@ pub enum ProcessError {
         timeout: Duration,
         /// Wall-clock time from spawn to the timeout firing.
         elapsed: Duration,
-        /// Everything captured on stdout before the child was killed.
+        /// What was captured on stdout before the child was killed,
+        /// bounded by [`MAX_RETAINED_OUTPUT_BYTES`].
         stdout: Vec<u8>,
-        /// Everything captured on stderr before the child was killed.
+        /// What was captured on stderr before the child was killed,
+        /// bounded by [`MAX_RETAINED_OUTPUT_BYTES`].
         stderr: Vec<u8>,
+        /// What those two captures lost to the cap, and where the
+        /// complete streams were written if [`CommandSpec::spill_dir`]
+        /// was set. A timed-out `helm install` is precisely the case
+        /// where the interesting output is the part that did not fit, so
+        /// this is carried here and not only on the success path.
+        ///
+        /// Boxed for the reason `context` is: a `ProcessError` is
+        /// returned by value up every layer of this project's error
+        /// types, so its largest variant is a cost every `Result` on
+        /// that path pays (`clippy::result_large_err`). The success path
+        /// keeps [`CommandResult::overflow`] unboxed, where the value is
+        /// used directly rather than propagated.
+        overflow: Box<OutputOverflow>,
     },
     /// The command exceeded its timeout, and killing it *also* failed.
     /// Unlike every other variant, this means the process may still be
@@ -487,6 +680,342 @@ pub enum ProcessError {
         #[source]
         source: io::Error,
     },
+}
+
+// =========================================================================
+// Process-group termination (ROADMAP Task 9.4, Step 1)
+// =========================================================================
+
+/// How long a child — and everything else in its process group — is
+/// given to exit after `SIGTERM` before `SIGKILL` is sent.
+///
+/// Five seconds is chosen against what the tools this project actually
+/// runs need in order to leave nothing behind: `kind` removes its Docker
+/// container on `SIGTERM`, `helm` releases the lease on its release
+/// secret, `kubectl port-forward` closes its SPDY stream. All of those
+/// are sub-second in practice; the margin is for a loaded CI machine,
+/// not for a tool that is going to take its time. It is *not* a second
+/// timeout in the Global Constraint 13 sense — the command's own
+/// deadline has already fired by the time this applies — so it is
+/// deliberately short enough that a hung child cannot add a meaningful
+/// delay to a run's failure path.
+pub const PROCESS_GROUP_TERMINATION_GRACE: Duration = Duration::from_secs(5);
+
+/// Places `command`'s child in a new process group of its own, so that
+/// [`terminate_child`] can later signal the child *and its descendants*
+/// as a unit. See the module documentation's "Process groups" section
+/// for the safe-API provenance and for what happens on a target with no
+/// process groups (this becomes a no-op, and only the direct child is
+/// ever killed).
+#[cfg(unix)]
+fn isolate_process_group(command: &mut TokioCommand) {
+    // `0` means "a new group whose id is the child's own pid", which is
+    // what makes `ManagedChild::id` usable as the group id below.
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn isolate_process_group(_command: &mut TokioCommand) {}
+
+/// Sends `signal` to every process in group `pgid`.
+///
+/// `ESRCH` — no process in that group — is success, not failure: it is
+/// the normal answer once the group has emptied out, and the whole point
+/// of the `SIGKILL` sweep in [`terminate_child`] is that it is harmless
+/// when there is nothing left to sweep.
+#[cfg(unix)]
+fn signal_process_group(pgid: u32, signal: nix::sys::signal::Signal) -> io::Result<()> {
+    let raw = i32::try_from(pgid)
+        .map_err(|_| io::Error::other(format!("process id {pgid} does not fit in a pid_t")))?;
+    match nix::sys::signal::killpg(nix::unistd::Pid::from_raw(raw), signal) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+        Err(errno) => Err(io::Error::from(errno)),
+    }
+}
+
+/// `SIGTERM` the group, wait [`PROCESS_GROUP_TERMINATION_GRACE`] for the
+/// direct child, then `SIGKILL` the group regardless. Returns whether
+/// the direct child was reaped in the process.
+///
+/// The final `SIGKILL` is sent even when the child exited politely,
+/// because a grandchild that ignored the `SIGTERM` is exactly the orphan
+/// this exists to prevent and the child's own exit says nothing about
+/// it. `false` (the child is still unreaped) hands the caller back to a
+/// plain `Child::kill`, which both signals it again and reaps it.
+#[cfg(unix)]
+async fn shut_down_process_group(child: &mut tokio::process::Child, pgid: u32) -> bool {
+    use nix::sys::signal::Signal;
+
+    if signal_process_group(pgid, Signal::SIGTERM).is_err() {
+        // The group could not be signalled at all (it was never created,
+        // or this process lost the right to signal it). Don't spend the
+        // grace period waiting for a signal nobody received.
+        return false;
+    }
+    let reaped = matches!(
+        tokio::time::timeout(PROCESS_GROUP_TERMINATION_GRACE, child.wait()).await,
+        Ok(Ok(_))
+    );
+    let _ = signal_process_group(pgid, Signal::SIGKILL);
+    reaped
+}
+
+#[cfg(not(unix))]
+async fn shut_down_process_group(_child: &mut tokio::process::Child, _pgid: u32) -> bool {
+    false
+}
+
+/// Terminates `child` and, on Unix, everything else in its process
+/// group; returns once the child has been reaped.
+///
+/// The single implementation of the sequence documented in this module's
+/// "Process groups" section, shared by [`ProcessRunner::run`]'s timeout
+/// path and [`ManagedChild::kill`] so the two cannot drift.
+///
+/// `pid` is the child's pid, which (because every child here is spawned
+/// with [`isolate_process_group`]) is also its process group id. `None`
+/// — a child already reaped, so its id is gone — skips straight to
+/// `Child::kill`, which is then a no-op that reports the truth.
+async fn terminate_child(child: &mut tokio::process::Child, pid: Option<u32>) -> io::Result<()> {
+    if let Some(pid) = pid
+        && shut_down_process_group(child, pid).await
+    {
+        return Ok(());
+    }
+    // Either there was no group to signal, or the child outlived the
+    // grace period. `Child::kill` sends the signal *and* awaits the
+    // exit, so the process is gone (and reaped) when this resolves.
+    child.kill().await
+}
+
+// =========================================================================
+// Bounded output, spilled overflow, bounded error excerpts (Task 9.4)
+// =========================================================================
+
+/// The most of each of [`ProcessRunner::run`]'s streams kept in memory.
+///
+/// Deliberately the same 64 KiB as [`MAX_CAPTURED_STREAM_BYTES`], the
+/// long-lived children's cap: one number for "how much command output
+/// this process is willing to hold", so a reviewer does not have to work
+/// out which shape of child is subject to which limit. It is far more
+/// than every command this project runs today actually produces (`helm
+/// upgrade --install` prints a NOTES block; `kubectl apply` prints a line
+/// per object; `kind create cluster` prints a dozen progress lines), and
+/// small enough that a tool that decides to print a gigabyte cannot make
+/// this process allocate one.
+///
+/// Overflow past this point is **not** silently dropped: see
+/// [`CommandSpec::spill_dir`] and [`CommandResult::overflow`].
+pub const MAX_RETAINED_OUTPUT_BYTES: usize = MAX_CAPTURED_STREAM_BYTES;
+
+/// The most captured command output any single error rendering may
+/// embed, via [`output_tail`].
+///
+/// Four KiB is roughly fifty lines — enough that the actual failure
+/// message from `kubectl`, `helm`, or `kind` is present in full, since
+/// those tools put the reason at the *end* of the stream, and little
+/// enough that an error can be logged, put in a diagnostic, and rendered
+/// into a report without any of those having to defend itself against
+/// megabytes.
+pub const MAX_ERROR_TAIL_BYTES: usize = 4 * 1024;
+
+/// Renders the last [`MAX_ERROR_TAIL_BYTES`] of captured command output
+/// as text, for embedding in an error message or a diagnostic.
+///
+/// The **tail**, not the head: every tool this project runs reports why
+/// it failed at the end of its output, after whatever progress it had
+/// been narrating. Quoting the beginning would reliably show the
+/// uninteresting half.
+///
+/// When anything is omitted the result says so, in bytes, so a reader is
+/// never left to guess whether they are looking at the whole story
+/// (Global Constraint 15); and the excerpt is advanced to the next line
+/// boundary inside the window so it begins with a whole line rather than
+/// mid-token. Bytes are decoded lossily for the reason
+/// [`ManagedChild::next_stdout_line`] documents: a stream that is not
+/// valid UTF-8 is still evidence.
+#[must_use]
+pub fn output_tail(bytes: &[u8]) -> String {
+    if bytes.len() <= MAX_ERROR_TAIL_BYTES {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let mut omitted = bytes.len() - MAX_ERROR_TAIL_BYTES;
+    let mut tail = &bytes[omitted..];
+    if let Some(index) = tail.iter().position(|byte| *byte == b'\n')
+        && index + 1 < tail.len()
+    {
+        omitted += index + 1;
+        tail = &tail[index + 1..];
+    }
+    format!(
+        "[... {omitted} earlier bytes of output omitted ...]\n{}",
+        String::from_utf8_lossy(tail)
+    )
+}
+
+/// Distinguishes one command's spill files from the next's within a
+/// single process. A plain counter rather than a timestamp or a random
+/// id: two commands started in the same millisecond must not collide,
+/// and the sequence also happens to record the order they ran in, which
+/// is what someone reading a `logs` directory after a failure wants.
+static NEXT_SPILL_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+/// Builds the two spill file paths for one command, or `None` when the
+/// caller configured no [`CommandSpec::spill_dir`].
+///
+/// Both streams of one command share a sequence number so they sort
+/// together, and carry the program's own name so a `logs` directory
+/// listing says what produced each file without anything having to be
+/// opened.
+fn spill_paths(spec: &CommandSpec) -> Option<(PathBuf, PathBuf)> {
+    let dir = spec.spill_dir.as_ref()?;
+    let sequence = NEXT_SPILL_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let program = spill_program_label(&spec.program);
+    Some((
+        dir.join(format!("command-{sequence:06}-{program}-stdout.log")),
+        dir.join(format!("command-{sequence:06}-{program}-stderr.log")),
+    ))
+}
+
+/// The file-name-safe, bounded label for `program` used in a spill file
+/// name.
+///
+/// A `CommandSpec::program` is an arbitrary `OsString` — a bare name, an
+/// absolute path, in principle non-UTF-8 — and it is *not* trusted to be
+/// a filename. Only the final component is used, every byte outside
+/// `[A-Za-z0-9._-]` becomes `_`, and the result is clamped so that a
+/// pathological program name cannot produce an unusable path.
+fn spill_program_label(program: &OsStr) -> String {
+    let name = Path::new(program)
+        .file_name()
+        .unwrap_or(program)
+        .to_string_lossy();
+    let label: String = name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .take(32)
+        .collect();
+    if label.is_empty() {
+        "command".to_owned()
+    } else {
+        label
+    }
+}
+
+/// One drained stream: what was kept, and what was not.
+#[derive(Debug, Default)]
+struct StreamCapture {
+    retained: Vec<u8>,
+    overflow: StreamOverflow,
+}
+
+/// Reads `pipe` to EOF, keeping at most [`MAX_RETAINED_OUTPUT_BYTES`] in
+/// memory and — once (and only once) that cap is exceeded — writing the
+/// stream in full to `spill_path`.
+///
+/// The pipe is always read to the end regardless of the cap, for the
+/// reason this module's own documentation gives for `pump`: a pipe
+/// nobody drains is a deadlock, and that is a correctness property
+/// independent of whether anyone still wants the bytes.
+///
+/// The spill file is created lazily, on the first byte past the cap, and
+/// the already-retained prefix is written to it first — so the file, when
+/// it exists at all, is the *complete* stream rather than the remainder
+/// of one, and a command whose output fit in memory leaves no file
+/// behind at all.
+///
+/// A failure to write the spill (a full disk, a `logs` directory that
+/// could not be created) never fails the command: it is reported through
+/// `tracing::warn!` and the capture degrades to counting the bytes it
+/// could not keep, which is what [`StreamOverflow`] already exists to
+/// say honestly.
+async fn capture_stream<R>(mut pipe: R, spill_path: Option<PathBuf>) -> io::Result<StreamCapture>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut capture = StreamCapture::default();
+    let mut spill_path = spill_path;
+    let mut spill: Option<tokio::fs::File> = None;
+    let mut buffer = vec![0u8; 32 * 1024];
+
+    loop {
+        let read = pipe.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let chunk = &buffer[..read];
+        let room = MAX_RETAINED_OUTPUT_BYTES.saturating_sub(capture.retained.len());
+
+        if room < chunk.len() {
+            if spill.is_none()
+                && let Some(path) = spill_path.take()
+            {
+                match open_spill_file(&path, &capture.retained).await {
+                    Ok(file) => {
+                        capture.overflow.spill_path = Some(path);
+                        spill = Some(file);
+                    }
+                    Err(source) => tracing::warn!(
+                        path = %path.display(),
+                        error = %source,
+                        "could not open a spill file for oversized command output; the overflow \
+                         will be counted but not kept"
+                    ),
+                }
+            }
+            capture.overflow.omitted_bytes += (chunk.len() - room) as u64;
+        }
+        capture
+            .retained
+            .extend_from_slice(&chunk[..room.min(chunk.len())]);
+
+        if let Some(file) = spill.as_mut()
+            && let Err(source) = file.write_all(chunk).await
+        {
+            let path = capture.overflow.spill_path.take();
+            tracing::warn!(
+                path = path.as_ref().map(|path| path.display().to_string()),
+                error = %source,
+                "could not write oversized command output to its spill file; the overflow will \
+                 be counted but not kept"
+            );
+            spill = None;
+        }
+    }
+
+    if let Some(mut file) = spill
+        && let Err(source) = file.flush().await
+    {
+        let path = capture.overflow.spill_path.take();
+        tracing::warn!(
+            path = path.as_ref().map(|path| path.display().to_string()),
+            error = %source,
+            "could not flush a command output spill file"
+        );
+    }
+    Ok(capture)
+}
+
+/// Creates `path` (and any missing parent directory) and writes `prefix`
+/// — the part of the stream already held in memory — as its first bytes.
+///
+/// `create_dir_all` rather than assuming the directory is there: a
+/// `RunPaths::logs` directory normally exists by the time any command
+/// runs, but a spill that failed because of a missing directory would
+/// lose exactly the output a failing run most needs.
+async fn open_spill_file(path: &Path, prefix: &[u8]) -> io::Result<tokio::fs::File> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let mut file = tokio::fs::File::create(path).await?;
+    file.write_all(prefix).await?;
+    Ok(file)
 }
 
 /// The chokepoint every external command Admission Lab runs goes
@@ -562,15 +1091,24 @@ impl ProcessRunner for TokioProcessRunner {
             // and because it alone reports `ProcessError::KillFailed` if
             // killing fails outright.
             .kill_on_drop(true);
+        // Task 9.4: the child owns a process group of its own, so the
+        // timeout path below can terminate the whole tree rather than
+        // just the trunk. See this module's "Process groups" section.
+        isolate_process_group(&mut command);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
+
+        let spill = spill_paths(&spec);
 
         let start = Instant::now();
         let mut child = command.spawn().map_err(|source| ProcessError::Spawn {
             context: Box::new(spec.context()),
             source,
         })?;
+        // Captured while the child is definitely unreaped, so it is
+        // still a valid process (and process group) id to signal.
+        let child_pid = child.id();
 
         let stdout_pipe = child
             .stdout
@@ -593,8 +1131,12 @@ impl ProcessRunner for TokioProcessRunner {
         // they had already read: they keep accumulating in the
         // background and are collected once the child has actually been
         // killed and reaped.
-        let stdout_task = tokio::spawn(read_all(stdout_pipe));
-        let stderr_task = tokio::spawn(read_all(stderr_pipe));
+        let (stdout_spill, stderr_spill) = match spill {
+            Some((stdout_spill, stderr_spill)) => (Some(stdout_spill), Some(stderr_spill)),
+            None => (None, None),
+        };
+        let stdout_task = tokio::spawn(capture_stream(stdout_pipe, stdout_spill));
+        let stderr_task = tokio::spawn(capture_stream(stderr_pipe, stderr_spill));
 
         let start_timeout = tokio::time::timeout(spec.timeout, child.wait()).await;
         let elapsed = start.elapsed();
@@ -605,14 +1147,14 @@ impl ProcessRunner for TokioProcessRunner {
                 source,
             })?,
             Err(_elapsed) => {
-                // `Child::kill` sends the kill signal *and* awaits the
-                // child's exit (it is documented as equivalent to
-                // sending SIGKILL followed by `wait`), so by the time
-                // this resolves successfully the process has already
-                // been killed and reaped — nothing further is needed to
-                // avoid leaking it.
-                child
-                    .kill()
+                // `terminate_child` signals the child's whole process
+                // group (`SIGTERM`, a grace period, then `SIGKILL`) and
+                // does not resolve until the direct child has been
+                // killed *and reaped*, so by the time this succeeds
+                // neither the process nor any grandchild it started is
+                // still holding cluster state. See this module's
+                // "Process groups" section.
+                terminate_child(&mut child, child_pid)
                     .await
                     .map_err(|source| ProcessError::KillFailed {
                         context: Box::new(spec.context()),
@@ -624,25 +1166,29 @@ impl ProcessRunner for TokioProcessRunner {
                 // timeout, so a problem collecting the drain tasks'
                 // output degrades to empty partial output rather than
                 // masking the timeout with a different error.
-                let stdout = join_output(stdout_task).await.unwrap_or_default();
-                let stderr = join_output(stderr_task).await.unwrap_or_default();
+                let stdout = join_capture(stdout_task).await.unwrap_or_default();
+                let stderr = join_capture(stderr_task).await.unwrap_or_default();
                 return Err(ProcessError::TimedOut {
                     context: Box::new(spec.context()),
                     timeout: spec.timeout,
                     elapsed,
-                    stdout,
-                    stderr,
+                    stdout: stdout.retained,
+                    stderr: stderr.retained,
+                    overflow: Box::new(OutputOverflow {
+                        stdout: stdout.overflow,
+                        stderr: stderr.overflow,
+                    }),
                 });
             }
         };
 
-        let stdout = join_output(stdout_task)
+        let stdout = join_capture(stdout_task)
             .await
             .map_err(|source| ProcessError::Io {
                 context: Box::new(spec.context()),
                 source,
             })?;
-        let stderr = join_output(stderr_task)
+        let stderr = join_capture(stderr_task)
             .await
             .map_err(|source| ProcessError::Io {
                 context: Box::new(spec.context()),
@@ -651,9 +1197,13 @@ impl ProcessRunner for TokioProcessRunner {
 
         Ok(CommandResult {
             status,
-            stdout,
-            stderr,
+            stdout: stdout.retained,
+            stderr: stderr.retained,
             elapsed,
+            overflow: OutputOverflow {
+                stdout: stdout.overflow,
+                stderr: stderr.overflow,
+            },
         })
     }
 }
@@ -969,12 +1519,23 @@ impl ManagedChild {
         }
     }
 
-    /// Kills the child and reaps it.
+    /// Kills the child, everything else in its process group, and reaps
+    /// it.
     ///
-    /// When this resolves `Ok`, the process is gone — `Child::kill`
-    /// sends the signal *and* awaits the exit, exactly as
-    /// [`ProcessRunner::run`]'s own timeout path relies on. Calling it
-    /// on a child that has already exited succeeds and does nothing.
+    /// When this resolves `Ok`, the process is gone: [`terminate_child`]
+    /// signals the group (`SIGTERM`, up to
+    /// [`PROCESS_GROUP_TERMINATION_GRACE`], then `SIGKILL`) and does not
+    /// resolve until the direct child has been reaped — exactly what
+    /// [`ProcessRunner::run`]'s own timeout path relies on. Calling it on
+    /// a child that has already exited succeeds and does nothing (an
+    /// empty process group is `ESRCH`, which this treats as success).
+    ///
+    /// A tool that ignores `SIGTERM` therefore makes this take up to the
+    /// grace period rather than returning immediately. That is the
+    /// deliberate trade: `kubectl port-forward` (the one long-lived
+    /// child this project spawns) exits on `SIGTERM` in well under a
+    /// second, and the alternative — `SIGKILL` first — would deny every
+    /// tool the chance to remove what it created.
     ///
     /// As with [`ManagedChild::wait`], the stream captures are complete
     /// once this returns `Ok`.
@@ -985,7 +1546,7 @@ impl ManagedChild {
     /// killed, which — as that variant documents — means it may still be
     /// running.
     pub async fn kill(&mut self) -> Result<(), ProcessError> {
-        let result = self.child.kill().await;
+        let result = terminate_child(&mut self.child, Some(self.id)).await;
         // Reaped either way: `kill` on an already-exited child is `Ok`,
         // and on failure the flag stops `Drop` from adding a second,
         // redundant warning to an error the caller is already holding.
@@ -1009,23 +1570,64 @@ impl Drop for ManagedChild {
         if self.reaped {
             return;
         }
-        // Best-effort only: `start_kill` sends the signal and returns
-        // immediately, without waiting for the process to actually go
-        // away, because `Drop` cannot await. `kill_on_drop(true)` on the
-        // inner `Child` does the same thing a moment later via tokio's
-        // orphan reaper; this call is the explicit half so the intent is
-        // visible at the point it matters rather than buried in a
-        // builder flag.
+        // Best-effort only, and in that order on purpose. `Drop` cannot
+        // await, so the graded `SIGTERM`/grace/`SIGKILL` sequence
+        // `kill()` runs is not available here; what *is* available is
+        // one synchronous `SIGTERM` to the whole group, which at least
+        // reaches a grandchild that `start_kill` alone would never
+        // touch. `start_kill` then signals the direct child and returns
+        // immediately, without waiting for it to go away.
+        // `kill_on_drop(true)` on the inner `Child` reaps it a moment
+        // later via tokio's orphan reaper; the explicit call is here so
+        // the intent is visible at the point it matters rather than
+        // buried in a builder flag.
+        signal_process_group_best_effort(self.id);
         let _ = self.child.start_kill();
+        let remedy = manual_termination_command(self.id);
         tracing::warn!(
             pid = self.id,
             command = %self.context,
             "a managed child process was dropped without an explicit kill(); it has been \
              signalled best-effort, but termination could not be awaited -- if pid {} is still \
-             running, stop it with: kill {}",
+             running, stop it with: {remedy}",
             self.id,
-            self.id
         );
+    }
+}
+
+/// Sends one `SIGTERM` to `pgid`, ignoring every failure — the most a
+/// synchronous context such as [`ManagedChild`]'s `Drop` can honestly
+/// do. Compiles to nothing where there are no process groups.
+#[cfg(unix)]
+fn signal_process_group_best_effort(pgid: u32) {
+    let _ = signal_process_group(pgid, nix::sys::signal::Signal::SIGTERM);
+}
+
+#[cfg(not(unix))]
+fn signal_process_group_best_effort(_pgid: u32) {}
+
+/// The exact command an operator should type to stop a child Admission
+/// Lab could not guarantee it terminated, together with anything that
+/// child itself started.
+///
+/// On Unix that is `kill -- -<pid>`: because every child spawned here
+/// leads its own process group (see this module's "Process groups"
+/// section), the negative-pid form reaches the grandchildren too, and a
+/// bare `kill <pid>` would leave exactly the orphans the operator is
+/// being asked to clean up. Elsewhere there is no group to name, so the
+/// advice is the direct child and nothing more — which is also all this
+/// module itself can do there.
+///
+/// Public so that every place that has to make this confession — this
+/// module's own `Drop`, and `admissionlab-gateway`'s port-forward
+/// warning — prints the *same* command, rather than an operator seeing
+/// two different remedies for one leaked process.
+#[must_use]
+pub fn manual_termination_command(pid: u32) -> String {
+    if cfg!(unix) {
+        format!("kill -- -{pid}")
+    } else {
+        format!("kill {pid}")
     }
 }
 
@@ -1044,6 +1646,13 @@ impl ProcessSpawner for TokioProcessRunner {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Identical to `run`'s, and load-bearing for the same reason:
+        // `ManagedChild::kill` and this type's `Drop` both terminate the
+        // whole group, so a long-lived child cannot leave a grandchild
+        // behind either. `spec.spill_dir` is the second field (with
+        // `timeout`) this shape of child deliberately ignores; see
+        // `CommandSpec::spill_dir`.
+        isolate_process_group(&mut command);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }
@@ -1202,20 +1811,12 @@ fn trim_newline(line: &[u8]) -> &[u8] {
     line.strip_suffix(b"\r").unwrap_or(line)
 }
 
-/// Reads `pipe` to EOF and returns everything read.
-async fn read_all<R>(mut pipe: R) -> io::Result<Vec<u8>>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    let mut buf = Vec::new();
-    pipe.read_to_end(&mut buf).await?;
-    Ok(buf)
-}
-
-/// Awaits a `tokio::spawn`ed [`read_all`] task, flattening a task-join
-/// failure (which should only occur if the task panicked) into the same
-/// `io::Result` shape as the read itself.
-async fn join_output(handle: tokio::task::JoinHandle<io::Result<Vec<u8>>>) -> io::Result<Vec<u8>> {
+/// Awaits a `tokio::spawn`ed [`capture_stream`] task, flattening a
+/// task-join failure (which should only occur if the task panicked) into
+/// the same `io::Result` shape as the read itself.
+async fn join_capture(
+    handle: tokio::task::JoinHandle<io::Result<StreamCapture>>,
+) -> io::Result<StreamCapture> {
     match handle.await {
         Ok(result) => result,
         Err(join_error) => Err(io::Error::other(join_error)),

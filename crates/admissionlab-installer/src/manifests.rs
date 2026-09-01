@@ -591,6 +591,14 @@ pub struct ManifestsInstaller {
     /// `paths.logs().join("kubectl-cache")`, captured once at
     /// construction. Never the operator's real `~/.kube/cache`.
     cache_dir: PathBuf,
+    /// This run's [`admissionlab_core::RunPaths::logs`] directory, where
+    /// a `kubectl` invocation whose output outgrows
+    /// [`admissionlab_core::MAX_RETAINED_OUTPUT_BYTES`] spills the rest
+    /// (see [`admissionlab_core::CommandSpec::spill_dir`]). The parent
+    /// of `cache_dir`, kept as its own field rather than recovered with
+    /// `cache_dir.parent()` so the two paths stay independently obvious
+    /// at their use sites.
+    logs_dir: PathBuf,
 }
 
 impl ManifestsInstaller {
@@ -603,6 +611,7 @@ impl ManifestsInstaller {
         Self {
             runner,
             cache_dir: paths.logs().join(KUBECTL_CACHE_SUBDIR),
+            logs_dir: paths.logs().to_path_buf(),
         }
     }
 
@@ -631,6 +640,13 @@ impl ManifestsInstaller {
             env: BTreeMap::new(),
             sensitive_env_keys: BTreeSet::new(),
             timeout,
+            // Task 9.4: a `kubectl apply` over a component's manifests
+            // prints a line per object and, on failure, can print a
+            // validation message per object -- a large CRD bundle
+            // therefore genuinely can outgrow
+            // `MAX_RETAINED_OUTPUT_BYTES`, and this installer already
+            // holds this run's `logs` directory to put the rest in.
+            spill_dir: Some(self.logs_dir.clone()),
         }
     }
 

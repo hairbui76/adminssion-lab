@@ -351,6 +351,10 @@ async fn api_health(runner: &dyn ProcessRunner, kubeconfig: &Path) -> Result<(),
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: Duration::from_secs(30),
+        // No spill directory: `/healthz` answers with a single word,
+        // and `doctor` runs before (and independently of) any run, so
+        // there is no `RunPaths::logs` to write into.
+        spill_dir: None,
     };
     let result = runner
         .run(spec)
@@ -360,9 +364,11 @@ async fn api_health(runner: &dyn ProcessRunner, kubeconfig: &Path) -> Result<(),
         Ok(())
     } else {
         Err(format!(
+            // A bounded tail (Task 9.4 Step 3): this string is printed
+            // to the operator's terminal and put in a `DoctorReport`.
             "kubectl get --raw=/healthz exited with {}: {}",
             result.status,
-            String::from_utf8_lossy(&result.stderr).trim()
+            admissionlab_core::output_tail(&result.stderr).trim()
         ))
     }
 }
@@ -614,7 +620,7 @@ mod tests {
 
     use admissionlab_cluster::{KubernetesImage, KubernetesImageMatrix};
     use admissionlab_core::{
-        CommandResult, CommandSpec, ProcessError, ProcessRunner, RunDisposition,
+        CommandResult, CommandSpec, OutputOverflow, ProcessError, ProcessRunner, RunDisposition,
     };
     use async_trait::async_trait;
 
@@ -689,12 +695,14 @@ mod tests {
                     stdout: stdout.clone(),
                     stderr: Vec::new(),
                     elapsed: Duration::from_millis(1),
+                    overflow: OutputOverflow::default(),
                 }),
                 Some(FakeOutcome::Failure { code, stderr }) => Ok(CommandResult {
                     status: exit_status(*code),
                     stdout: Vec::new(),
                     stderr: stderr.clone(),
                     elapsed: Duration::from_millis(1),
+                    overflow: OutputOverflow::default(),
                 }),
                 Some(FakeOutcome::Missing) | None => Err(ProcessError::Spawn {
                     context: Box::new(spec.context()),
@@ -991,6 +999,7 @@ mod tests {
                         stdout: stdout.clone(),
                         stderr: Vec::new(),
                         elapsed: Duration::from_millis(1),
+                        overflow: OutputOverflow::default(),
                     })
                 }
                 Some(FakeOutcome::Failure { code, stderr }) => Ok(CommandResult {
@@ -998,6 +1007,7 @@ mod tests {
                     stdout: Vec::new(),
                     stderr: stderr.clone(),
                     elapsed: Duration::from_millis(1),
+                    overflow: OutputOverflow::default(),
                 }),
                 Some(FakeOutcome::Missing) | None => Err(ProcessError::Spawn {
                     context: Box::new(spec.context()),

@@ -181,7 +181,7 @@ const BUILD_AND_LOAD_TIMEOUT: Duration = Duration::from_mins(15);
 // crate — rather than in `admissionlab-spec`. The full argument is in
 // `fixtures/gateway/portable/README.md` ("Where the contract model
 // lives, and why not in the spec"); the short form is that
-// `admissionlab.io/v1beta1` is a user-facing frozen schema and this
+// `admissionlab.io/v1` is a user-facing frozen schema and this
 // corpus is repo-internal certification tooling, so the honest home for
 // "expected Location", "expected backend-observed path", "over TLS" and
 // "these weights" is the suite that asserts them. Every engine
@@ -1620,6 +1620,7 @@ async fn build_and_load_test_images(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: BUILD_AND_LOAD_TIMEOUT,
+        spill_dir: None,
     };
     let result = runner
         .run(spec)

@@ -16,7 +16,9 @@ use std::path::Path;
 use std::process::ExitStatus;
 use std::time::Duration;
 
-use admissionlab_core::process::{CommandResult, CommandSpec, ProcessError, ProcessRunner};
+use admissionlab_core::process::{
+    CommandResult, CommandSpec, OutputOverflow, ProcessError, ProcessRunner,
+};
 use admissionlab_core::tool::{
     DISK_WARNING_THRESHOLD_BYTES, ToolName, collect_doctor_report, disk_space_warning, probe_tool,
 };
@@ -118,12 +120,14 @@ impl ProcessRunner for FakeProcessRunner {
                 stdout: stdout.clone(),
                 stderr: Vec::new(),
                 elapsed: Duration::from_millis(1),
+                overflow: OutputOverflow::default(),
             }),
             Some(FakeOutcome::Failure { code, stderr }) => Ok(CommandResult {
                 status: exit_status(*code),
                 stdout: Vec::new(),
                 stderr: stderr.clone(),
                 elapsed: Duration::from_millis(1),
+                overflow: OutputOverflow::default(),
             }),
             Some(FakeOutcome::Missing) | None => Err(ProcessError::Spawn {
                 context: Box::new(spec.context()),
@@ -389,6 +393,7 @@ fn fake_runner_is_keyed_by_program_name() {
         env: BTreeMap::new(),
         sensitive_env_keys: std::collections::BTreeSet::new(),
         timeout: Duration::from_secs(1),
+        spill_dir: None,
     };
     let result = block_on(runner.run(spec)).unwrap();
     assert!(result.status.success());

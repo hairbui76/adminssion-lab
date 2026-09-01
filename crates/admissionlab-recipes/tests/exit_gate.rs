@@ -765,6 +765,7 @@ async fn build_and_load_test_webhook_image(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: BUILD_AND_LOAD_TIMEOUT,
+        spill_dir: None,
     };
     let result = runner
         .run(spec)
@@ -974,6 +975,7 @@ async fn assert_clusters_gone(runner: &dyn ProcessRunner, names: &[&str]) -> Res
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: KIND_GET_CLUSTERS_TIMEOUT,
+        spill_dir: None,
     };
     let result = runner
         .run(spec)

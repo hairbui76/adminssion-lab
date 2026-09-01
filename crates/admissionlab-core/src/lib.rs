@@ -25,9 +25,10 @@ pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue, SensitiveBytes}
 pub use error::IdParseError;
 pub use ids::{FixtureId, RunId};
 pub use process::{
-    CommandContext, CommandResult, CommandSpec, MAX_CAPTURED_STREAM_BYTES, MAX_LINE_BYTES,
-    ManagedChild, ProcessError, ProcessRunner, ProcessSpawner, TokioProcessRunner,
-    env_key_looks_sensitive,
+    CommandContext, CommandResult, CommandSpec, MAX_CAPTURED_STREAM_BYTES, MAX_ERROR_TAIL_BYTES,
+    MAX_LINE_BYTES, MAX_RETAINED_OUTPUT_BYTES, ManagedChild, OutputOverflow,
+    PROCESS_GROUP_TERMINATION_GRACE, ProcessError, ProcessRunner, ProcessSpawner, StreamOverflow,
+    TokioProcessRunner, env_key_looks_sensitive, manual_termination_command, output_tail,
 };
 pub use reproduce::{
     DEFAULT_LAB_FILE_NAME, DiscoveredFixture, EffectiveMismatch, FixtureVerification,
@@ -45,7 +46,7 @@ pub use run_manifest::{
     ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, GatewayProvenance,
     HostProvenance, ManifestReadError, NormalizationRuleRecord, RunManifest, RunManifestWriter,
     RunStage, RunStatus, SUPPORTED_SCHEMA_VERSIONS, ToolProvenance, canonical_sha256, file_sha256,
-    normalization_sha256, policy_sha256, read_run_manifest, run_manifest_v1beta1_json_schema,
+    normalization_sha256, policy_sha256, read_run_manifest, run_manifest_v1_json_schema,
     sha256_hex, split_node_image_reference,
 };
 pub use side::Side;

@@ -568,6 +568,7 @@ async fn build_and_load_test_images(
         env: BTreeMap::new(),
         sensitive_env_keys: std::collections::BTreeSet::new(),
         timeout: BUILD_AND_LOAD_TIMEOUT,
+        spill_dir: None,
     };
     let result = runner
         .run(spec)

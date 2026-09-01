@@ -360,6 +360,14 @@ impl HelmInstaller {
             env: helm_isolation_env(&state_dir),
             sensitive_env_keys: BTreeSet::new(),
             timeout,
+            // Task 9.4: `helm` is the highest-volume command this
+            // project runs -- a chart's NOTES block, a `--debug`
+            // rendering, or a failing hook can all run to many
+            // kilobytes -- and this installer already holds this run's
+            // `logs` directory, so anything past
+            // `MAX_RETAINED_OUTPUT_BYTES` lands in a file there rather
+            // than being either held in memory or lost.
+            spill_dir: Some(self.logs_dir.clone()),
         }
     }
 
@@ -423,9 +431,12 @@ impl HelmInstaller {
                 Err(reason) => reason,
             },
             Ok(result) => format!(
+                // A bounded tail (Task 9.4 Step 3): this reason becomes
+                // a user-facing `Diagnostic`, and `helm`'s stderr is
+                // bounded but not small.
                 "`{context}` exited with {}: {}",
                 result.status,
-                String::from_utf8_lossy(&result.stderr).trim(),
+                admissionlab_core::output_tail(&result.stderr).trim(),
             ),
             Err(error) => format!("could not run `{context}`: {error}"),
         };

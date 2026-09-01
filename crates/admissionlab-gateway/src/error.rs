@@ -390,8 +390,11 @@ pub enum GatewayError {
     /// the readiness window, or closed its stdout without ever printing
     /// a line this crate could parse.
     ///
-    /// Carries `stderr` verbatim (lossily decoded, and bounded by
-    /// `admissionlab_core::MAX_CAPTURED_STREAM_BYTES`) rather than
+    /// Carries `stderr` verbatim (lossily decoded, and bounded twice:
+    /// the capture itself by
+    /// `admissionlab_core::MAX_CAPTURED_STREAM_BYTES`, and this excerpt
+    /// of it by `admissionlab_core::MAX_ERROR_TAIL_BYTES` — a tail,
+    /// because `kubectl` says why it failed last) rather than
     /// summarizing it: `kubectl`'s own message is the actual diagnosis
     /// — "Service does not have any active Endpoint", "unable to listen
     /// on any of the requested ports", "the server could not find the

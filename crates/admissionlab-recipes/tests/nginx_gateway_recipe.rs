@@ -714,6 +714,7 @@ async fn read_data_plane_service_type(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: KUBECTL_READ_TIMEOUT,
+        spill_dir: None,
     };
     let result = TokioProcessRunner::new()
         .run(spec)
@@ -962,6 +963,7 @@ async fn build_and_load_test_images(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: BUILD_AND_LOAD_TIMEOUT,
+        spill_dir: None,
     };
     let result = runner
         .run(spec)

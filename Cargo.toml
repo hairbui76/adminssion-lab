@@ -220,10 +220,18 @@ k8s-openapi = { version = "0.28.0", features = ["v1_36"] }
 # that task's report for why), so `kube_runtime` is never pulled in.
 kube = { version = "4.2.0" }
 # Safe, non-`unsafe` access to POSIX `statvfs` (`admissionlab-core`'s
-# doctor disk-space check). Unix-only crate: every consumer pulls it in
-# through a `[target.'cfg(unix)'.dependencies]` table rather than an
-# unconditional one, so it is never even fetched for a non-Unix target.
-nix = { version = "0.31.3", default-features = false, features = ["fs"] }
+# doctor disk-space check) and to `killpg` (`process.rs`'s process-group
+# termination, Task 9.4 -- this workspace forbids `unsafe_code`, so
+# signalling a process group has to go through a crate that already
+# encapsulates the `libc` call safely rather than through a local
+# `unsafe` block or a `pre_exec` hook). Unix-only crate: every consumer
+# pulls it in through a `[target.'cfg(unix)'.dependencies]` table rather
+# than an unconditional one, so it is never even fetched for a non-Unix
+# target.
+nix = { version = "0.31.3", default-features = false, features = [
+    "fs",
+    "signal",
+] }
 predicates = "3.1.4"
 # `admissionlab-test-webhook`'s `bootstrap` mode (Task 2.7) generates a
 # deterministic, test-only, per-cluster CA and a CA-signed serving cert

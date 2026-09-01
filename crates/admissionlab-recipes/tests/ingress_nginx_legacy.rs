@@ -739,6 +739,7 @@ async fn kubectl_run(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: KUBECTL_TIMEOUT,
+        spill_dir: None,
     };
     let context = spec.context();
     runner
@@ -765,6 +766,7 @@ async fn build_and_load_test_images(
         env: BTreeMap::new(),
         sensitive_env_keys: BTreeSet::new(),
         timeout: BUILD_AND_LOAD_TIMEOUT,
+        spill_dir: None,
     };
     let result = runner
         .run(spec)

@@ -141,6 +141,14 @@ struct ClusterLayout {
     /// Host path for this side's isolated kubeconfig (what
     /// `--kubeconfig` points at).
     kubeconfig_path: PathBuf,
+    /// This run's [`RunPaths::logs`] directory, where a `kind`
+    /// invocation whose output outgrows
+    /// [`admissionlab_core::MAX_RETAINED_OUTPUT_BYTES`] spills the rest
+    /// (see [`admissionlab_core::CommandSpec::spill_dir`]). Not
+    /// side-namespaced: the spill file names already carry a per-command
+    /// sequence number, and both sides' `kind` output belonging to one
+    /// `logs` directory is what a reader wants when comparing them.
+    logs_dir: PathBuf,
 }
 
 impl ClusterLayout {
@@ -154,6 +162,7 @@ impl ClusterLayout {
             audit_log_file,
             kind_config_path: paths.logs().join(format!("{side}-kind-config.yaml")),
             kubeconfig_path: kubeconfig::kubeconfig_path(paths, spec.side),
+            logs_dir: paths.logs().to_path_buf(),
         }
     }
 }
@@ -186,6 +195,7 @@ impl KindClusterManager {
         name: &str,
         config_path: &std::path::Path,
         kubeconfig_path: &std::path::Path,
+        logs_dir: &std::path::Path,
     ) -> Result<(), ClusterError> {
         let spec = CommandSpec {
             program: kind::KIND_PROGRAM.into(),
@@ -194,6 +204,12 @@ impl KindClusterManager {
             env: BTreeMap::new(),
             sensitive_env_keys: BTreeSet::new(),
             timeout: kind::CREATE_TIMEOUT,
+            // Task 9.4: the longest-running and most verbose command in
+            // the project (every node image pull, every kubeadm phase),
+            // and the one whose failure output is most worth keeping in
+            // full. `create` is also the only `kind` call site that has
+            // a `RunPaths` to spill into -- see `run_delete`.
+            spill_dir: Some(logs_dir.to_path_buf()),
         };
         self.run_and_check(spec).await
     }
@@ -219,13 +235,27 @@ impl KindClusterManager {
             env: BTreeMap::new(),
             sensitive_env_keys: BTreeSet::new(),
             timeout: kind::DELETE_TIMEOUT,
+            // No spill directory, deliberately: `delete` is reached from
+            // `ClusterManager::delete` and from `rollback`, both of which
+            // hold only a `ClusterHandle` and so have no `RunPaths` to
+            // write into -- and a delete's output is a handful of lines
+            // that fits in `MAX_RETAINED_OUTPUT_BYTES` many times over.
+            // Threading a logs directory through purely to satisfy the
+            // field would mean inventing a path on the cleanup path,
+            // which is the last place to start guessing at one.
+            spill_dir: None,
         };
         self.run_and_check(spec).await
     }
 
     /// Side-loads one image from the operator's local Docker store into
     /// `cluster_name`'s node, using `kind.rs`'s `load_image_argv`.
-    async fn run_load_image(&self, image: &str, cluster_name: &str) -> Result<(), ClusterError> {
+    async fn run_load_image(
+        &self,
+        image: &str,
+        cluster_name: &str,
+        logs_dir: &std::path::Path,
+    ) -> Result<(), ClusterError> {
         let spec = CommandSpec {
             program: kind::KIND_PROGRAM.into(),
             args: kind::load_image_argv(image, cluster_name),
@@ -233,6 +263,10 @@ impl KindClusterManager {
             env: BTreeMap::new(),
             sensitive_env_keys: BTreeSet::new(),
             timeout: kind::LOAD_IMAGE_TIMEOUT,
+            // Called only from `create`, which has the run's `logs`
+            // directory; a side-load streams an image archive's progress
+            // and can be noisy when it fails.
+            spill_dir: Some(logs_dir.to_path_buf()),
         };
         self.run_and_check(spec).await
     }
@@ -290,6 +324,10 @@ impl KindClusterManager {
             env: BTreeMap::new(),
             sensitive_env_keys: BTreeSet::new(),
             timeout: kind::DIAGNOSTICS_TIMEOUT,
+            // No spill directory: `diagnostics` holds only a
+            // `ClusterHandle`, and `kind get clusters` prints one line
+            // per cluster.
+            spill_dir: None,
         };
         let context = spec.context();
         let result = self
@@ -299,9 +337,12 @@ impl KindClusterManager {
             .map_err(|error| format!("could not list kind clusters: {error}"))?;
         if !result.status.success() {
             return Err(format!(
+                // A bounded tail (Task 9.4 Step 3): this string becomes
+                // a `ClusterDiagnostics` note that is rendered into a
+                // report.
                 "`{context}` exited with {}: {}",
                 result.status,
-                String::from_utf8_lossy(&result.stderr).trim(),
+                admissionlab_core::output_tail(&result.stderr).trim(),
             ));
         }
         Ok(String::from_utf8_lossy(&result.stdout)
@@ -413,6 +454,7 @@ impl ClusterManager for KindClusterManager {
                 &spec.name,
                 &layout.kind_config_path,
                 &layout.kubeconfig_path,
+                &layout.logs_dir,
             )
             .await
         {
@@ -440,7 +482,10 @@ impl ClusterManager for KindClusterManager {
         // later on an `ErrImageNeverPull` that reads as a broken
         // fixture.
         for image in &spec.images {
-            if let Err(error) = self.run_load_image(image, &spec.name).await {
+            if let Err(error) = self
+                .run_load_image(image, &spec.name, &layout.logs_dir)
+                .await
+            {
                 return Err(self
                     .rollback(&spec.name, &layout.kubeconfig_path, error)
                     .await);
