@@ -1,0 +1,218 @@
+# NGINX Gateway Fabric fixture (b): the same Gateway and route as
+# `same-namespace.yaml`, with the backend moved into a SECOND namespace
+# and a `ReferenceGrant` in that namespace permitting the reference
+# (ROADMAP Task 8.1 Step 3).
+#
+# Read this file as a diff against `same-namespace.yaml`. Everything
+# structural is identical -- one Gateway, one listener named `http`, one
+# route with one path-prefix rule -- and exactly three things change:
+#
+#   1. the backend (`echo-b`) lives in
+#      `admissionlab-nginx-gateway-cross-backend`, not beside the route;
+#   2. the route's `backendRefs[0]` names that namespace explicitly;
+#   3. a `ReferenceGrant` in the backend's namespace permits `HTTPRoute`s
+#      from the route's namespace to reference `Service/echo-b`.
+#
+# Without (3), Gateway API requires the implementation to refuse the
+# reference and report `ResolvedRefs=False` (reason `RefNotPermitted`) --
+# a deny-by-default rule that exists so that owning a route in one
+# namespace never grants the power to send traffic to another team's
+# Service. This fixture proves the permitted path works; it does not
+# probe the denied path (a fixture for that belongs with the comparison
+# work, where a `ResolvedRefs=False` becomes a classified difference
+# rather than a fixture assertion).
+#
+# `echo-b`, not `echo-a`, deliberately: `same-namespace.yaml` reaches
+# `echo-a`, so the two fixtures cannot pass for each other. A probe that
+# reported `backend: "echo-a"` here would mean the route resolved to the
+# wrong workload, which is precisely the class of regression
+# `traffic_backend_changed` exists to name.
+#
+# Against `fixtures/gateway/istio/cross-namespace.yaml` this file is,
+# once again, that one with `gatewayClassName` changed and the Istio
+# `ConfigMap`/`infrastructure.parametersRef` pair removed -- see
+# `same-namespace.yaml`'s header for the live-cluster finding that makes
+# the removal correct rather than merely convenient, and for why the echo
+# backends are copied in with a namespace rather than included by
+# reference.
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Namespace A: the route's namespace, and the Gateway's. The Gateway
+  # stays beside its route -- `allowedRoutes.namespaces.from: Same` is
+  # unchanged from `same-namespace.yaml`, because what crosses a
+  # namespace here is the BACKEND reference, not the route attachment.
+  name: admissionlab-nginx-gateway-cross-route
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  # Namespace B: the backend's namespace, and the only namespace whose
+  # owner can legitimately grant access to what is in it -- which is why
+  # the `ReferenceGrant` below lives here and not in namespace A.
+  name: admissionlab-nginx-gateway-cross-backend
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+# --- Copy of fixtures/gateway/backends/echo-b.yaml's Service, with
+# --- metadata.namespace added (namespace B).
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: admissionlab-nginx-gateway-cross-backend
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-b.yaml's Deployment, with
+# --- metadata.namespace added (namespace B).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  namespace: admissionlab-nginx-gateway-cross-backend
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-b
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-nginx-gateway-cross-route
+spec:
+  gatewayClassName: nginx
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+# The grant that makes this fixture's whole point legal. It lives in the
+# BACKEND's namespace because Gateway API's rule is that the owner of the
+# referenced object -- never the referrer -- decides who may reference
+# it.
+#
+# `gateway.networking.k8s.io/v1beta1` rather than `v1`: on the pinned
+# Gateway API bundle (v1.5.1 standard channel, vendored under
+# `recipes/nginx-gateway-fabric/gateway-api/`) the `referencegrants` CRD
+# serves both, and v1beta1 is the STORAGE version -- every other Gateway
+# API kind this fixture uses is the other way round. Writing the storage
+# version means this object is persisted exactly as written, with no
+# conversion step between what this file says and what the API server
+# stores.
+#
+# `to[].name` is deliberately present: a grant that omitted it would
+# permit references to EVERY Service in this namespace, which is a
+# broader statement than this fixture needs to make and a worse example
+# to copy.
+apiVersion: gateway.networking.k8s.io/v1beta1
+kind: ReferenceGrant
+metadata:
+  name: allow-cross-route-to-echo-b
+  namespace: admissionlab-nginx-gateway-cross-backend
+spec:
+  from:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      namespace: admissionlab-nginx-gateway-cross-route
+  to:
+    - group: ""
+      kind: Service
+      name: echo-b
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: admissionlab-nginx-gateway-cross-route
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - cross.nginx.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # The explicit `namespace` is what makes this a cross-namespace
+        # reference at all, and what the `ReferenceGrant` above must
+        # permit. Remove the grant and Gateway API requires
+        # `ResolvedRefs=False` with reason `RefNotPermitted` here.
+        - name: echo-b
+          namespace: admissionlab-nginx-gateway-cross-backend
+          port: 80

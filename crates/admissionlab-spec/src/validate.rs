@@ -217,10 +217,11 @@ pub(crate) fn require_helm_chart(
 /// Requires a Helm install's repository URL to be set, returning it
 /// trimmed.
 ///
-/// Local path and `oci://` chart references remain syntactically valid in
-/// [`crate::model::HelmInstallSpec::chart`], but resolution has no way to
-/// act on them without a registered repository, so `repo` is required
-/// for every Helm install today.
+/// Required for every Helm install, `oci://` chart references included:
+/// see [`crate::model::HelmInstallSpec::repo`] for what the field means
+/// on each of the two install paths and why it is not made optional for
+/// the one that never `helm repo add`s it. A local-path `chart` has no
+/// repository URL to give and so remains unresolvable.
 pub(crate) fn require_helm_repo_url(
     locator: &str,
     repo: Option<&str>,
@@ -231,7 +232,8 @@ pub(crate) fn require_helm_repo_url(
         _ => Err(SpecError::validation(
             path,
             format_args!("{locator}.install.repo"),
-            "must be set (local path and oci:// chart references are not yet supported)",
+            "must be set (for an oci:// chart it is the registry path the chart is rooted at; \
+             local-path chart references are not supported)",
         )),
     }
 }

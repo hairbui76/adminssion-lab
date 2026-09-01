@@ -1,0 +1,128 @@
+# Gateway API CustomResourceDefinitions for the NGINX Gateway Fabric
+# stack, vendored (ROADMAP Task 8.1 Step 1). See README.md in this same
+# directory for the full provenance, the "why a second copy" argument
+# this file only summarizes, and the coexistence caveat for a cluster
+# that somehow ran both Gateway recipes.
+#
+# This is one of TWO recipe documents in this directory, and the first
+# half of one stack: `gateway-api-crds-nginx` installs the API,
+# `recipe.yaml`'s `nginx-gateway-fabric` installs the implementation of
+# it. Two components rather than one recipe for the reason
+# `recipes/istio-gateway/gateway-api-crds.yaml` already sets out at
+# length: the recipe schema has exactly one `install:` block per recipe
+# and no shape for "install more than one thing", and
+# `admissionlab_installer::install_stack` installs an ordered component
+# list sequentially, fully waiting out each component's readiness before
+# the next one's install begins. Ordering these two is therefore all
+# that "install the CRDs, then NGINX Gateway Fabric" requires -- and NGF
+# genuinely requires it: its own documentation states that "the Gateway
+# API resources from the standard channel must be installed before
+# deploying NGINX Gateway Fabric".
+#
+# # This file is a SECOND COPY of a bundle already in this repository
+#
+# `recipes/istio-gateway/gateway-api/standard-install-v1.5.1.yaml` holds
+# the same 1,024,333 bytes. That is deliberate duplication, and it is
+# duplication a machine checks rather than duplication a reviewer is
+# asked to remember:
+# `crates/admissionlab-recipes/tests/nginx_gateway_recipe.rs`'s
+# `the_vendored_gateway_api_bundle_is_byte_identical_to_the_istio_gateway_copy`
+# reads both files and fails if a single byte differs, and both are
+# additionally checked against the upstream release digest below. Two
+# copies that a plain `cargo test` proves identical are a different thing
+# from two copies someone is trusted to keep in step.
+#
+# The duplication is not a preference. `install.paths` is resolved
+# against the recipe's OWN directory and confined to it
+# (`admissionlab_recipes::model::resolve_manifest_path` ->
+# `join_confined`): a relative path that steps above the recipe directory
+# -- `../istio-gateway/gateway-api/standard-install-v1.5.1.yaml` -- is a
+# validation error by design, because PRODUCT.md §29.1 treats everything
+# a recipe causes to be installed as an untrusted test workload. An
+# absolute path would resolve, but only on the machine it was written on.
+# So a recipe that installs a vendored artifact must vendor it inside
+# itself; sharing one copy between two recipes is not something this
+# schema can express, and widening the confinement rule to allow it would
+# trade a real security property for a megabyte of disk.
+#
+# # Why v1.5.1 -- the same answer as `recipes/istio-gateway/`, reached
+# # independently
+#
+# Not "the newest", and not "whatever the other recipe already had":
+# v1.5.1 is the bundle the pinned NGF release actually builds against.
+# `nginx/nginx-gateway-fabric` at tag `v2.6.7` declares
+# `sigs.k8s.io/gateway-api v1.5.1` in its own `go.mod` (fetched from
+# raw.githubusercontent.com while writing this recipe), and NGF's own
+# technical-specifications page states "Gateway API: 1.5.1" for 2.6.7.
+# That is the same version `istio/istio` 1.30.4 builds against, which is
+# what makes the two bundles byte-identical rather than merely similar --
+# a coincidence of two upstreams tracking the same API release, not a
+# constraint either project imposes. If a future NGF release moves to a
+# different Gateway API version, this file's `install.paths` and
+# `version` move with it and the byte-equality test above starts failing,
+# which is exactly the moment a human should be looking.
+#
+# Standard channel, not experimental, for the reason
+# `recipes/istio-gateway/` gives: everything these fixtures use
+# (`GatewayClass`, `Gateway`, `HTTPRoute`, `ReferenceGrant`) is standard,
+# and the experimental channel adds alpha APIs whose schema can change
+# between patch releases.
+#
+# # Upstream provenance
+#
+#   url:    https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.5.1/standard-install.yaml
+#   sha256: 751002b3b91a87f7ae3bd2517c79a47a8d7ed6702901808a1cf9bd97d284f9b8
+#   size:   1024333 bytes
+name: gateway-api-crds-nginx
+# The Gateway API bundle version -- deliberately NOT NGF's 2.6.7. These
+# are independent upstream projects that happen to be paired here.
+version: "1.5.1"
+install:
+  type: manifests
+  paths:
+    # Relative to this recipe file's own directory. A subdirectory, not
+    # this directory, on purpose: `load_recipe_overrides` treats every
+    # `*.yaml` file *directly* in a recipe directory as a recipe
+    # document, and a 1 MB CRD bundle sitting beside `recipe.yaml` would
+    # be parsed as one and fail. A subdirectory is skipped by that loader
+    # entirely.
+    - gateway-api/standard-install-v1.5.1.yaml
+readiness:
+  # `Established` is the condition that means the API server is actually
+  # serving this resource -- not merely that the CRD object was accepted.
+  #
+  # Four checks, one per kind this recipe's own fixtures
+  # (`fixtures/gateway/nginx/`) create, rather than one per kind in the
+  # bundle. Gating on a kind this project never creates would turn an
+  # unrelated upstream change into a false install failure.
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    # Cluster-scoped: no `namespace`.
+    name: gatewayclasses.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: gateways.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: httproutes.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+  - type: customResourceCondition
+    apiVersion: apiextensions.k8s.io/v1
+    kind: CustomResourceDefinition
+    name: referencegrants.gateway.networking.k8s.io
+    conditionType: Established
+    status: "True"
+# No `capabilities:`. This component installs an API, not an
+# implementation of it: with these CRDs and nothing else on the cluster,
+# a `Gateway` can be created and will sit forever with no status at all,
+# because no controller is watching. The `gatewayApi` capability belongs
+# to `recipe.yaml`'s `nginx-gateway-fabric`.
+capabilities: []

@@ -352,7 +352,7 @@
           "type": "object",
           "properties": {
             "chart": {
-              "description": "The chart reference passed to `helm install` (a repo-relative\nchart name, a local path, or an `oci://` reference). Only the\nrepo-relative form is resolvable today — see `repo`.",
+              "description": "The chart reference passed to `helm install` (a repo-relative\nchart name, a local path, or an `oci://` reference). The\nrepo-relative and `oci://` forms are both installable; a local\npath is not — see `repo`.",
               "type": "string"
             },
             "namespace": {
@@ -372,7 +372,7 @@
               "default": null
             },
             "repo": {
-              "description": "The Helm repository URL to add/use, if `chart` is a bare chart\nname rather than a path or `oci://` reference. Required by\n[`crate::resolve_lab`]: local path and `oci://` chart references\nremain syntactically valid in `chart` above, but resolution has no\nway to act on them without a registered repository, so `repo`\nmust be set for every Helm install today.",
+              "description": "The Helm repository URL backing `chart`. Required by\n[`crate::resolve_lab`] for **every** Helm install, including an\n`oci://` one.\n\nFor a bare `<repo>/<chart>` reference this is the classic HTTP\nchart repository `admissionlab_installer::helm` registers with\n`helm repo add` before installing. For an `oci://` reference\nnothing is registered — the reference locates itself — and this\nfield instead records the registry path that reference is rooted\nat, which is provenance a reader and a run report both want.\nRequiring it in both cases keeps this a field that always means\n\"where this chart comes from\" rather than one whose emptiness\nsilently encodes which install path was taken.\n\nA local-path `chart` remains unresolvable: there is no repository\nURL that would describe one, and nothing in this project installs\na chart from the local filesystem.",
               "type": [
                 "string",
                 "null"

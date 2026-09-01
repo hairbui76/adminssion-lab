@@ -281,6 +281,74 @@ recipes:
           tier: perCommit
         - version: "1.37.0"
           tier: weeklyRelease
+  # Task 8.1 -- the second Gateway API implementation. Like the
+  # `istio-gateway` entry above, `recipes/nginx-gateway-fabric/` is a
+  # TWO-component stack (the vendored Gateway API v1.5.1 CRD bundle,
+  # `gateway-api-crds.yaml`, followed by the NGINX Gateway Fabric Helm
+  # chart, `recipe.yaml`) and this single entry certifies the pair. There
+  # is deliberately no separate `gateway-api-crds-nginx` entry, for the
+  # same reason there is none for Istio's CRD component: it installs
+  # CustomResourceDefinitions and nothing else, is never installed alone,
+  # and has no behavior of its own to certify against a Kubernetes
+  # version independently of the implementation that serves the API it
+  # adds. `crates/admissionlab-recipes/tests/nginx_gateway_recipe.rs`
+  # reads the `certified` list below at test time and installs BOTH
+  # components once per listed version, in that version's own disposable
+  # cluster.
+  #
+  # `version` is the Helm chart pin, 2.6.7 -- the same value
+  # `recipes/nginx-gateway-fabric/recipe.yaml` carries, which that test
+  # cross-checks. The Gateway API bundle version this recipe additionally
+  # pins (v1.5.1, the same release `istio-gateway` pins, because NGF
+  # 2.6.7 and Istio 1.30.4 happen to build against the same one) is
+  # carried by `gateway-api-crds.yaml`'s own `version` field, not here.
+  - name: nginx-gateway-fabric
+    version: "2.6.7"
+    kubernetes:
+      # NGF's own technical-specifications page states, for 2.6.7:
+      # "Gateway API: 1.5.1 / Kubernetes: 1.31+ / NGINX OSS: 1.31.3"
+      # (fetched 2026-09-01). That is a real vendor statement, unlike the
+      # `istio` entries' absence of one -- and it is still recorded as
+      # `null` here rather than as a range, on purpose.
+      #
+      # `documentedRange` requires BOTH a `min` and a `max` (see
+      # `DocumentedKubernetesRange`), and "1.31+" states no maximum at
+      # all. Writing one would mean inventing an upper bound NGINX never
+      # published, which is exactly the fabrication Global Constraint 15
+      # forbids and exactly what this file's own header rules out when it
+      # says "an absent or unbounded constraint means 'unknown,' never
+      # 'supported'" -- the same reasoning it already applies to a Helm
+      # `kubeVersion: '>=1.25.0-0'`. The vendor's floor of 1.31 is far
+      # below every version in Admission Lab's matrix, so recording it
+      # would narrow nothing even if the shape allowed it; it is kept
+      # here as provenance instead.
+      documentedRange: null
+      # Every version listed here has actually been installed and
+      # traffic-tested end to end by `tests/nginx_gateway_recipe.rs`
+      # (Gateway + HTTPRoute reconciled to
+      # Accepted/ResolvedRefs/Programmed, all current for the object's
+      # own generation, then a real HTTP 200 from the expected echo
+      # backend) across all THREE of that test's fixtures: same
+      # namespace, cross namespace with a `ReferenceGrant`, and the
+      # NGF-specific `NginxProxy` data-plane override.
+      #
+      # The tiers mirror the `istio-gateway` entry above, and for the
+      # same reasons: 1.36.4 is Admission Lab's Tier-1 primary and the
+      # per-commit job installs the stack there; the other two minors are
+      # Tier 3 ("expanded supported combinations"), which is where the
+      # roadmap puts expanded Gateway combinations, because each row
+      # builds the echo image, applies a 1 MB CRD bundle, pulls both NGF
+      # images from a network registry and then drives three full
+      # apply/reconcile/probe cycles. Nightly Tier 2 already covers all
+      # three supported minors through the `istio` and `kyverno` entries,
+      # so scheduling these weekly costs no minor its coverage.
+      certified:
+        - version: "1.35.8"
+          tier: weeklyRelease
+        - version: "1.36.4"
+          tier: perCommit
+        - version: "1.37.0"
+          tier: weeklyRelease
   # Task 8.2. THE UPSTREAM PROJECT IS RETIRED AND ITS REPOSITORY IS
   # ARCHIVED -- `recipes/ingress-nginx-legacy/README.md` carries the
   # dates, the upstream's own wording, and Admission Lab's stance. This

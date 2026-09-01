@@ -1,0 +1,259 @@
+# NGINX Gateway Fabric fixture (a): a `Gateway`, an `HTTPRoute`, and the
+# backend the route resolves to, all in ONE namespace (ROADMAP Task 8.1
+# Step 3). Its counterweight is `cross-namespace.yaml`, which moves the
+# backend into a second namespace and adds the `ReferenceGrant` that
+# makes the reference legal; a diff of the two files is exactly the
+# cross-namespace machinery and nothing else.
+#
+# # This is the Istio fixture with one word changed
+#
+# Task 8.1 Step 3 asks for "the same core HTTPRoute/ReferenceGrant
+# contracts used for Istio wherever portable", and the honest measure of
+# how portable that turned out to be is a diff against
+# `fixtures/gateway/istio/same-namespace.yaml`. Ignoring comments and the
+# namespace's own name, it is:
+#
+#   1. `gatewayClassName: istio` -> `nginx`;
+#   2. the Istio `ConfigMap` and the `Gateway.spec.infrastructure
+#      .parametersRef` pointing at it are GONE.
+#
+# Nothing else. Same listener, same route, same match, same backend, same
+# probe target. (2) is a finding, not a simplification, and it is the
+# subject of the next section.
+#
+# # THE FINDING: NGF programs a Gateway on `kind` with no override at all
+#
+# `fixtures/gateway/istio/same-namespace.yaml` carries a `ConfigMap`
+# whose whole purpose is to force Istio's provisioned data-plane
+# `Service` to `type: ClusterIP`, because on a bare `kind` cluster a
+# `LoadBalancer` Service never gets an address and Istio therefore
+# reports -- correctly, and permanently -- `Programmed=False
+# (AddressNotAssigned)`.
+#
+# NGF provisions its data-plane `Service` as `type: LoadBalancer` too,
+# and on `kind` that Service's external address stays `<pending>` exactly
+# the same way. Measured on a real Kubernetes 1.36.4 cluster with this
+# fixture applied as written:
+#
+#     service/lab-gateway-nginx   LoadBalancer   10.96.74.62   <pending>   80:30793/TCP
+#
+#     Gateway/lab-gateway
+#       Accepted=True   (Accepted:   "The Gateway is accepted")
+#       Programmed=True (Programmed: "The Gateway is programmed")
+#
+#     Gateway.status.addresses: (empty)
+#
+# NGF's `Programmed` is a statement about the data plane it provisioned
+# and started, not about an external address having been assigned to it.
+# So the environment problem that forced an Istio-specific object into
+# the Istio fixture simply does not arise here, and adding an equivalent
+# NGF-specific object "for symmetry" would be adding vendor configuration
+# this fixture has no need of -- which is the thing Global Constraint 6
+# and PRODUCT.md §14 are both about.
+#
+# The port-forward the probe runs through is unaffected either way: it
+# targets the Service's own port 80 on its ClusterIP, which a
+# `LoadBalancer` Service has just as much as a `ClusterIP` one does.
+#
+# `nginx-infrastructure-override.yaml`, in this same directory, is where
+# the NGF mechanism for changing that Service *is* exercised -- as an
+# explicitly NGF-specific fixture, labeled as non-portable, rather than
+# as machinery smuggled into this portable one.
+#
+# # Self-contained, including a copy of the echo backend
+#
+# `fixtures/gateway/backends/echo-a.yaml` is the source of truth for what
+# an echo backend *is*, and it deliberately declares no namespace at all.
+# `admissionlab_gateway::apply::apply_gateway_manifests` applies each
+# document to the namespace the document itself names, so a namespaced
+# object naming none would land in `default` -- in a fixture whose whole
+# point is which namespace each object is in.
+#
+# So the `Service`/`Deployment` below are a copy of that file's two
+# objects with `metadata.namespace` added and NOTHING else changed, and
+# `crates/admissionlab-recipes/tests/nginx_gateway_recipe.rs`'s
+# `fixture_backends_match_the_shared_echo_backend_definition` parses both
+# and fails if they have drifted apart in any other field. See
+# `fixtures/gateway/istio/same-namespace.yaml`'s own header for the full
+# argument behind copying rather than including; this pack inherits it
+# unchanged.
+#
+# Documents are applied in a fixed category order (`Namespace` ->
+# `ConfigMap` -> `Service` -> `Deployment` -> `Gateway` ->
+# `ReferenceGrant` -> `HTTPRoute`, then unknown kinds), so the order they
+# appear in this file is for a human reader only.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-nginx-gateway-same
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Service, with
+# --- metadata.namespace added. See this file's header ("Self-contained").
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: admissionlab-nginx-gateway-same
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Deployment, with
+# --- metadata.namespace added. See this file's header ("Self-contained").
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: admissionlab-nginx-gateway-same
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-a
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The Gateway. `gatewayClassName: nginx` is the class the NGF Helm chart
+# creates for itself (controller
+# `gateway.nginx.org/nginx-gateway-controller`), and is what the
+# controller is started with (`--gatewayclass=nginx`); it is the one name
+# in this file that is NGF-specific, and it is the only difference
+# between this Gateway and the Istio pack's.
+#
+# The provisioned data-plane `Service` is named `<gateway>-nginx` --
+# `lab-gateway-nginx` here -- and carries
+# `gateway.networking.k8s.io/gateway-name: lab-gateway`, which is exactly
+# the label `recipes/nginx-gateway-fabric/recipe.yaml`'s
+# `gatewayEndpoint` strategy selects on. Neither this fixture nor that
+# recipe hardcodes the derived name.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-nginx-gateway-same
+spec:
+  gatewayClassName: nginx
+  listeners:
+    # `name: http` is what a route's `parentRefs[].sectionName` and a
+    # `RouteContract`'s own `listenerName` both refer to. A single
+    # listener would make `sectionName` optional; it is written anyway so
+    # that adding a second listener later cannot silently make an
+    # existing contract ambiguous.
+    #
+    # ONE listener is also what lets
+    # `recipes/nginx-gateway-fabric/recipe.yaml` resolve the data-plane
+    # port without naming one: NGF exposes exactly the listener ports, so
+    # a single listener means a single-port Service. See that recipe's
+    # `gatewayEndpoint` comment.
+    - name: http
+      protocol: HTTP
+      port: 80
+      # No `hostname` on the listener: the listener accepts any
+      # authority, and the ROUTE below is what narrows it.
+      allowedRoutes:
+        namespaces:
+          # `Same` -- this fixture's entire point is that nothing crosses
+          # a namespace boundary. `cross-namespace.yaml` keeps this
+          # exactly as it is; it is the *backend* reference that crosses.
+          from: Same
+---
+# The route under contract. Its `Accepted`/`ResolvedRefs` parent
+# conditions and the Gateway's own `Accepted`/`Programmed` are what
+# `admissionlab_gateway::reconcile::wait_for_route_reconciliation`
+# observes; the probe that follows asserts a real 200 from `echo-a`.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: admissionlab-nginx-gateway-same
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    # `.test` is reserved by RFC 6761 for exactly this: a name guaranteed
+    # never to resolve in the real DNS. The probe sends it as a `Host`
+    # header over a port-forward to 127.0.0.1, so it is never resolved by
+    # anything.
+    #
+    # `nginx.` rather than the Istio pack's bare `same.`: the two packs
+    # are never applied to one cluster today, but a hostname that names
+    # its own implementation means a probe result can never be
+    # misattributed if they ever are.
+    - same.nginx.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        # No `namespace` -- the backend is in this route's own namespace,
+        # which needs no `ReferenceGrant`. That absence is the single
+        # difference this fixture is designed to demonstrate against
+        # `cross-namespace.yaml`.
+        - name: echo-a
+          port: 80

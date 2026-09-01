@@ -95,6 +95,11 @@ TESTS = {
     "kyverno": ("admissionlab-recipes", "kyverno_recipe"),
     "istio": ("admissionlab-recipes", "istio_recipe"),
     "istio-gateway": ("admissionlab-recipes", "istio_gateway_recipe"),
+    # Task 8.1. The second Gateway API implementation. Certified on the
+    # primary Kubernetes minor at Tier 1 and on the other two at Tier 3,
+    # exactly like `istio-gateway` above -- so `--tier perCommit` selects
+    # one row here and `--tier weeklyRelease` selects all three.
+    "nginx-gateway-fabric": ("admissionlab-recipes", "nginx_gateway_recipe"),
     # Task 8.2. A retired upstream, certified at Tier 3 only -- so this
     # row is selected by `--tier weeklyRelease` and by nothing more
     # frequent.

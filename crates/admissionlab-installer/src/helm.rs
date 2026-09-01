@@ -11,7 +11,9 @@
 //!    or refreshes the chart repository. `--force-update` means a
 //!    repository already registered under this name (for example, by an
 //!    earlier run reusing the same local Helm client config) is
-//!    refreshed rather than rejected as already existing.
+//!    refreshed rather than rejected as already existing. **Skipped
+//!    entirely for an OCI chart reference** — see "OCI chart references"
+//!    below.
 //! 2. `helm upgrade --install <release> <chart> --version <version>
 //!    --namespace <namespace> --create-namespace --kubeconfig
 //!    <kubeconfig> --timeout <duration> [--values <path>]...
@@ -43,6 +45,49 @@
 //! with [`InstallError::UnsupportedMethod`] — none of the three `helm`
 //! invocations above ever run for it.
 //!
+//! # OCI chart references (ROADMAP Task 8.1)
+//!
+//! A chart reference beginning with `oci://` is **self-locating**: the
+//! reference itself names the registry, the repository path and the
+//! chart, so `helm upgrade --install <release> oci://host/path/chart
+//! --version <v>` resolves without any repository having been registered
+//! first. Step 1 above is therefore skipped for such a chart, and
+//! [`is_oci_chart`] is the single predicate that decides it.
+//!
+//! Skipping is not an optimization — it is the only thing that works.
+//! `helm repo add` speaks the classic HTTP chart-repository protocol
+//! (fetch and parse `index.yaml`) and an OCI registry serves no such
+//! document. Measured directly against `helm` v3.20.0 while writing this:
+//!
+//! ```text
+//! $ helm repo add ngf oci://ghcr.io/nginx/charts/nginx-gateway-fabric --force-update
+//! Error: looks like "oci://ghcr.io/nginx/charts/nginx-gateway-fabric" is not a valid
+//! chart repository or cannot be reached: failed to perform "FetchReference" on source:
+//! invalid reference
+//! ```
+//!
+//! The same `helm` then installed that exact chart successfully with no
+//! repository registered at all, which is the behavior this module now
+//! mirrors.
+//!
+//! What made this necessary rather than hypothetical: NGINX Gateway
+//! Fabric (`recipes/nginx-gateway-fabric/`, Task 8.1) publishes its chart
+//! **only** to `oci://ghcr.io/nginx/charts/nginx-gateway-fabric` — its
+//! own documentation gives no `helm repo add` command, and F5's classic
+//! repository at `https://helm.nginx.com/stable` does not carry the chart
+//! (checked against that repository's own `index.yaml`, which lists
+//! `nginx-ingress`, `nginx-service-mesh` and others, but no
+//! `nginx-gateway-fabric`). The alternative install path, raw manifests,
+//! is closed to that project for an unrelated reason recorded in
+//! `recipes/nginx-gateway-fabric/README.md`.
+//!
+//! **The predicate is the chart, never an empty `repo_url`.**
+//! [`HelmInstallSpec::repo_url`] stays a required, non-empty field for an
+//! OCI install too, where it carries the registry path the chart
+//! reference is rooted at — real provenance a reader and a report both
+//! want, and one this module deliberately does not turn into a sentinel
+//! value by leaving it blank.
+//!
 //! # Helm state isolation
 //!
 //! `helm repo add` and `helm upgrade --install` (which, for a
@@ -65,14 +110,12 @@
 //! principle applied here.
 //!
 //! The fix, verified empirically against a real `helm` v3.15.2 binary
-//! before being written here: setting exactly two environment
-//! variables, `HELM_REPOSITORY_CONFIG` and `HELM_REPOSITORY_CACHE`
-//! (from `helm env`'s full variable list — the others are either
-//! Kubernetes-connection overrides this module already bypasses by
-//! always passing `--kubeconfig`/`--namespace`/`--version` explicitly,
-//! or (`HELM_REGISTRY_CONFIG`) OCI registry auth this module never
-//! exercises, since every [`HelmInstallSpec::chart`] reference here is a
-//! plain `repo/chart` shorthand, not `oci://`), to paths inside this
+//! before being written here: setting three environment variables,
+//! `HELM_REPOSITORY_CONFIG`, `HELM_REPOSITORY_CACHE` and
+//! `HELM_REGISTRY_CONFIG` (from `helm env`'s full variable list — the
+//! others are Kubernetes-connection overrides this module already
+//! bypasses by always passing `--kubeconfig`/`--namespace`/`--version`
+//! explicitly), to paths inside this
 //! run's own workspace gives complete isolation: a real `helm repo add`
 //! run this way left the operator's actual
 //! `~/.config/helm/repositories.yaml` and `~/.cache/helm/repository`
@@ -85,6 +128,16 @@
 //! *entire* directory chain for both variables itself when neither
 //! exists yet, so [`HelmInstaller`] never needs to `mkdir` this
 //! directory before invoking `helm`.
+//!
+//! `HELM_REGISTRY_CONFIG` was added to that set by Task 8.1 and is the
+//! same guarantee extended to the path this module had previously never
+//! taken: an OCI `helm upgrade --install` resolves its chart through
+//! Helm's *registry* client, whose credential store is
+//! `~/.config/helm/registry/config.json` — a different file from the two
+//! above, and one the sentence directly above this used to be able to
+//! claim was never touched precisely *because* no OCI reference ever
+//! reached this module. Now that one does, the claim is kept by
+//! redirecting the variable rather than by the absence of the feature.
 //!
 //! **Per-side, not per-run.** [`helm_state_dir`] namespaces this
 //! directory by [`admissionlab_core::Side`] —
@@ -409,11 +462,16 @@ impl ComponentInstaller for HelmInstaller {
         let start = Instant::now();
         let side = cluster.spec.side;
 
-        self.run_and_check(
-            &component.name,
-            self.helm_command(side, repo_add_args(helm), REPO_ADD_TIMEOUT),
-        )
-        .await?;
+        // An OCI chart reference names its own registry, so there is no
+        // repository to register -- and `helm repo add` cannot parse one
+        // at all. See the module documentation's "OCI chart references".
+        if !is_oci_chart(&helm.chart) {
+            self.run_and_check(
+                &component.name,
+                self.helm_command(side, repo_add_args(helm), REPO_ADD_TIMEOUT),
+            )
+            .await?;
+        }
         self.run_and_check(
             &component.name,
             self.helm_command(
@@ -439,10 +497,30 @@ impl ComponentInstaller for HelmInstaller {
     }
 }
 
+/// The scheme that marks a [`HelmInstallSpec::chart`] as an OCI
+/// registry reference rather than a classic `<repo>/<chart>` shorthand.
+///
+/// Helm's own spelling, lowercase and with the `//`, exactly as its
+/// documentation and its `helm pull`/`helm install` argument parser
+/// write it.
+const OCI_CHART_PREFIX: &str = "oci://";
+
+/// Whether `chart` is an OCI registry reference, and therefore needs no
+/// `helm repo add` step (module documentation, "OCI chart references").
+///
+/// A prefix test on the chart reference and nothing else: this is the
+/// same thing `helm` itself decides from, and deriving it from the chart
+/// means no second field can disagree with it.
+fn is_oci_chart(chart: &str) -> bool {
+    chart.starts_with(OCI_CHART_PREFIX)
+}
+
 /// Builds the argv (excluding the program name) for `helm repo add
 /// <repo_name> <repo_url> --force-update`. Pure argv construction only
 /// -- [`HelmInstaller::helm_command`] is what turns this into a runnable
 /// [`CommandSpec`], carrying the isolation environment and timeout.
+///
+/// Never called for an OCI chart reference; see [`is_oci_chart`].
 fn repo_add_args(helm: &HelmInstallSpec) -> Vec<OsString> {
     vec![
         "repo".into(),
@@ -518,10 +596,18 @@ fn helm_state_dir(logs_dir: &Path, side: Side) -> PathBuf {
     logs_dir.join(format!("{}-helm", side.as_str()))
 }
 
-/// Builds the `HELM_REPOSITORY_CONFIG`/`HELM_REPOSITORY_CACHE`
-/// environment that isolates every `helm` invocation in this module from
-/// the real, ambient `~/.config/helm` and `~/.cache/helm` (see the
-/// module documentation's "Helm state isolation" section).
+/// Builds the `HELM_REPOSITORY_CONFIG`/`HELM_REPOSITORY_CACHE`/
+/// `HELM_REGISTRY_CONFIG` environment that isolates every `helm`
+/// invocation in this module from the real, ambient `~/.config/helm` and
+/// `~/.cache/helm` (see the module documentation's "Helm state
+/// isolation" section).
+///
+/// All three are set unconditionally, for every invocation, rather than
+/// `HELM_REGISTRY_CONFIG` only when the chart happens to be an OCI
+/// reference: an isolation guarantee that depends on a per-install
+/// condition is one somebody has to re-derive at every call site, and
+/// pointing an unused variable at a file `helm` then never creates costs
+/// nothing.
 fn helm_isolation_env(state_dir: &Path) -> BTreeMap<OsString, OsString> {
     let mut env = BTreeMap::new();
     env.insert(
@@ -531,6 +617,10 @@ fn helm_isolation_env(state_dir: &Path) -> BTreeMap<OsString, OsString> {
     env.insert(
         OsString::from("HELM_REPOSITORY_CACHE"),
         state_dir.join("repository").into_os_string(),
+    );
+    env.insert(
+        OsString::from("HELM_REGISTRY_CONFIG"),
+        state_dir.join("registry-config.json").into_os_string(),
     );
     env
 }

@@ -347,15 +347,27 @@ pub enum InstallMethodSpec {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct HelmInstallSpec {
     /// The chart reference passed to `helm install` (a repo-relative
-    /// chart name, a local path, or an `oci://` reference). Only the
-    /// repo-relative form is resolvable today — see `repo`.
+    /// chart name, a local path, or an `oci://` reference). The
+    /// repo-relative and `oci://` forms are both installable; a local
+    /// path is not — see `repo`.
     pub chart: String,
-    /// The Helm repository URL to add/use, if `chart` is a bare chart
-    /// name rather than a path or `oci://` reference. Required by
-    /// [`crate::resolve_lab`]: local path and `oci://` chart references
-    /// remain syntactically valid in `chart` above, but resolution has no
-    /// way to act on them without a registered repository, so `repo`
-    /// must be set for every Helm install today.
+    /// The Helm repository URL backing `chart`. Required by
+    /// [`crate::resolve_lab`] for **every** Helm install, including an
+    /// `oci://` one.
+    ///
+    /// For a bare `<repo>/<chart>` reference this is the classic HTTP
+    /// chart repository `admissionlab_installer::helm` registers with
+    /// `helm repo add` before installing. For an `oci://` reference
+    /// nothing is registered — the reference locates itself — and this
+    /// field instead records the registry path that reference is rooted
+    /// at, which is provenance a reader and a run report both want.
+    /// Requiring it in both cases keeps this a field that always means
+    /// "where this chart comes from" rather than one whose emptiness
+    /// silently encodes which install path was taken.
+    ///
+    /// A local-path `chart` remains unresolvable: there is no repository
+    /// URL that would describe one, and nothing in this project installs
+    /// a chart from the local filesystem.
     #[serde(default)]
     pub repo: Option<String>,
     /// The local name to register `repo` under (`helm repo add

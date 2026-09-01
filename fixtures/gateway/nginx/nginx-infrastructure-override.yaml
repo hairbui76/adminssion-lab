@@ -1,0 +1,259 @@
+# NGINX-GATEWAY-FABRIC-SPECIFIC FIXTURE -- NOT PORTABLE (ROADMAP Task
+# 8.1 Step 4, "keep implementation-specific fixture pack separate and
+# labeled").
+#
+# `same-namespace.yaml` and `cross-namespace.yaml` in this directory are
+# the portable pack: apart from `gatewayClassName`, every object in them
+# is Gateway API and could be handed to any conformant implementation.
+# This file is the opposite, on purpose, and it is in its own file
+# precisely so that the portable ones stay portable.
+#
+# What makes it non-portable is one object: an `NginxProxy`
+# (`gateway.nginx.org/v1alpha2`), referenced from the `Gateway`'s
+# standard `spec.infrastructure.parametersRef`. The *reference* is
+# Gateway API's own extension point and is portable in shape; the
+# `group`, the `kind` and the entire body of the thing referenced are
+# NGF's, and no other implementation can serve any of it. An Istio
+# cluster handed this file would create a `Gateway` naming a CRD that
+# does not exist.
+#
+# # What it proves, and why it is worth a third cluster scenario
+#
+# Two things the portable pack cannot:
+#
+#   1. **NGF's per-Gateway data-plane provisioning is real and takes
+#      effect.** The `NginxProxy` below asks for `type: ClusterIP`, and
+#      the Service NGF provisions for this Gateway is `ClusterIP` --
+#      where the portable fixtures' is `LoadBalancer`. Measured on a real
+#      Kubernetes 1.36.4 cluster: the same `Gateway`, with and without
+#      this reference, produced `LoadBalancer` and `ClusterIP`
+#      respectively.
+#
+#      That is the NGF analogue of the `ConfigMap` in
+#      `fixtures/gateway/istio/same-namespace.yaml`, and the difference
+#      between the two packs is that Istio *needs* its override to reach
+#      `Programmed=True` on `kind` at all, while NGF does not -- see
+#      `same-namespace.yaml`'s "THE FINDING" for that measurement. So
+#      here the override is the subject of a fixture rather than
+#      scaffolding inside one.
+#
+#   2. **A parameters reference survives being applied after its
+#      Gateway.** `admissionlab_gateway::apply` sorts documents into a
+#      fixed category order and applies every UNKNOWN kind last -- and
+#      `NginxProxy` is, correctly, unknown to it. So this fixture always
+#      creates the `Gateway` BEFORE the `NginxProxy` it points at, which
+#      is the worst ordering available and therefore the one worth
+#      measuring. What a live cluster does with it:
+#
+#        # immediately after the Gateway is created, NginxProxy absent:
+#        Accepted=True     (InvalidParameters: "The Gateway is accepted,
+#                           but ParametersRef is ignored due to an error:
+#                           Spec.infrastructure.parametersRef.name:
+#                           Not found: \"gateway-infrastructure\"")
+#        Programmed=True   (Programmed)
+#        ResolvedRefs=False (ParametersRefInvalid)
+#        service/lab-gateway-nginx  LoadBalancer  <pending>
+#
+#        # ~1s after the NginxProxy is created:
+#        Accepted=True     (Accepted)
+#        Programmed=True   (Programmed)
+#        ResolvedRefs=True (ResolvedRefs)
+#        service/lab-gateway-nginx  ClusterIP
+#
+#      NGF watches `NginxProxy` objects and re-reconciles, converting the
+#      already-provisioned Service from `LoadBalancer` to `ClusterIP` in
+#      place. The certification test's `observe_until_reconciled` re-runs
+#      the whole convergence rule until every certified condition is
+#      True, so the transient state above is observed and then passed
+#      through rather than latched onto -- which is exactly what that
+#      loop is for.
+#
+#      Note which condition moves: `ResolvedRefs` on the GATEWAY (an
+#      NGF-reported statement about the parameters reference), not the
+#      route's. The route's own `Accepted`/`ResolvedRefs` are True
+#      throughout, because nothing about the backend reference changed.
+#
+# # The backend is `echo-a`, same as the same-namespace fixture
+#
+# Deliberately not a third identity: this fixture's subject is the data
+# plane's provisioning, not which workload traffic reaches, and reusing
+# `echo-a` keeps the only differences between this file and
+# `same-namespace.yaml` the ones the header above describes. The
+# hostnames differ, so a probe can still never confuse the two.
+#
+# The embedded copy of `fixtures/gateway/backends/echo-a.yaml` is
+# machine-checked against that file exactly as the portable pack's are --
+# see `same-namespace.yaml`'s "Self-contained" section.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-nginx-gateway-override
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+# NGF's per-Gateway data-plane configuration. Namespaced (the
+# `nginxproxies` CRD is `scope: Namespaced` at `v1alpha2`), and in the
+# GATEWAY's own namespace, which is what a
+# `Gateway.spec.infrastructure.parametersRef` -- a namespace-less
+# reference -- can name.
+#
+# `spec.kubernetes.service.type` is the ONLY field set. NGF's CRD
+# documents that a Gateway-level `NginxProxy` is MERGED with the
+# GatewayClass-level one rather than replacing it ("If both a Gateway and
+# its GatewayClass reference an NginxProxy, the settings are merged.
+# Settings specified on the Gateway NginxProxy override those set on the
+# GatewayClass NginxProxy"), so the data-plane image, tag, pull policy
+# and replica count still come from the chart's own
+# `nginx-gateway-fabric-proxy-config` in the `nginx-gateway` namespace.
+# Writing only the field this fixture is about is therefore correct and
+# not a partial specification -- and it means this file needs no copy of
+# the NGF image reference, which would silently rot at the next chart
+# bump.
+#
+# One field that is NOT overridden and is worth naming: the chart's
+# class-level `NginxProxy` sets `service.externalTrafficPolicy: Local`,
+# which Kubernetes rejects on a `ClusterIP` Service. Verified on a live
+# cluster that this combination is fine -- NGF omits the field when it
+# provisions a `ClusterIP` Service, and the resulting Service has no
+# `externalTrafficPolicy` at all.
+apiVersion: gateway.nginx.org/v1alpha2
+kind: NginxProxy
+metadata:
+  name: gateway-infrastructure
+  namespace: admissionlab-nginx-gateway-override
+spec:
+  kubernetes:
+    service:
+      type: ClusterIP
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Service, with
+# --- metadata.namespace added.
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: admissionlab-nginx-gateway-override
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# --- Copy of fixtures/gateway/backends/echo-a.yaml's Deployment, with
+# --- metadata.namespace added.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: admissionlab-nginx-gateway-override
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-a
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-nginx-gateway-override
+spec:
+  gatewayClassName: nginx
+  infrastructure:
+    parametersRef:
+      # NGF's own API group and kind -- the non-portable part. Compare
+      # `fixtures/gateway/istio/same-namespace.yaml`, whose equivalent
+      # reference names `group: ""` / `kind: ConfigMap`: the reference
+      # mechanism is Gateway API's, what it points at is each vendor's.
+      group: gateway.nginx.org
+      kind: NginxProxy
+      name: gateway-infrastructure
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: admissionlab-nginx-gateway-override
+spec:
+  parentRefs:
+    - name: lab-gateway
+      sectionName: http
+  hostnames:
+    - override.nginx.gateway.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: echo-a
+          port: 80

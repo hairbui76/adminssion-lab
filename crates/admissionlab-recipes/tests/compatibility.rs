@@ -84,14 +84,24 @@ fn checked_in_supported() -> Vec<SupportedKubernetes> {
 /// less pinned than one that happens to be embedded.
 fn checked_in_recipes() -> Vec<Recipe> {
     let mut recipes = load_builtin_recipes().expect("the built-in recipes must load");
-    // `ingress-nginx-legacy` (Task 8.2) is the second directory-loaded
-    // recipe, and unlike `istio-gateway` it *could* have been a built-in
-    // (it installs purely via Helm). It deliberately is not: the
-    // built-in set is what a binary offers without being pointed
+    // `nginx-gateway-fabric` (Task 8.1) is directory-loaded for exactly
+    // the reason `istio-gateway` is: its stack's other half installs the
+    // vendored Gateway API CRD bundle by a path relative to its own
+    // directory. See `tests/nginx_gateway_recipe.rs`'s
+    // `load_nginx_gateway_recipes`.
+    //
+    // `ingress-nginx-legacy` (Task 8.2) is directory-loaded for a
+    // different reason: unlike the other two it *could* have been a
+    // built-in (it installs purely via Helm). It deliberately is not:
+    // the built-in set is what a binary offers without being pointed
     // anywhere, and an archived upstream whose own maintainers say not
     // to deploy it does not belong there. See
     // `tests/ingress_nginx_legacy.rs`'s `load_legacy_recipe`.
-    for directory in ["recipes/istio-gateway", "recipes/ingress-nginx-legacy"] {
+    for directory in [
+        "recipes/istio-gateway",
+        "recipes/nginx-gateway-fabric",
+        "recipes/ingress-nginx-legacy",
+    ] {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join(directory)
@@ -215,6 +225,7 @@ fn the_certified_combinations_are_exactly_the_reviewed_ones() {
         match recipe {
             "kyverno" => "3.9.0",
             "istio" | "istio-gateway" => "1.30.4",
+            "nginx-gateway-fabric" => "2.6.7",
             "ingress-nginx-legacy" => "4.15.1",
             other => panic!("this test has no pinned version for recipe {other:?}"),
         }
@@ -236,6 +247,25 @@ fn the_certified_combinations_are_exactly_the_reviewed_ones() {
             combination("1.35.8", "istio-gateway", CertificationTier::WeeklyRelease),
             combination("1.36.4", "istio-gateway", CertificationTier::PerCommit),
             combination("1.37.0", "istio-gateway", CertificationTier::WeeklyRelease),
+            // Task 8.1. The second Gateway API implementation, tiered
+            // exactly like `istio-gateway` above and for the same
+            // reasons -- the primary minor per commit, the other two
+            // weekly as "expanded Gateway combinations".
+            combination(
+                "1.35.8",
+                "nginx-gateway-fabric",
+                CertificationTier::WeeklyRelease
+            ),
+            combination(
+                "1.36.4",
+                "nginx-gateway-fabric",
+                CertificationTier::PerCommit
+            ),
+            combination(
+                "1.37.0",
+                "nginx-gateway-fabric",
+                CertificationTier::WeeklyRelease
+            ),
             // Task 8.2. One row, Tier 3, on the Tier-1 primary
             // Kubernetes version only -- see that entry's own comment
             // for why a retired upstream gets exactly one weekly row.

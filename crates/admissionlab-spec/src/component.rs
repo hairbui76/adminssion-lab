@@ -121,9 +121,14 @@ pub enum InstallMethod {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelmInstallSpec {
     /// The local name `helm repo add <repo_name> <repo_url>` registers
-    /// the repository under.
+    /// the repository under. Unused for an `oci://` [`Self::chart`],
+    /// which registers no repository at all.
     pub repo_name: String,
-    /// The Helm repository URL.
+    /// The Helm repository URL — always set. For an `oci://`
+    /// [`Self::chart`] it is the registry path that reference is rooted
+    /// at and nothing runs `helm repo add` with it; see
+    /// [`crate::model::HelmInstallSpec::repo`] and
+    /// `admissionlab_installer::helm`'s "OCI chart references".
     pub repo_url: String,
     /// The chart reference passed to `helm install`.
     pub chart: String,
@@ -578,11 +583,11 @@ fn endpoint_port(raw: Option<u16>) -> Result<Option<u16>, (String, String)> {
 ///   `paths` is an unknown field for [`crate::model::HelmInstallSpec`]).
 /// - **A non-empty chart, an explicit repository, and a pinned version.**
 ///   See [`validate::require_helm_chart`], [`validate::require_helm_repo_url`],
-///   and [`validate::require_pinned_helm_version`]. Local path and
-///   `oci://` chart references remain syntactically valid in
-///   [`crate::model::HelmInstallSpec::chart`], but resolution has no way
-///   to act on them without a registered repository, so `repo` is
-///   required for every Helm install today.
+///   and [`validate::require_pinned_helm_version`]. `repo` is required
+///   for every Helm install, an `oci://` chart reference included (where
+///   it records the registry the reference is rooted at rather than a
+///   repository anything registers); a local-path `chart` remains
+///   unresolvable. See [`crate::model::HelmInstallSpec::repo`].
 /// - **A meaningful component version.** See
 ///   [`validate::require_component_version`].
 pub(crate) fn resolve_component(

@@ -44,6 +44,9 @@ jobs:
     # recipe certification test (Task 2.9), the Istio *Gateway API*
     # recipe certification test (`istio_gateway_recipe`, Task 6.10 -- a
     # different Istio feature and a different recipe from Task 2.9's),
+    # the NGINX Gateway Fabric recipe certification test
+    # (`nginx_gateway_recipe`, Task 8.1 -- the second Gateway API
+    # implementation),
     # `admissionlab-test-webhook`'s
     # `kind_smoke` (Task 2.7), the Phase 2 Exit Gate sample lab
     # (`exit_gate`, Task 2.11), the Phase 3 fixture capture pipeline
@@ -55,9 +58,9 @@ jobs:
     # cluster creation, an upstream change to the audit annotations this
     # project reconstructs webhook traces from) would go undetected
     # forever. `fail-fast: false` so one matrix entry failing does not
-    # cancel the others -- with eight independent real-cluster tests,
+    # cancel the others -- with this many independent real-cluster tests,
     # losing signal on the rest the moment the first one fails would defeat
-    # the point of running all eight.
+    # the point of running them all.
     #
     # Deliberately parallel *jobs* (via matrix), not sequential `run:`
     # steps in one job: each of these tests creates and tears down at least
@@ -155,6 +158,31 @@ jobs:
           # the per-step figures.
           - package: admissionlab-recipes
             test: istio_gateway_recipe
+          # Task 8.1, and the exact same shape as `istio_gateway_recipe`
+          # above for the second Gateway API implementation: one
+          # disposable cluster per Kubernetes version
+          # `compatibility/recipes.yaml` certifies (today three), one
+          # `scripts/build-test-images.sh` run per cluster, and THREE
+          # fixtures per cluster rather than two -- the portable
+          # same-namespace and cross-namespace pair, plus the labeled
+          # NGINX-specific `NginxProxy` data-plane override (Task 8.1
+          # Step 4). Measured end to end at 303.34 seconds (~5m03s) for
+          # all three certified-version iterations combined, on the
+          # reference machine with a warm node-image and Docker layer
+          # cache -- the same order as `istio_gateway_recipe`'s own
+          # 269.95 s, which the shared `timeout-minutes: 30` ceiling was
+          # already sized against.
+          #
+          # One thing this entry pulls that no other does: both NGINX
+          # Gateway Fabric images (`ghcr.io/nginx/nginx-gateway-fabric`
+          # and its `/nginx` data plane) come from a network registry on
+          # first use, as does the Helm chart itself, which is published
+          # only to `oci://ghcr.io/nginx/charts`. A GitHub-hosted runner
+          # with a cold cache pays that download three times, once per
+          # cluster. See `recipes/nginx-gateway-fabric/README.md`'s
+          # "What was measured" for the per-step and per-fixture figures.
+          - package: admissionlab-recipes
+            test: nginx_gateway_recipe
           - package: admissionlab-recipes
             test: exit_gate
           - package: admissionlab-test-webhook

@@ -851,6 +851,11 @@ async fn helm_state_env_vars_are_set_on_every_invocation_and_point_inside_the_ru
         .join("baseline-helm")
         .join("repository")
         .into_os_string();
+    let expected_registry = run_paths
+        .logs()
+        .join("baseline-helm")
+        .join("registry-config.json")
+        .into_os_string();
 
     let calls = runner.calls();
     assert_eq!(calls.len(), 3);
@@ -867,9 +872,17 @@ async fn helm_state_env_vars_are_set_on_every_invocation_and_point_inside_the_ru
             "HELM_REPOSITORY_CACHE must point inside this run's own workspace, never the \
              user's real ~/.cache/helm/repository"
         );
-        // Exactly these two keys: nothing else is layered in, so nothing
-        // else (KUBECONFIG included) can be inherited by accident either.
-        assert_eq!(call.env.len(), 2);
+        assert_eq!(
+            call.env.get(&OsString::from("HELM_REGISTRY_CONFIG")),
+            Some(&expected_registry),
+            "HELM_REGISTRY_CONFIG must point inside this run's own workspace, never the \
+             user's real ~/.config/helm/registry/config.json -- an OCI chart reference \
+             resolves through Helm's registry client, which reads and writes that file"
+        );
+        // Exactly these three keys: nothing else is layered in, so
+        // nothing else (KUBECONFIG included) can be inherited by
+        // accident either.
+        assert_eq!(call.env.len(), 3);
         assert!(call.sensitive_env_keys.is_empty());
     }
 }
@@ -935,4 +948,126 @@ async fn helm_state_directory_differs_between_baseline_and_candidate() {
             .join("repositories.yaml")
             .into_os_string()
     );
+}
+
+// ---------------------------------------------------------------------
+// OCI chart references (ROADMAP Task 8.1). See helm.rs's module
+// documentation for the measured `helm repo add` failure these tests
+// exist to keep this module out of.
+// ---------------------------------------------------------------------
+
+/// The same spec as [`default_helm_spec`], addressed through an OCI
+/// registry -- shaped after `recipes/nginx-gateway-fabric/recipe.yaml`,
+/// the real recipe that forced this path to exist.
+fn oci_helm_spec() -> HelmInstallSpec {
+    HelmInstallSpec {
+        repo_name: "nginx-gateway-fabric".to_owned(),
+        repo_url: "oci://ghcr.io/nginx/charts".to_owned(),
+        chart: "oci://ghcr.io/nginx/charts/nginx-gateway-fabric".to_owned(),
+        version: "2.6.7".to_owned(),
+        release_name: "nginx-gateway-fabric".to_owned(),
+        namespace: "nginx-gateway".to_owned(),
+        values_files: Vec::new(),
+        set_values: BTreeMap::new(),
+    }
+}
+
+/// An OCI chart is installed with **no** `helm repo add` at all: that
+/// subcommand cannot parse an `oci://` URL, so running it would turn
+/// every such install into a hard failure before `helm upgrade` was ever
+/// reached.
+///
+/// Asserted as "the first call is the upgrade", not as "some call is an
+/// upgrade": a repo-add that ran and merely happened to succeed against
+/// the fake would be exactly the bug this test is for.
+#[tokio::test]
+async fn an_oci_chart_reference_skips_repo_add_entirely() {
+    let runner = Arc::new(happy_path_runner());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
+    let component = component_with(oci_helm_spec());
+    let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
+
+    installer
+        .install(&cluster, &component)
+        .await
+        .expect("install should succeed");
+
+    let calls = runner.calls();
+    assert_eq!(
+        calls.len(),
+        2,
+        "an OCI install is exactly `helm upgrade --install` then `helm get metadata`; got {:?}",
+        calls
+            .iter()
+            .map(|call| step_key(&call.args))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(step_key(&calls[0].args), "upgrade");
+    assert_eq!(step_key(&calls[1].args), "get metadata");
+}
+
+/// Skipping `helm repo add` changes nothing else: the chart reference
+/// reaches `helm upgrade --install` verbatim, still with its pinned
+/// `--version`, its own namespace and the cluster's own kubeconfig.
+#[tokio::test]
+async fn an_oci_chart_reference_is_passed_to_upgrade_verbatim_with_its_pinned_version() {
+    let runner = Arc::new(happy_path_runner());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
+    let helm = oci_helm_spec();
+    let component = component_with(helm.clone());
+    let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
+
+    installer
+        .install(&cluster, &component)
+        .await
+        .expect("install should succeed");
+
+    let calls = runner.calls();
+    let upgrade = &calls[0].args;
+    assert_eq!(upgrade[0], OsString::from("upgrade"));
+    assert_eq!(upgrade[1], OsString::from("--install"));
+    assert_eq!(upgrade[2], OsString::from(helm.release_name.clone()));
+    assert_eq!(
+        upgrade[3],
+        OsString::from("oci://ghcr.io/nginx/charts/nginx-gateway-fabric"),
+        "the OCI reference must reach helm exactly as written -- nothing rewrites it into a \
+         <repo>/<chart> shorthand"
+    );
+    assert_eq!(
+        find_flag(upgrade, "--version"),
+        Some(&OsString::from("2.6.7"))
+    );
+    assert_eq!(
+        find_flag(upgrade, "--namespace"),
+        Some(&OsString::from("nginx-gateway"))
+    );
+    assert_eq!(
+        find_flag(upgrade, "--kubeconfig"),
+        Some(&OsString::from("/run/adlab/baseline.kubeconfig"))
+    );
+}
+
+/// A chart whose reference merely *contains* `oci` is not an OCI
+/// reference: the predicate is the `oci://` scheme at the start of the
+/// string, so an ordinary repository still gets its `helm repo add`.
+#[tokio::test]
+async fn a_chart_name_containing_oci_is_not_treated_as_an_oci_reference() {
+    let runner = Arc::new(happy_path_runner());
+    let run_paths = test_run_paths();
+    let installer = HelmInstaller::new(runner.clone(), &run_paths);
+    let mut helm = default_helm_spec();
+    helm.chart = "socionext/oci-tools".to_owned();
+    let component = component_with(helm);
+    let cluster = cluster_handle("/run/adlab/baseline.kubeconfig");
+
+    installer
+        .install(&cluster, &component)
+        .await
+        .expect("install should succeed");
+
+    let calls = runner.calls();
+    assert_eq!(calls.len(), 3);
+    assert_eq!(step_key(&calls[0].args), "repo add");
 }
