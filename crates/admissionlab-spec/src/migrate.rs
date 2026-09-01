@@ -86,7 +86,14 @@
 //!    combination or a division. Nothing was merged or split.
 //! 3. **A new *required* field** — a migration would have to default it,
 //!    which is precisely the "invent a default" failure Step 3 forbids.
-//!    Beta adds no field at all.
+//!    Beta adds no required field. It has since gained one *optional*
+//!    section Alpha never had ([`crate::V1Beta1Lab::migration`], ROADMAP
+//!    Task 8.3), and that is the addition-only rule the freeze committed
+//!    to rather than an exception to it: the field's absence is a
+//!    complete configuration in its own right, so an Alpha document
+//!    migrates to `None` without anything being guessed. A *required*
+//!    addition would still be forbidden, and would still need a new
+//!    `apiVersion`.
 //!
 //! `tests/migrate_alpha_beta.rs` tests this as a property rather than
 //! taking it on faith: it migrates a maximal Alpha document in which
@@ -219,6 +226,15 @@ pub fn migrate_v1alpha1_to_v1beta1(old: V1Alpha1Lab) -> Result<V1Beta1Lab, Migra
         policy: migrate_policy(policy),
         expectations_file,
         gateway: gateway.map(migrate_gateway),
+        // v1alpha1 has no `migration:` section at all (ROADMAP Task 8.3
+        // is v1.0 work, and Alpha was frozen well before it), so there
+        // is no Alpha value to translate and `None` is not a default
+        // being invented -- it is the *only* thing an Alpha document can
+        // have meant. See this module's "Why this migration is total",
+        // clause 3: what Step 3 forbids is defaulting a new *required*
+        // field, and this one is optional in Beta precisely because
+        // omitting it is a complete, meaningful configuration.
+        migration: None,
     })
 }
 

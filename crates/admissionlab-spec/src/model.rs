@@ -26,7 +26,10 @@
 //! Alpha schema it would have silently broken. Sharing is safe precisely
 //! because the freeze is checked, not promised.
 //!
-//! For back-compatibility, the current version's three split types are
+//! For back-compatibility, the current version's three split types —
+//! plus the three [`crate::v1beta1`] added after the Alpha freeze and
+//! therefore never shared ([`MigrationSuiteSpec`],
+//! [`MigrationCaseSpec`], [`NonPortableFeatureExpectation`]) — are
 //! re-exported from this module (and from the crate root) under their
 //! historical bare names, so `admissionlab_spec::PolicySpec` and
 //! `admissionlab_spec::model::EnvironmentSpec` keep resolving exactly as
@@ -62,7 +65,10 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 pub use crate::v1alpha1::API_VERSION;
-pub use crate::v1beta1::{GatewaySuiteSpec, LatencyPolicy, PolicySpec};
+pub use crate::v1beta1::{
+    GatewaySuiteSpec, LatencyPolicy, MigrationCaseSpec, MigrationSuiteSpec,
+    NonPortableFeatureExpectation, PolicySpec,
+};
 
 /// The only `kind` value a lab document may carry, in **every** supported
 /// `apiVersion` — [`crate::v1alpha1::API_VERSION`] and
@@ -755,10 +761,3 @@ pub const fn is_valid_http_status(status: u16) -> bool {
     // wanted in const context.
     matches!(status, 100..=599)
 }
-
-/// Placeholder for the migration test suite configuration.
-///
-/// See [`GatewaySuiteSpec`]: same reservation, same owner (Phase 6), same
-/// reason for staying empty.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MigrationSuiteSpec {}

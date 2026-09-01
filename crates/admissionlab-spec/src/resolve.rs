@@ -45,7 +45,8 @@ use crate::component::{self, ResolvedComponent};
 use crate::error::SpecError;
 use crate::migrate::migrate_v1alpha1_to_v1beta1;
 use crate::model::{
-    EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec, MigrationSuiteSpec, PolicySpec,
+    EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec, MigrationCaseSpec, MigrationSuiteSpec,
+    PolicySpec,
 };
 use crate::v1alpha1::V1Alpha1Lab;
 use crate::v1beta1::V1Beta1Lab;
@@ -98,10 +99,11 @@ pub struct LoadedLab {
 /// on [`crate::PolicyOverrideSpec`] names a location *within* a compared
 /// object, not on disk), so there is nothing for this step to resolve.
 ///
-/// `migration` is always `None` today: [`V1Beta1Lab`] has no YAML section
-/// feeding it yet. See [`crate::MigrationSuiteSpec`] for why the field
-/// exists regardless. `gateway` is real as of ROADMAP Task 6.1 and is
-/// `Some` exactly when the document has a `gateway:` section.
+/// `gateway` is real as of ROADMAP Task 6.1 and `migration` as of Task
+/// 8.3; each is `Some` exactly when the document has the corresponding
+/// top-level section. A `v1alpha1` document always resolves to
+/// `migration: None`, because that version has no `migration:` key at
+/// all — see [`crate::V1Beta1Lab::migration`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLab {
     /// The path this configuration was loaded from, exactly as
@@ -125,8 +127,13 @@ pub struct ResolvedLab {
     /// lab. See [`GatewaySuiteSpec`] for why the raw and resolved
     /// stages share one type.
     pub gateway: Option<GatewaySuiteSpec>,
-    /// Reserved for Phase 6's migration test suite; always `None` until
-    /// that phase adds a YAML section to populate it.
+    /// The Ingress-to-Gateway migration suite, if the document declared
+    /// one, with every case's baseline and candidate manifest path
+    /// resolved against the configuration file's own directory. `None`
+    /// for a lab that is not migrating off `Ingress` — and always `None`
+    /// for a `v1alpha1` document, which has no such section. See
+    /// [`MigrationSuiteSpec`] for why the raw and resolved stages share
+    /// one type.
     pub migration: Option<MigrationSuiteSpec>,
 }
 
@@ -220,6 +227,10 @@ pub(crate) fn resolve_beta_lab(
         .gateway
         .map(|gateway| resolve_gateway(gateway, &config_dir, &source_path))
         .transpose()?;
+    let migration = raw
+        .migration
+        .map(|migration| resolve_migration(migration, &config_dir, &source_path))
+        .transpose()?;
 
     Ok(ResolvedLab {
         source_path,
@@ -229,7 +240,7 @@ pub(crate) fn resolve_beta_lab(
         policy: raw.policy,
         expectations_file,
         gateway,
-        migration: None,
+        migration,
     })
 }
 
@@ -335,6 +346,62 @@ fn resolve_gateway(
         gateway_endpoint,
         readiness,
     })
+}
+
+/// Validates a [`MigrationSuiteSpec`] and resolves both of every case's
+/// manifest path lists against the configuration file's own directory
+/// (ROADMAP Task 8.3).
+///
+/// Structurally the twin of [`resolve_gateway`], deliberately: the two
+/// sections carry manifest paths written the same way, so they are
+/// resolved by the same rule ([`resolve_relative`], never
+/// [`std::env::current_dir`]) in the same order — validate first, so a
+/// message quotes the list the user wrote rather than a joined absolute
+/// path they never typed, then join.
+///
+/// Both lists in a case are resolved, and nothing else in a case is
+/// touched: [`crate::HttpProbeContract`] and
+/// [`crate::NonPortableFeatureExpectation`] contain no filesystem paths
+/// at all.
+fn resolve_migration(
+    raw: MigrationSuiteSpec,
+    config_dir: &Path,
+    source_path: &Path,
+) -> Result<MigrationSuiteSpec, SpecError> {
+    validate::migration_suite(&raw, source_path)?;
+
+    let MigrationSuiteSpec { cases } = raw;
+    let cases = cases
+        .into_iter()
+        .map(|case| {
+            // Exhaustive destructure, as everywhere else in this module:
+            // a field added to `MigrationCaseSpec` that also needs
+            // resolving must be a compile error here rather than a value
+            // silently carried through unresolved.
+            let MigrationCaseSpec {
+                id,
+                baseline_ingress_manifests,
+                candidate_gateway_manifests,
+                probes,
+                expected_nonportable,
+            } = case;
+            MigrationCaseSpec {
+                id,
+                baseline_ingress_manifests: baseline_ingress_manifests
+                    .into_iter()
+                    .map(|path| resolve_relative(config_dir, path))
+                    .collect(),
+                candidate_gateway_manifests: candidate_gateway_manifests
+                    .into_iter()
+                    .map(|path| resolve_relative(config_dir, path))
+                    .collect(),
+                probes,
+                expected_nonportable,
+            }
+        })
+        .collect();
+
+    Ok(MigrationSuiteSpec { cases })
 }
 
 fn resolve_fixtures(

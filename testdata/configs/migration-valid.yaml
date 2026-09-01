@@ -1,0 +1,133 @@
+# A lab that runs ROADMAP Phase 8's Ingress-to-Gateway migration suite.
+#
+# The `migration` section is what Task 8.3 adds. Like `gateway`, it is
+# one more optional top-level section rather than a different kind of
+# document: a team migrating off `Ingress` is still comparing two stacks,
+# and everything above the section is an ordinary lab.
+#
+# `migration` exists only in `admissionlab.io/v1beta1`. The frozen
+# `v1alpha1` document has no such key, and an Alpha lab therefore
+# resolves to `migration: None` -- see `crates/admissionlab-spec/src/migrate.rs`.
+apiVersion: admissionlab.io/v1beta1
+kind: Lab
+baseline:
+  kubernetes: "1.33.4"
+  components:
+    # The baseline side runs the legacy Ingress controller whose behavior
+    # is being migrated away from.
+    - name: ingress-nginx
+      version: "4.13.3"
+      install:
+        type: helm
+        chart: ingress-nginx
+        repo: https://kubernetes.github.io/ingress-nginx
+        version: "4.13.3"
+        namespace: ingress-nginx
+      readiness:
+        - type: deploymentAvailable
+          namespace: ingress-nginx
+          name: ingress-nginx-controller
+candidate:
+  kubernetes: "1.33.4"
+  components:
+    # The candidate side runs the Gateway API implementation the
+    # migration targets. The two sides deliberately install *different*
+    # components: that is what a migration is, and it is why a migration
+    # case has to name both manifest sets explicitly rather than deriving
+    # one from the other.
+    - name: istiod
+      version: "1.28.0"
+      install:
+        type: helm
+        chart: istiod
+        repo: https://istio-release.storage.googleapis.com/charts
+        version: "1.28.0"
+        namespace: istio-system
+      readiness:
+        - type: deploymentAvailable
+          namespace: istio-system
+          name: istiod
+fixtures:
+  include:
+    - "fixtures/admission/**/*.yaml"
+
+migration:
+  cases:
+    # Every path is resolved against *this file's* directory, never the
+    # process's working directory -- the same rule every other path in
+    # the document follows.
+    - id: basic-host-and-path
+      # Written by a human (or by `ingress2gateway`, or by a vendor
+      # migration guide). Admission Lab does not generate either list:
+      # a suite that produced the candidate manifests itself would be
+      # comparing its own converter against its own converter, and would
+      # report "no behavior change" for precisely the rules that
+      # converter got wrong.
+      baselineIngressManifests:
+        - fixtures/migration/basic/namespace.yaml
+        - fixtures/migration/basic/backends.yaml
+        - fixtures/migration/basic/ingress.yaml
+      candidateGatewayManifests:
+        - fixtures/migration/basic/namespace.yaml
+        - fixtures/migration/basic/backends.yaml
+        - fixtures/migration/basic/gateway.yaml
+        - fixtures/migration/basic/httproute.yaml
+      # The same probe vocabulary the `gateway` section uses. A migration
+      # case must declare at least one: an Ingress and an HTTPRoute share
+      # no status vocabulary, so traffic behavior is the only thing the
+      # two sides can be compared on.
+      probes:
+        - host: shop.lab.example
+          path: /
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-a
+        - host: shop.lab.example
+          path: /api/v1/items
+          method: POST
+          expectedStatus: 201
+          expectedBackend: echo-b
+        # No `expectedBackend`: an unmatched path is answered by the data
+        # plane itself, so no backend is reached and naming one would be
+        # an expectation nothing could satisfy.
+        - host: shop.lab.example
+          path: /not-routed
+          method: GET
+          expectedStatus: 404
+
+    - id: nginx-annotations-with-known-gaps
+      baselineIngressManifests:
+        - fixtures/migration/annotations/namespace.yaml
+        - fixtures/migration/annotations/backends.yaml
+        - fixtures/migration/annotations/ingress.yaml
+      candidateGatewayManifests:
+        - fixtures/migration/annotations/namespace.yaml
+        - fixtures/migration/annotations/backends.yaml
+        - fixtures/migration/annotations/gateway.yaml
+        - fixtures/migration/annotations/httproute.yaml
+      probes:
+        - host: legacy.lab.example
+          path: /rewrite-me/thing
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-a
+      # Differences the author already knows this migration introduces,
+      # each with a written justification. This is deliberately *not* the
+      # generic `expectations.yaml` mechanism: that one selects on a
+      # semantic-change kind (a fact about a diff), while these name an
+      # input feature of the stack being migrated away from (a fact about
+      # an Ingress), and a non-portability statement is permanent where a
+      # regression expectation is transient.
+      expectedNonportable:
+        - feature: nginx.ingress.kubernetes.io/configuration-snippet
+          reason: >-
+            Gateway API v1 has no portable equivalent for raw NGINX
+            configuration. The snippet added a `X-Legacy-Trace` response
+            header; the migration drops it, and the dashboards that read
+            it were retired in the same change.
+        - feature: nginx.ingress.kubernetes.io/auth-url
+          reason: >-
+            External auth is expressed as an implementation-specific
+            policy attachment on the candidate side rather than as a
+            route annotation, so the request that reaches the backend is
+            the same but the 401 body differs.

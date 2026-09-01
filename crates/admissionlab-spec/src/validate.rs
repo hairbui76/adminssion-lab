@@ -429,17 +429,136 @@ pub(crate) fn gateway_suite(
         }
 
         for (probe_index, probe) in route.probes.iter().enumerate() {
-            let locator = format!("{locator}.probes[{probe_index}]");
-            require_non_empty(&locator, "host", &probe.host, path)?;
-            gateway_probe_path(&locator, &probe.path, path)?;
-            gateway_probe_method(&locator, &probe.method, path)?;
-            gateway_probe_status(&locator, probe.expected_status, path)?;
-            if let Some(backend) = &probe.expected_backend {
-                // Same reasoning as `listenerName` above: an empty
-                // `expectedBackend` would silently mean "any backend",
-                // which is already spelled by omitting the field.
-                require_non_empty(&locator, "expectedBackend", backend, path)?;
+            http_probe_contract(&format!("{locator}.probes[{probe_index}]"), probe, path)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates one [`crate::HttpProbeContract`], wherever it appears.
+///
+/// Shared by [`gateway_suite`] and [`migration_suite`] rather than
+/// written twice: the two sections carry the *same* type, so a probe
+/// that a Gateway suite accepts and a migration suite rejects (or the
+/// reverse) would be a difference with no defensible reading. Task 8.3's
+/// "valid probes (reuse the method/status validation)" is this function
+/// existing rather than a second copy of the same four checks.
+///
+/// `locator` is the dotted position of the probe itself (for example
+/// `migration.cases[0].probes[2]`), so each message names the exact
+/// entry.
+fn http_probe_contract(
+    locator: &str,
+    probe: &crate::model::HttpProbeContract,
+    path: &Path,
+) -> Result<(), SpecError> {
+    require_non_empty(locator, "host", &probe.host, path)?;
+    gateway_probe_path(locator, &probe.path, path)?;
+    gateway_probe_method(locator, &probe.method, path)?;
+    gateway_probe_status(locator, probe.expected_status, path)?;
+    if let Some(backend) = &probe.expected_backend {
+        // Present-but-empty is rejected rather than treated as absent:
+        // an empty `expectedBackend` would silently mean "any backend",
+        // which is already spelled by omitting the field.
+        require_non_empty(locator, "expectedBackend", backend, path)?;
+    }
+    Ok(())
+}
+
+/// Validates a [`crate::MigrationSuiteSpec`]'s non-path content (ROADMAP
+/// Task 8.3).
+///
+/// The same kind of rule set [`gateway_suite`] enforces, applied to the
+/// migration section's own shape: no empty case list, unique non-empty
+/// case ids, a non-empty manifest list on **both** sides of every
+/// pairing, valid probes (through [`http_probe_contract`], the one
+/// probe validator), and non-portability entries that carry both a
+/// feature name and a human reason, without duplicates.
+///
+/// Every one of these describes a suite no run could satisfy, and every
+/// one of them would otherwise surface on a real cluster after two
+/// `kind` clusters had already been created.
+///
+/// [`crate::resolve_lab`] resolves the two manifest path lists
+/// separately; this function never touches them beyond the emptiness
+/// check, for the reason [`gateway_suite`] gives.
+pub(crate) fn migration_suite(
+    migration: &crate::model::MigrationSuiteSpec,
+    path: &Path,
+) -> Result<(), SpecError> {
+    if migration.cases.is_empty() {
+        return Err(SpecError::validation(
+            path,
+            "migration.cases",
+            "must not be empty",
+        ));
+    }
+
+    let mut seen_ids = std::collections::BTreeSet::new();
+    for (index, case) in migration.cases.iter().enumerate() {
+        let locator = format!("migration.cases[{index}]");
+        let id = require_non_empty(&locator, "id", &case.id, path)?;
+        if !seen_ids.insert(id.clone()) {
+            return Err(SpecError::validation(
+                path,
+                format_args!("{locator}.id"),
+                format_args!("duplicate migration case id {id:?}"),
+            ));
+        }
+
+        // Both sides, not just one. A case whose baseline is empty
+        // measures the candidate against nothing; a case whose candidate
+        // is empty measures nothing against the baseline. Neither is a
+        // migration, and Task 8.3 Step 1's whole point is that the
+        // pairing is explicit -- half a pair is not one.
+        if case.baseline_ingress_manifests.is_empty() {
+            return Err(SpecError::validation(
+                path,
+                format_args!("{locator}.baselineIngressManifests"),
+                "must not be empty (Admission Lab does not convert Ingress to Gateway: a \
+                 migration case names both halves of the pairing explicitly)",
+            ));
+        }
+        if case.candidate_gateway_manifests.is_empty() {
+            return Err(SpecError::validation(
+                path,
+                format_args!("{locator}.candidateGatewayManifests"),
+                "must not be empty (Admission Lab does not convert Ingress to Gateway: a \
+                 migration case names both halves of the pairing explicitly)",
+            ));
+        }
+
+        if case.probes.is_empty() {
+            return Err(SpecError::validation(
+                path,
+                format_args!("{locator}.probes"),
+                "must not be empty (an Ingress and an HTTPRoute share no status vocabulary, so \
+                 traffic is the only thing the two sides can be compared on)",
+            ));
+        }
+        for (probe_index, probe) in case.probes.iter().enumerate() {
+            http_probe_contract(&format!("{locator}.probes[{probe_index}]"), probe, path)?;
+        }
+
+        let mut seen_features = std::collections::BTreeSet::new();
+        for (expectation_index, expectation) in case.expected_nonportable.iter().enumerate() {
+            let locator = format!("{locator}.expectedNonportable[{expectation_index}]");
+            let feature = require_non_empty(&locator, "feature", &expectation.feature, path)?;
+            if !seen_features.insert(feature.clone()) {
+                return Err(SpecError::validation(
+                    path,
+                    format_args!("{locator}.feature"),
+                    format_args!(
+                        "duplicate non-portable feature {feature:?}; one feature has one reason"
+                    ),
+                ));
             }
+            // The reason is the whole point of the entry: an accepted
+            // behavioral difference with no written justification is
+            // indistinguishable from a silenced regression. Same rule
+            // `admissionlab_policy::ExpectedChange` applies to its own
+            // `reason`.
+            require_non_empty(&locator, "reason", &expectation.reason, path)?;
         }
     }
     Ok(())

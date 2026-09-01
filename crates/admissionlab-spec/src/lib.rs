@@ -44,15 +44,19 @@
 //!   JSON Schemas checked in at `schemas/admissionlab-v1beta1.json` and
 //!   `schemas/admissionlab-v1alpha1.json`.
 //!
-//! # The `gateway` section lives here, but Gateway *behavior* does not
+//! # The `gateway` and `migration` sections live here, but Gateway
+//! *behavior* does not
 //!
 //! [`GatewaySuiteSpec`], [`RouteContract`], and [`HttpProbeContract`]
-//! (ROADMAP Task 6.1) are defined alongside every other hand-written
-//! configuration type, and `admissionlab_gateway::model` re-exports them
-//! rather than declaring twins. See [`GatewaySuiteSpec`]'s own
-//! documentation for why the definition has to live on this side of the
-//! dependency graph, and for the line between "what a user writes" (here)
-//! and "what a cluster was observed to do" (`admissionlab-gateway`).
+//! (ROADMAP Task 6.1), and [`MigrationSuiteSpec`],
+//! [`MigrationCaseSpec`] and [`NonPortableFeatureExpectation`] (Task
+//! 8.3), are defined alongside every other hand-written configuration
+//! type; `admissionlab_gateway::model` and
+//! `admissionlab_gateway::migration` re-export them rather than
+//! declaring twins. See [`GatewaySuiteSpec`]'s own documentation for why
+//! the definition has to live on this side of the dependency graph, and
+//! for the line between "what a user writes" (here) and "what a cluster
+//! was observed to do" (`admissionlab-gateway`).
 //!
 //! This crate defines the configuration *contract* only. It does not
 //! implement recipe resolution, installers, fixture discovery, policy
@@ -108,8 +112,9 @@ pub use model::{
     ALLOWED_HTTP_METHODS, ComponentSpec, CustomResourceConditionSpec,
     DEFAULT_RECONCILIATION_TIMEOUT, EnvironmentSpec, FixtureSelectionSpec, GatewayEndpointSpec,
     GatewaySuiteSpec, HelmInstallSpec, HttpProbeContract, InstallMethodSpec, LatencyPolicy,
-    ManifestsInstallSpec, MigrationSuiteSpec, NamedObjectSpec, NamespacedObjectSpec,
-    PolicyOverrideSpec, PolicySpec, ReadinessCheckSpec, RouteContract, is_valid_http_status,
+    ManifestsInstallSpec, MigrationCaseSpec, MigrationSuiteSpec, NamedObjectSpec,
+    NamespacedObjectSpec, NonPortableFeatureExpectation, PolicyOverrideSpec, PolicySpec,
+    ReadinessCheckSpec, RouteContract, is_valid_http_status,
 };
 pub use resolve::{
     LoadedLab, ResolvedEnvironment, ResolvedFixtureSelection, ResolvedLab, resolve_lab,

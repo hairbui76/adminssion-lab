@@ -54,6 +54,13 @@
 //!   explains what `converged` is not, how parents and probes are
 //!   paired, why stale evidence silences absence claims, and which half
 //!   of the direction rule belongs to `admissionlab-policy`.
+//! - [`migration`] (Task 8.3) is the Ingress-to-Gateway migration
+//!   suite's configuration surface: explicit baseline/candidate manifest
+//!   pairings, the probes replayed through both, and the non-portable
+//!   features an author has accepted in writing. Read that module before
+//!   assuming this project converts anything -- it does not, on purpose,
+//!   and the module explains why a self-converting suite could not
+//!   detect its own converter's mistakes.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -86,6 +93,7 @@ pub mod conditions;
 pub mod diff;
 pub mod endpoint;
 pub mod error;
+pub mod migration;
 pub mod model;
 pub mod port_forward;
 pub mod probe;
@@ -112,6 +120,10 @@ pub use endpoint::{
     resolve_gateway_endpoint_with_client,
 };
 pub use error::{EndpointLookup, GatewayError};
+pub use migration::{
+    MigrationCaseSpec, MigrationSuiteSpec, NonPortableFeatureExpectation,
+    expected_nonportable_features,
+};
 pub use port_forward::{
     KUBECTL_PROGRAM, LOCAL_ADDRESS, PORT_FORWARD_READY_TIMEOUT, PortForwardHandle,
     PortForwardOutput, await_forwarding_address, parse_forwarding_line, port_forward_command,

@@ -13,10 +13,20 @@
 //!
 //! # What is here, and what is not
 //!
-//! Only the root document ([`V1Beta1Lab`]) and the types whose wire
-//! spelling differs from [`crate::v1alpha1`]'s: [`LatencyPolicy`] (which
-//! is what changed), [`PolicySpec`] (which carries it), and
-//! [`GatewaySuiteSpec`]. Everything else — [`crate::EnvironmentSpec`],
+//! Only the root document ([`V1Beta1Lab`]) and the types v1alpha1 does
+//! not have *in this spelling*, which is two groups:
+//!
+//! - the types whose wire spelling differs from [`crate::v1alpha1`]'s:
+//!   [`LatencyPolicy`] (which is what changed), [`PolicySpec`] (which
+//!   carries it), and [`GatewaySuiteSpec`];
+//! - the types v1alpha1 does not have **at all**, because they were
+//!   added after the Alpha freeze: [`MigrationSuiteSpec`],
+//!   [`MigrationCaseSpec`], and [`NonPortableFeatureExpectation`]
+//!   (ROADMAP Task 8.3). An Alpha document maps to `migration: None`;
+//!   see [`V1Beta1Lab::migration`] for why that is a translation rather
+//!   than an invented default.
+//!
+//! Everything else — [`crate::EnvironmentSpec`],
 //! [`crate::ComponentSpec`], [`crate::InstallMethodSpec`],
 //! [`crate::ReadinessCheckSpec`], [`crate::FixtureSelectionSpec`],
 //! [`crate::PolicyOverrideSpec`], [`crate::RouteContract`],
@@ -45,9 +55,9 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 
 use crate::model::{
-    EnvironmentSpec, FixtureSelectionSpec, GatewayEndpointSpec, PolicyOverrideSpec,
-    ReadinessCheckSpec, RouteContract, default_reconciliation_timeout, duration_millis,
-    kind_schema,
+    EnvironmentSpec, FixtureSelectionSpec, GatewayEndpointSpec, HttpProbeContract,
+    PolicyOverrideSpec, ReadinessCheckSpec, RouteContract, default_reconciliation_timeout,
+    duration_millis, kind_schema,
 };
 
 /// The `apiVersion` of a Public Beta lab document, and the only value
@@ -118,6 +128,26 @@ pub struct V1Beta1Lab {
     /// all) — [`crate::ResolvedLab::gateway`] is then `None`.
     #[serde(default)]
     pub gateway: Option<GatewaySuiteSpec>,
+    /// The Ingress-to-Gateway migration suite (ROADMAP Task 8.3): pairs
+    /// of hand-written baseline `Ingress` manifests and candidate
+    /// Gateway API manifests that are meant to behave the same, plus the
+    /// probes that check whether they do.
+    ///
+    /// Omit the section entirely — as every lab that is not migrating
+    /// off `Ingress` does — and [`crate::ResolvedLab::migration`] is
+    /// `None`.
+    ///
+    /// # This section exists only in `v1beta1`
+    ///
+    /// `admissionlab.io/v1alpha1` has no `migration:` key and never
+    /// will: it is frozen (see `migrate.rs`), and Phase 8 is v1.0 work
+    /// that postdates the freeze. That is not a gap in the migration —
+    /// it is the *addition-only* rule the Beta freeze committed to,
+    /// working as intended: an Alpha document maps to `migration: None`,
+    /// which is exactly what an Alpha document meant, and no value has
+    /// to be invented for a field its author could not have written.
+    #[serde(default)]
+    pub migration: Option<MigrationSuiteSpec>,
 }
 
 /// The regression policy: which categories of behavioral difference fail
@@ -372,4 +402,195 @@ pub struct GatewaySuiteSpec {
     /// no readiness waits for nothing.
     #[serde(default)]
     pub readiness: Vec<ReadinessCheckSpec>,
+}
+
+/// The Ingress-to-Gateway migration suite (ROADMAP Task 8.3): a list of
+/// cases, each pairing the `Ingress` manifests a team runs today against
+/// the Gateway API manifests they intend to replace them with, plus the
+/// probes that decide whether the two really behave the same.
+///
+/// # Admission Lab does not convert anything
+///
+/// **Read this before writing a case.** v1 contains no
+/// Ingress-to-Gateway converter, and adding one is explicitly out of
+/// scope. Both halves of every case are written by a human or produced
+/// by some *other* tool (`ingress2gateway`, a vendor migration guide, a
+/// hand edit), and this suite's entire job is to check that the
+/// conversion **that user already performed** preserves behavior.
+///
+/// That is not a temporary limitation waiting on a converter; it is the
+/// only arrangement under which the answer means anything. A suite that
+/// generated the candidate manifests itself would be comparing its own
+/// converter against its own converter: every rule the converter got
+/// wrong would be applied identically on both sides of the comparison,
+/// so the run would report "no behavior change" precisely for the
+/// mistakes it was supposed to catch. The pairing is required, and it is
+/// required *explicitly*, for the same reason
+/// [`RouteContract`]'s Gateway identity is: a contract that reads its
+/// expectation out of the artifact under test can never contradict that
+/// artifact.
+///
+/// # Where this type lives, and why not in `admissionlab-gateway`
+///
+/// ROADMAP Task 8.3 lists `crates/admissionlab-gateway/src/migration.rs`
+/// as this type's file, and §1.2's registry *also* freezes
+/// [`crate::ResolvedLab::migration`] as an `Option<MigrationSuiteSpec>`.
+/// Exactly the situation [`GatewaySuiteSpec`] already resolved, with the
+/// same forced answer: `admissionlab-gateway` depends (transitively) on
+/// this crate, so a `spec -> gateway` edge would be a dependency cycle.
+/// The hand-written configuration surface is defined here;
+/// `admissionlab_gateway::migration` **re-exports these exact types**
+/// rather than declaring twins, and owns what a user never writes.
+///
+/// # One type for both the raw and the resolved stage
+///
+/// As with [`GatewaySuiteSpec`]: [`crate::resolve_lab`] rewrites
+/// [`MigrationCaseSpec::baseline_ingress_manifests`] and
+/// [`MigrationCaseSpec::candidate_gateway_manifests`] onto the
+/// configuration file's own directory and validates everything else in
+/// place, so the raw and the resolved value differ in those two fields
+/// and nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationSuiteSpec {
+    /// The migration cases. Must not be empty, and every
+    /// [`MigrationCaseSpec::id`] must be unique within the suite — both
+    /// validated by [`crate::resolve_lab`]. A `migration:` section
+    /// declaring no cases is the same quiet no-op an empty
+    /// [`GatewaySuiteSpec::manifests`] would be: it would install
+    /// nothing, probe nothing, and report success.
+    pub cases: Vec<MigrationCaseSpec>,
+}
+
+/// One migration case: the `Ingress` manifests that define today's
+/// behavior, the Gateway API manifests intended to replace them, the
+/// probes that must answer identically through both, and the differences
+/// the author already knows about and has written down.
+///
+/// # The two manifest lists are peers, not a source and a target
+///
+/// Neither list is derived from the other (see [`MigrationSuiteSpec`]'s
+/// "Admission Lab does not convert anything"). They are applied to the
+/// *baseline* and the *candidate* side respectively, and both are
+/// resolved against the configuration file's own directory exactly as
+/// [`GatewaySuiteSpec::manifests`] is. Both must be non-empty: a case
+/// with an empty side has nothing to install there, so every probe
+/// against that side would measure the absence of a fixture rather than
+/// a migration.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MigrationCaseSpec {
+    /// A stable identifier for this case, unique within the suite and
+    /// non-empty — the handle that correlates the baseline and candidate
+    /// observations of one migration, exactly as [`RouteContract::id`]
+    /// does for a route contract.
+    pub id: String,
+    /// The `Ingress` manifests (plus whatever namespaces, backends and
+    /// `IngressClass` they need) that define the behavior being
+    /// migrated *away from*, applied to the baseline side. Resolved
+    /// against the configuration file's own directory. Must not be
+    /// empty.
+    pub baseline_ingress_manifests: Vec<PathBuf>,
+    /// The Gateway API manifests (`GatewayClass`, `Gateway`,
+    /// `HTTPRoute`, backends) intended to reproduce that behavior,
+    /// applied to the candidate side. **Written by the user, never
+    /// generated from the list above.** Resolved against the
+    /// configuration file's own directory. Must not be empty.
+    pub candidate_gateway_manifests: Vec<PathBuf>,
+    /// The requests replayed through *both* sides. The same
+    /// [`HttpProbeContract`] the Gateway suite uses — one vocabulary for
+    /// "send this request and expect this answer", because a migration
+    /// case asks the identical question a route contract does, only of
+    /// two differently-shaped stacks instead of two versions of one.
+    ///
+    /// Must not be empty, which is where this deliberately differs from
+    /// [`RouteContract::probes`]. A route contract with no probes still
+    /// asserts something real (that the route reconciles, which
+    /// `admissionlab_gateway::reconcile` observes independently of any
+    /// traffic). A migration case with no probes asserts nothing at all:
+    /// an `Ingress` and an `HTTPRoute` have no comparable status
+    /// vocabulary, so traffic behavior is the *only* thing the two sides
+    /// can be compared on.
+    pub probes: Vec<HttpProbeContract>,
+    /// Behavioral differences the author already knows the migration
+    /// introduces, each with a written justification. Empty by default:
+    /// a migration nobody expects to change anything declares nothing
+    /// here, and any difference the run observes is then unexplained.
+    ///
+    /// See [`NonPortableFeatureExpectation`] for why this is its own
+    /// vocabulary rather than a reuse of `expectations.yaml`.
+    #[serde(default)]
+    pub expected_nonportable: Vec<NonPortableFeatureExpectation>,
+}
+
+/// One `Ingress` feature the author knows has no faithful Gateway API
+/// equivalent, and the human reason it is accepted.
+///
+/// The realistic migration is not lossless. `ingress-nginx`'s
+/// annotations reach well past what Gateway API v1 models —
+/// `nginx.ingress.kubernetes.io/configuration-snippet` has no portable
+/// counterpart at all; `auth-url`, `server-snippet`, and the
+/// `canary-*` family have partial ones with different semantics. A team
+/// migrating declares those here, once, with a sentence about what they
+/// decided to do instead, and Task 8.5 marks the corresponding observed
+/// difference as expected rather than reporting it as a surprise.
+///
+/// # Two required fields, both human
+///
+/// `feature` must be non-empty and unique within its case; `reason` must
+/// be non-empty. The same rule, for the same reason,
+/// `admissionlab_policy::ExpectedChange` applies to its own `id`/`reason`
+/// pair: the name is the only handle anything downstream has back to
+/// this entry, duplicates would make that handle ambiguous, and an entry
+/// that suppresses a behavioral difference with no written
+/// justification is indistinguishable from someone quietly silencing a
+/// real regression. Neither field is decoration, and neither is
+/// defaulted.
+///
+/// # Why this is not `expectations.yaml`
+///
+/// A migration expectation and a regression expectation look similar for
+/// about one sentence and then diverge in all three ways that matter:
+///
+/// - **Different vocabulary.** `admissionlab_policy::ExpectedChange`
+///   selects on a `SemanticChangeKind` (`container_added`,
+///   `newly_denied`, ...) — the closed set of *admission* differences
+///   `admissionlab-diff` computes. `feature` here names an **input**
+///   feature of the stack being migrated away from (an annotation, a
+///   snippet, an auth mode), which is not in that set and could not
+///   sensibly be added to it: one is a fact about a diff, the other a
+///   fact about an `Ingress`.
+/// - **Different lifecycle.** A regression expectation is transient —
+///   `admissionlab-policy` reports one that stops matching as a *stale
+///   expectation*, so it gets deleted on the next upgrade. A
+///   non-portability statement is *permanent* for as long as the
+///   migration exists: `configuration-snippet` does not become portable
+///   later, and reporting it as stale every run would train reviewers to
+///   ignore staleness reports.
+/// - **Different lifetime in the file.** Migration cases are deleted
+///   wholesale the day the migration lands; an `expectations.yaml`
+///   outlives every individual upgrade it was written for. Sharing one
+///   file would mean deleting a migration would either strand or delete
+///   entries that had nothing to do with it.
+///
+/// So this is a separate type, in a separate section, and
+/// [`V1Beta1Lab::expectations_file`] is untouched by it. Neither
+/// mechanism can grade the other's subject matter, which is exactly the
+/// property that keeps "this difference is accepted" answerable in one
+/// place per question rather than two places per run.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NonPortableFeatureExpectation {
+    /// The non-portable feature, named as the source stack names it —
+    /// for example `nginx.ingress.kubernetes.io/configuration-snippet`.
+    /// A free-form `String` rather than an enumeration: the set of
+    /// annotations an Ingress controller understands is that
+    /// controller's, not this project's, and Global Constraint 6 keeps
+    /// vendor vocabulary out of the classification engine. Must be
+    /// non-empty and unique within its case.
+    pub feature: String,
+    /// Why this is accepted: what the feature did, and what the
+    /// migration does instead. Must be non-empty — see this type's "Two
+    /// required fields, both human".
+    pub reason: String,
 }

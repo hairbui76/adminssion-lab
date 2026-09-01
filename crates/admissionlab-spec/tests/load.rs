@@ -706,3 +706,37 @@ fn latency_absolute_increase_is_milliseconds() {
     assert!((loaded.raw.policy.latency.relative_multiplier - 1.5).abs() < f64::EPSILON);
     assert!(loaded.raw.policy.fail_on.contains("breaking-change"));
 }
+
+// ---------------------------------------------------------------------
+// Sections that exist only in the current version
+// ---------------------------------------------------------------------
+
+#[test]
+fn the_checked_in_migration_lab_loads_and_resolves() {
+    // ROADMAP Task 8.3. `migration:` is a `v1beta1`-only section, so this
+    // goes through `load_any_supported_lab` rather than `load_lab` (the
+    // Alpha-only reader every other test in this file uses). The
+    // section's own validation rules are exercised in
+    // `admissionlab-gateway`'s `tests/migration_model.rs`, against the
+    // re-exports Tasks 8.4-8.5 will consume; what is asserted here is
+    // that the checked-in document parses, validates and resolves at all
+    // — the same guard `gateway-valid.yaml` has.
+    let path = testdata_config("migration-valid.yaml");
+    let resolved = admissionlab_spec::load_any_supported_lab(&path)
+        .expect("migration-valid.yaml must load and resolve");
+
+    let migration = resolved
+        .migration
+        .expect("migration-valid.yaml declares a migration suite");
+    assert_eq!(migration.cases.len(), 2);
+    // Path resolution is the configuration file's directory, exactly as
+    // every other path in the document.
+    let config_dir = path.parent().expect("config has a parent directory");
+    assert!(
+        migration.cases[0].baseline_ingress_manifests[0].starts_with(config_dir),
+        "a migration manifest path must be resolved against the configuration directory"
+    );
+    // A `migration:` section and a `gateway:` section are independent
+    // additions to a lab; this document declares only the first.
+    assert_eq!(resolved.gateway, None);
+}

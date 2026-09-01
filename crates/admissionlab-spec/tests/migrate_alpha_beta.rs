@@ -405,6 +405,7 @@ fn migration_carries_every_field_of_a_maximal_alpha_document_across() {
         policy,
         expectations_file,
         gateway,
+        migration,
     } = beta;
 
     // The one value that changes, and it is the only one.
@@ -416,6 +417,18 @@ fn migration_carries_every_field_of_a_maximal_alpha_document_across() {
     assert_eq!(candidate, alpha.candidate);
     assert_eq!(fixtures, alpha.fixtures);
     assert_eq!(expectations_file, alpha.expectations_file);
+
+    // The one Beta field with no Alpha counterpart (ROADMAP Task 8.3).
+    // `None` is not a default being invented for a required field --
+    // which is what the freeze forbids -- it is the only thing a
+    // document written against a version that has no `migration:` key
+    // could ever have meant. The destructure above is what forces this
+    // question to be asked at all: a Beta field added without an answer
+    // here is a compile error.
+    assert_eq!(
+        migration, None,
+        "v1alpha1 has no migration section, so there is nothing to carry across"
+    );
 
     assert_eq!(policy.fail_on, alpha.policy.fail_on);
     assert_eq!(policy.overrides, alpha.policy.overrides);
