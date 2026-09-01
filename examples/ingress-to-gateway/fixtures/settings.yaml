@@ -1,0 +1,21 @@
+# One admission fixture, because a lab always has an admission half.
+#
+# `fixtures.include` is required and must match at least one document: a
+# run that replayed nothing has nothing to compare, and that rule is not
+# relaxed by a `migration:` section being present. This ConfigMap is
+# deliberately the most boring object in Kubernetes -- neither side's
+# stack registers a mutating webhook that touches it, both sides admit it
+# unchanged, and it is counted `identical` in every run.
+#
+# Its purpose is to make the report honest about what this lab *is*: two
+# clusters running two entirely different routing stacks, one admission
+# corpus, and one migration suite whose finding is the point. A reader
+# who saw only the migration section might reasonably wonder whether the
+# admission half ran at all.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: migration-demo-settings
+  namespace: default
+data:
+  mode: demo

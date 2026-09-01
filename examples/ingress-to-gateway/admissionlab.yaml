@@ -1,0 +1,335 @@
+# Admission Lab's canonical Ingress-to-Gateway migration demonstration
+# (ROADMAP Task 8.8): two real Kubernetes clusters running two entirely
+# different routing stacks -- the archived community `ingress-nginx` on
+# one, NGINX Gateway Fabric on the other -- asked the same two questions
+# and answering one of them differently.
+#
+#     ./scripts/build-test-images.sh
+#     admissionlab test examples/ingress-to-gateway/admissionlab.yaml
+#
+# It creates both clusters, side-loads the echo backend into each,
+# installs `ingress-nginx` on the baseline and the Gateway API CRDs plus
+# NGINX Gateway Fabric on the candidate, replays one admission fixture
+# through each, applies the legacy `Ingress` to the baseline and the
+# paired `Gateway`/`HTTPRoute` to the candidate, sends the SAME two HTTP
+# requests through both data planes, prints a PASS/WARN/FAIL summary,
+# writes `result.json` and `report.html`, deletes both clusters, and
+# exits `1` -- because one request now reaches a different backend:
+#
+#     Migration  1 Ingress-to-Gateway case(s)
+#       legacy-echo  both sides answered the case's probes, ...
+#         critical backend_changed
+#           probe 1 (GET http://reports.ingress.admissionlab.test/legacy/reports):
+#           the Ingress reached backend "echo-b" and the Gateway reached "echo-a"
+#         info     non_portable_feature (expected)
+#           nginx.ingress.kubernetes.io/limit-rps on Ingress ... has no
+#           portable Gateway API equivalent: ...
+#
+# `crates/admissionlab-cli/tests/migration_demo.rs` runs exactly this
+# configuration end to end against real clusters, twice, and asserts the
+# finding and that the two runs produce the identical set.
+#
+# # THE THREE BEHAVIORS, and why one of each
+#
+# ROADMAP Task 8.8 Step 1 asks for a preserved behavior, an expected
+# non-portable behavior, and an unintended regression. This demo has
+# exactly one of each, and no fourth thing, so every line of the report
+# traces back to a diff a reader can hold in their head:
+#
+# | | baseline (`baseline/ingress.yaml`) | candidate (`candidate/gateway.yaml`) | reported as |
+# | --- | --- | --- | --- |
+# | PRESERVED | `migrate.…/legacy` -> `echo-a`, rewritten to `/` | same, via `PathPrefix` + a `URLRewrite` filter | nothing: no change is a claim only because both sides answered |
+# | EXPECTED NON-PORTABLE | `nginx.ingress.kubernetes.io/limit-rps` | nothing; Gateway API v1 has no rate-limit filter | `non_portable_feature`, `expected: true`, graded `info` |
+# | REGRESSION | `reports.…/legacy` -> `echo-b` | the same route, sending `echo-a` | `backend_changed`, `expected: false`, graded `critical`, exit 1 |
+#
+# # Why the regression is a BACKEND change and not a dropped rewrite
+#
+# The obvious "migration went wrong" story is a lost rewrite, and this
+# demo deliberately does not tell it. `admissionlab_gateway::migration`
+# is explicit about the limit: the comparator reads a probe's status, its
+# backend identity, and its `Location`, and an echo backend answers `200`
+# to every path -- so a rewrite that both sides deliver successfully to
+# the SAME backend is invisible to it. A demo built on one would assert
+# that a regression is detected while the tool detected nothing.
+#
+# So the rewrite is *preserved* here (and translated faithfully, which is
+# itself worth showing), and the regression is one the comparator really
+# can see: a different workload answered, and both sides said which.
+#
+# # Why the two hostnames
+#
+# Two hosts, one path, rather than one host and two paths. The reason is
+# measured and is about `ingress-nginx` rather than about migrations: an
+# `Ingress` carrying `rewrite-target` has every one of its paths emitted
+# as an nginx *regex* location, and nginx resolves those in
+# configuration order rather than by longest match. A demo whose backend
+# assertion depended on the controller template's ordering would break on
+# a patch release for a reason unrelated to what it is demonstrating.
+# `baseline/ingress.yaml`'s own header carries the full note.
+#
+# # What the two sides are
+#
+# Unlike `examples/gateway-istio/`, the two sides here are *supposed* to
+# differ -- that is what a migration is. What is held equal is
+# everything that is not the migration:
+#
+# | | baseline | candidate |
+# | --- | --- | --- |
+# | Kubernetes | 1.36.4 | 1.36.4 |
+# | echo backends | `echo-a`, `echo-b` in `admissionlab-migration-demo` | identical |
+# | routing stack | community `ingress-nginx` chart 4.15.1 (ARCHIVED) | Gateway API v1.5.1 + NGINX Gateway Fabric 2.6.7 |
+# | probes | the same two, sent through both data planes | the same two |
+#
+# **The baseline stack is archived upstream and is installed only to
+# test migrations away from it.** See
+# `recipes/ingress-nginx-legacy/README.md` for the retirement dates and
+# for Admission Lab's stance; nothing here is a recommendation to deploy
+# it.
+apiVersion: admissionlab.io/v1beta1
+kind: Lab
+
+baseline:
+  kubernetes: "1.36.4"
+  # The deterministic echo backend, built from this repository and never
+  # pushed to a registry. `baseline/ingress.yaml` references it with
+  # `imagePullPolicy: IfNotPresent`, so the node has to already have it:
+  # `admissionlab test` side-loads it into this side's cluster right
+  # after creating it and before the first component is installed.
+  #
+  # Build it into your own Docker image store first:
+  #
+  #     ./scripts/build-test-images.sh
+  #
+  images:
+    - admissionlab-echo:dev
+  components:
+    # The archived community `ingress-nginx`, exactly as
+    # `recipes/ingress-nginx-legacy/recipe.yaml` certifies it: same
+    # chart, same repository, same pinned final release (4.15.1 /
+    # controller 1.15.1), same namespace, and the same `repoName` --
+    # required here, because `chart`'s own `ingress-nginx/ingress-nginx`
+    # prefix names the alias `helm repo add` registers and the default
+    # would be this component's name.
+    #
+    # THE COMPONENT NAME IS LOAD-BEARING. The Helm release name defaults
+    # to it, and this chart names every object it creates after the
+    # release -- so `ingress-nginx-legacy` is what makes the readiness
+    # gate below, and `migration.baseline.gatewayEndpoint`'s
+    # `ingress-nginx-legacy-controller`, name real objects.
+    - name: ingress-nginx-legacy
+      version: "4.15.1"
+      install:
+        type: helm
+        chart: ingress-nginx/ingress-nginx
+        repo: https://kubernetes.github.io/ingress-nginx
+        repoName: ingress-nginx
+        version: "4.15.1"
+        namespace: ingress-nginx-legacy
+      readiness:
+        # The controller itself. Measured on `kind` at Kubernetes 1.36.4
+        # for Task 8.2: `helm upgrade --install` returned after 22.5 s
+        # and this Deployment reported `Available=True` 7.6 s later.
+        - type: deploymentAvailable
+          namespace: ingress-nginx-legacy
+          name: ingress-nginx-legacy-controller
+        # The validating admission webhook is registered, with its CA
+        # bundle injected by the chart's two Helm hook Jobs. Not
+        # decoration: its `failurePolicy` is `Fail`, so applying this
+        # demo's `Ingress` before the bundle landed would be rejected for
+        # a TLS error rather than admitted -- which would make the
+        # baseline half of the comparison a failure with a misleading
+        # cause.
+        - type: webhookConfigurationPresent
+          name: ingress-nginx-legacy-admission
+
+candidate:
+  kubernetes: "1.36.4"
+  images:
+    - admissionlab-echo:dev
+  components:
+    # 1. The Gateway API itself, exactly as
+    #    `recipes/nginx-gateway-fabric/gateway-api-crds.yaml` certifies
+    #    it: the vendored v1.5.1 standard-channel bundle, byte-identical
+    #    to the upstream release and to the copy `recipes/istio-gateway/`
+    #    carries (both digests are pinned by
+    #    `crates/admissionlab-recipes/tests/nginx_gateway_recipe.rs`).
+    #    NGF's own documentation requires it to be installed first.
+    #
+    #    `Established` is the condition that means the API server is
+    #    actually serving a resource, not merely that the CRD object was
+    #    accepted. One check per kind this demo creates.
+    - name: gateway-api-crds
+      version: "1.5.1"
+      install:
+        type: manifests
+        paths:
+          - ../../recipes/nginx-gateway-fabric/gateway-api/standard-install-v1.5.1.yaml
+      readiness:
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: gatewayclasses.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: gateways.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+        - type: customResourceCondition
+          apiVersion: apiextensions.k8s.io/v1
+          kind: CustomResourceDefinition
+          name: httproutes.gateway.networking.k8s.io
+          conditionType: Established
+          status: "True"
+
+    # 2. NGINX Gateway Fabric, exactly as
+    #    `recipes/nginx-gateway-fabric/recipe.yaml` certifies it: the
+    #    same OCI chart reference, the same pin, the same namespace.
+    #
+    #    `repoName` is deliberately unset -- no `helm repo add` runs for
+    #    an OCI chart, because such a reference locates itself.
+    #
+    #    THE COMPONENT NAME IS LOAD-BEARING here too: the Helm release
+    #    name defaults to it and the chart names its control-plane
+    #    Deployment after the release, so `nginx-gateway-fabric` is what
+    #    makes the first readiness check below name a real object.
+    #
+    #    The last check is the strongest and the reason the others are
+    #    not enough: `GatewayClass/nginx` reaching `Accepted=True` proves
+    #    NGF's controller is running and reconciling Gateway API objects
+    #    on this cluster, which no Deployment condition can establish.
+    - name: nginx-gateway-fabric
+      version: "2.6.7"
+      install:
+        type: helm
+        chart: oci://ghcr.io/nginx/charts/nginx-gateway-fabric
+        repo: oci://ghcr.io/nginx/charts
+        version: "2.6.7"
+        namespace: nginx-gateway
+      readiness:
+        - type: deploymentAvailable
+          namespace: nginx-gateway
+          name: nginx-gateway-fabric
+        - type: customResourceCondition
+          apiVersion: gateway.networking.k8s.io/v1
+          kind: GatewayClass
+          name: nginx
+          conditionType: Accepted
+          status: "True"
+
+fixtures:
+  # Rooted at this file's own directory, and matched only inside
+  # `fixtures/`. `baseline/` and `candidate/` are therefore structurally
+  # unreachable from here -- which matters: a migration manifest
+  # discovered as an admission fixture would be replayed through a
+  # server-side dry-run CREATE, which is exactly the execution mode a
+  # persisted routing object must not be put through.
+  include:
+    - "fixtures/*.yaml"
+
+migration:
+  # WHERE EACH SIDE'S DATA PLANE IS. Two blocks, not one, and the
+  # asymmetry is structural rather than incidental:
+  #
+  #   - an `Ingress` controller is ONE SHARED data plane. Every `Ingress`
+  #     on the cluster, in every namespace, is served by this one
+  #     `Service` in the controller's own namespace, so there is no
+  #     per-object Service to name and nothing to substitute.
+  #   - a Gateway API implementation provisions ONE SERVICE PER
+  #     `Gateway`, in the Gateway's own namespace, so the candidate's
+  #     strategy must be templated on the Gateway being probed.
+  #
+  # Both blocks are copied from the recipes that certify each stack
+  # (`recipes/ingress-nginx-legacy/recipe.yaml` and
+  # `recipes/nginx-gateway-fabric/recipe.yaml`); `admissionlab.yaml` has
+  # no recipe resolution, so a lab that hand-writes how a stack is
+  # installed spells out where its data plane is too -- exactly as
+  # `examples/gateway-istio/` does for its own `gateway:` section.
+  baseline:
+    gatewayEndpoint:
+      type: serviceByName
+      namespace: ingress-nginx-legacy
+      name: ingress-nginx-legacy-controller
+      # REQUIRED, not optional-and-omitted: the Service exposes `http`/80
+      # and `https`/443, so with neither `portName` nor `port` set the
+      # resolver has two candidates and reports the port as unresolvable
+      # rather than picking one. By NAME rather than by number, so a
+      # values override that moved the port still resolves.
+      portName: http
+  candidate:
+    gatewayEndpoint:
+      type: serviceBySelector
+      namespace: "{gatewayNamespace}"
+      selector:
+        # Gateway API's own documented "gateway infrastructure label",
+        # which NGF applies because upstream specifies it. Selecting on
+        # the standard label rather than on NGF's `<gateway>-nginx` name
+        # convention is the more durable of the two.
+        gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+      # NEITHER `portName` NOR `port`, and that is a finding rather than
+      # an omission: NGF's provisioned Service exposes exactly the
+      # Gateway's listener ports and names each one `port-<number>` --
+      # derived from the port, not chosen by the vendor -- so there is no
+      # vendor-stable name to select on. This Gateway declares one
+      # listener, which the resolver's single-port rule resolves
+      # unambiguously. See `recipes/nginx-gateway-fabric/recipe.yaml`.
+
+  cases:
+    - id: legacy-echo
+      # THE PAIRING, WRITTEN BY A PERSON. Neither list is generated from
+      # the other, and that is the design rather than a limitation --
+      # `admissionlab_gateway::migration` explains why a self-converting
+      # suite would report "no behavior change" for exactly the mistakes
+      # it exists to catch.
+      baselineIngressManifests:
+        - baseline/ingress.yaml
+      candidateGatewayManifests:
+        - candidate/gateway.yaml
+
+      # THE SAME TWO REQUESTS, SENT THROUGH BOTH DATA PLANES. Each
+      # contract describes what the BASELINE does today -- that is what
+      # "the behavior being migrated" means -- and the candidate is
+      # observed answering the same request, whatever it answers.
+      probes:
+        # PRESERVED. Both sides route this host and path to `echo-a`.
+        - host: migrate.ingress.admissionlab.test
+          # A non-root path, so the rewrite both sides perform is doing
+          # something rather than being a no-op.
+          path: /legacy/health
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-a
+        # THE REGRESSION. The baseline answers this from `echo-b`; the
+        # candidate's single-rule `HTTPRoute` answers it from `echo-a`.
+        # Both answer `200`, both reconcile cleanly, and no condition,
+        # status or manifest diff says anything is wrong -- only the
+        # observed backend identity does.
+        - host: reports.ingress.admissionlab.test
+          path: /legacy/reports
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-b
+
+      # THE ONE DIFFERENCE THIS TEAM HAS ALREADY ACCEPTED, in writing.
+      #
+      # A feature name (the annotation key, verbatim -- the exact string
+      # `admissionlab_gateway::NONPORTABLE_INGRESS_ANNOTATIONS` catalogs)
+      # and a human sentence saying what the migration does instead.
+      # Without this entry the run would report the same finding as an
+      # unexpected `non_portable_feature` and grade it `warning`; with
+      # it, the finding stays visible and is graded `info`.
+      #
+      # Deliberately NOT `expectations.yaml`: that file selects on
+      # `SemanticChangeKind`, the closed set of *admission* differences,
+      # and a non-portability is a fact about an `Ingress` rather than
+      # about a diff. It is also permanent where a regression expectation
+      # is transient -- `limit-rps` does not become portable later.
+      expectedNonportable:
+        - feature: nginx.ingress.kubernetes.io/limit-rps
+          reason: >-
+            Rate limiting moves to the platform's shared edge proxy,
+            which already enforces a per-tenant budget; Gateway API v1
+            defines no rate-limit filter, so nothing in the HTTPRoute can
+            express it and nothing should try.

@@ -132,11 +132,11 @@ use admissionlab_core::{
 };
 use admissionlab_gateway::{
     GatewayCaseResult, GatewayEndpoint, GatewayEndpointResolver, GatewayEndpointStrategy,
-    GatewayError, GatewayIdentity, HttpProbeContract, HttpProbeResult, IngressCaseResult,
-    KubeGatewayEndpointResolver, MigrationBehaviorChange, MigrationBehaviorKind, MigrationCaseSpec,
-    MigrationSuiteSpec, PlannedObject, RouteContract, apply_gateway_manifests,
-    compare_migration_case, describe_probe_request, execute_http_probe, migration_comparability,
-    plan_gateway_apply, probe_matches_contract, run_ingress_case, start_service_port_forward,
+    GatewayError, GatewayIdentity, HttpProbeResult, IngressCaseResult, KubeGatewayEndpointResolver,
+    MigrationBehaviorChange, MigrationBehaviorKind, MigrationCaseSpec, MigrationSuiteSpec,
+    PlannedObject, RouteContract, apply_gateway_manifests, compare_migration_case,
+    describe_probe_request, execute_http_probe, migration_comparability, plan_gateway_apply,
+    probe_matches_contract, run_ingress_case, start_service_port_forward,
     unmatched_nonportable_expectations,
 };
 use admissionlab_policy::{PolicyDisposition, Severity};
@@ -176,6 +176,13 @@ pub const APPLIED_ARTIFACT: &str = "applied.json";
 /// route contract, and answering with a migration case would be a
 /// different subject under the same name.
 pub const DIAGNOSTIC_MIGRATION_PROBE_SKIPPED: &str = "migration.probe_skipped";
+
+/// The diagnostic code for a migration case whose candidate route
+/// reconciled, and was probed, and answered nothing.
+///
+/// Distinct from [`DIAGNOSTIC_MIGRATION_PROBE_SKIPPED`] on purpose --
+/// see [`not_serving_diagnostic`] for why the two are different facts.
+pub const DIAGNOSTIC_MIGRATION_NOT_SERVING: &str = "migration.not_serving";
 
 /// How long the candidate side's route gets to reconcile.
 ///
@@ -453,12 +460,27 @@ impl KubeMigrationSuite {
                          {error}"
                     ))
                 })?;
-            (
-                self.probe_candidate(cluster, case, &endpoint)
-                    .await
-                    .map_err(&fail)?,
-                Vec::new(),
-            )
+            match self
+                .probe_candidate(cluster, case, &endpoint)
+                .await
+                .map_err(&fail)?
+            {
+                Settled::Round(probes) => (probes, Vec::new()),
+                // The route reconciled, a forward opened, and the data
+                // plane still answered nothing within the budget. That
+                // is not a migration finding -- `migration_comparability`
+                // reports it as `candidate_not_serving` and the case
+                // becomes inconclusive -- so what it needs is a reason,
+                // in the one place every renderer already shows one.
+                Settled::Nothing(reason) => (
+                    Vec::new(),
+                    vec![not_serving_diagnostic(
+                        &case.id,
+                        &endpoint.to_string(),
+                        &reason,
+                    )],
+                ),
+            }
         };
 
         let result = GatewayCaseResult {
@@ -472,44 +494,185 @@ impl KubeMigrationSuite {
         Ok((result, diagnostics))
     }
 
-    /// Opens one port-forward, probes in rounds until the case's
-    /// contracts are met or the budget is gone, and closes the forward on
-    /// **every** path.
+    /// Probes the candidate's data plane in rounds until the case's
+    /// contracts are met or the budget is gone, and reports the last
+    /// complete round.
+    ///
+    /// Read this module's "THE ONE DELIBERATE WAIT" for what this loop
+    /// can and cannot do. What is decided *here* is one thing, and it is
+    /// the one this function exists for:
+    ///
+    /// # THE FINDING: a fresh port-forward per round, not one for the
+    /// # whole wait
+    ///
+    /// `crate::pipeline::gateway::KubeGatewaySuite::probe_all` opens one
+    /// forward for all of a contract's probes, and
+    /// `admissionlab_gateway::ingress::probe_case` opens one for all of
+    /// its rounds. Both are right for what they forward to: a Gateway
+    /// suite probes immediately after a readiness gate the user
+    /// declared, and an `Ingress` controller's data plane is one stable
+    /// `Deployment` the component install already waited on.
+    ///
+    /// A migration's candidate has neither. Its data plane is
+    /// *provisioned by the implementation* in response to the `Gateway`
+    /// this very case just applied, so it is coming up while this loop
+    /// runs, and it can be replaced while it settles. Two failures were
+    /// measured on real Kubernetes 1.36.4 `kind` clusters running NGINX
+    /// Gateway Fabric 2.6.7, and both are what this shape answers:
+    ///
+    /// 1. **The forward cannot be opened yet.** NGF publishes
+    ///    `Programmed=True` when it has *started* the data plane it
+    ///    provisioned, not when the resulting `Pod` is running, so
+    ///    `kubectl` exits `1` with `unable to forward port because pod
+    ///    is not running. Current status=Pending` — **before announcing
+    ///    a local port**, so a round loop inside the forward never gets
+    ///    to run at all.
+    /// 2. **The forward is opened and then dies.** A `kubectl
+    ///    port-forward` is attached to one `Pod`; when that `Pod` is
+    ///    replaced, `kubectl` exits and the local socket stops
+    ///    listening. Every subsequent probe then gets `Connection
+    ///    refused` from `127.0.0.1`, for the whole budget, and the run
+    ///    reports "the Gateway stack answered none of this case's
+    ///    probes" about a data plane that is serving perfectly. Measured
+    ///    exactly that way: 22 rounds, 110 seconds, every probe refused,
+    ///    against a cluster that answered `curl` on the first try
+    ///    afterwards.
+    ///
+    /// Re-opening per round costs one `kubectl` spawn per round, which
+    /// is real and is the price of the loop being able to recover from
+    /// (2) at all. It buys the property that matters: **no round's
+    /// result depends on a process started for an earlier round.**
+    ///
+    /// # Errors
+    ///
+    /// A probe that cannot be turned into a request, or whose response
+    /// is too large to hash, is returned immediately: neither becomes
+    /// true by waiting. So is a forward that could not be *closed*,
+    /// because a leaked `kubectl` per round is exactly what this shape
+    /// must not produce. A forward that could not be *opened*, and a
+    /// probe that simply got no answer, are ordinary "not serving yet"
+    /// observations and are retried.
+    async fn probe_candidate(
+        &self,
+        cluster: &ClusterHandle,
+        case: &MigrationCaseSpec,
+        endpoint: &GatewayEndpoint,
+    ) -> Result<Settled, String> {
+        let deadline = Instant::now() + MIGRATION_SERVING_TIMEOUT;
+        let mut last_complete: Option<Vec<HttpProbeResult>> = None;
+        let mut unanswered: Option<String> = None;
+        let mut rounds: u32 = 0;
+
+        loop {
+            rounds = rounds.saturating_add(1);
+            match self.probe_round(cluster, case, endpoint).await? {
+                Round::Complete(round) => {
+                    if round
+                        .iter()
+                        .zip(case.probes.iter())
+                        .all(|(result, contract)| probe_matches_contract(result, contract))
+                    {
+                        return Ok(Settled::Round(round));
+                    }
+                    last_complete = Some(round);
+                }
+                Round::Unanswered(reason) => unanswered = Some(reason),
+            }
+
+            if Instant::now() + MIGRATION_REPROBE_INTERVAL >= deadline {
+                return Ok(match last_complete {
+                    Some(round) => Settled::Round(round),
+                    None => Settled::Nothing(format!(
+                        "after {rounds} round(s) of probing within \
+                         {MIGRATION_SERVING_TIMEOUT:?}, no round was answered in full; the last \
+                         one said: {}",
+                        unanswered.unwrap_or_else(|| "(nothing was attempted)".to_owned())
+                    )),
+                });
+            }
+            tokio::time::sleep(MIGRATION_REPROBE_INTERVAL).await;
+        }
+    }
+
+    /// One round: open a forward, send every probe once, close the
+    /// forward.
     ///
     /// The close is deliberately not behind a `?`, for the reason
     /// `crate::pipeline::gateway::KubeGatewaySuite::probe_all`
     /// documents: `PortForwardHandle::close` consumes the handle, so the
     /// only way to hold one across a fallible call and still close it is
     /// to keep both results and combine them afterwards.
-    async fn probe_candidate(
+    ///
+    /// A round is kept only when it is **complete** -- every probe
+    /// answered. That is the same "complete or empty" rule
+    /// `admissionlab_gateway::ingress` documents for its own results, and
+    /// for the same reason: `compare_migration_case` pairs `probes[i]`
+    /// with the baseline's `probes[i]`, so a short round would compare
+    /// probe 1 against probe 2 and report a routing difference no
+    /// cluster produced.
+    async fn probe_round(
         &self,
         cluster: &ClusterHandle,
         case: &MigrationCaseSpec,
         endpoint: &GatewayEndpoint,
-    ) -> Result<Vec<HttpProbeResult>, String> {
-        let forward = start_service_port_forward(self.spawner.as_ref(), cluster, endpoint)
-            .await
-            .map_err(|error| {
-                format!("a port-forward to {endpoint} could not be started: {error}")
-            })?;
-        let sent = probe_until_settled(
-            forward.local_addr,
-            &case.probes,
-            Instant::now() + MIGRATION_SERVING_TIMEOUT,
-        )
-        .await;
-        let closed = forward.close().await;
+    ) -> Result<Round, String> {
+        let forward =
+            match start_service_port_forward(self.spawner.as_ref(), cluster, endpoint).await {
+                Ok(forward) => forward,
+                Err(error) => {
+                    return Ok(Round::Unanswered(format!(
+                        "no port-forward to {endpoint} could be started: {error}"
+                    )));
+                }
+            };
 
-        match (sent, closed) {
-            (Ok(probes), Ok(())) => Ok(probes),
-            (Err(error), _) => Err(format!(
-                "a traffic probe through {endpoint} failed: {error}"
-            )),
-            (Ok(_), Err(close)) => Err(format!(
+        let mut round = Vec::with_capacity(case.probes.len());
+        let mut unanswered: Option<Result<String, GatewayError>> = None;
+        for (index, contract) in case.probes.iter().enumerate() {
+            match execute_http_probe(forward.local_addr, contract).await {
+                Ok(result) => round.push(result),
+                // No answer at all is "not serving yet" at this
+                // altitude, exactly as `admissionlab_gateway::ingress`'s
+                // own loop treats it -- but *why* is kept, because a
+                // candidate that never answered has to be able to say so
+                // (Global Constraint 15).
+                Err(error @ GatewayError::ProbeUnavailable { .. }) => {
+                    unanswered = Some(Ok(format!(
+                        "probe {index} ({}) got no answer: {error}",
+                        describe_probe_request(contract)
+                    )));
+                    break;
+                }
+                Err(other) => {
+                    unanswered = Some(Err(other));
+                    break;
+                }
+            }
+        }
+
+        let closed = forward.close().await;
+        if let Err(close) = closed {
+            return Err(format!(
                 "the port-forward to {endpoint} could not be closed: {close}"
+            ));
+        }
+        match unanswered {
+            None => Ok(Round::Complete(round)),
+            Some(Ok(reason)) => Ok(Round::Unanswered(reason)),
+            Some(Err(error)) => Err(format!(
+                "a traffic probe through {endpoint} failed: {error}"
             )),
         }
     }
+}
+
+/// What one round of [`KubeMigrationSuite::probe_round`] produced.
+enum Round {
+    /// Every probe answered, in contract order.
+    Complete(Vec<HttpProbeResult>),
+    /// At least one probe was not answered -- or no forward could be
+    /// opened at all -- with the reason.
+    Unanswered(String),
 }
 
 #[async_trait]
@@ -835,67 +998,52 @@ fn side_strategy(
     })
 }
 
-/// Sends every probe once per round until they all match their contracts
-/// or `deadline` passes, and returns the last **complete** round.
+/// What [`KubeMigrationSuite::probe_candidate`] concluded.
 ///
-/// Read this module's "THE ONE DELIBERATE WAIT" before changing
-/// anything here: the loop's early exit is "the candidate reproduced the
-/// baseline's contracted behavior", so it can never wait a persistent
-/// regression away, and the round it finally returns is what the
-/// candidate was still doing when the budget ran out.
-///
-/// A round is kept only when it is complete — every probe answered.
-/// That is the same "complete or empty" rule
-/// `admissionlab_gateway::ingress` documents for its own results, and
-/// for the same reason: `compare_migration_case` pairs `probes[i]` with
-/// the baseline's `probes[i]`, so a short round would compare probe 1
-/// against probe 2 and report a routing difference no cluster produced.
-///
-/// # Errors
-///
-/// A probe that cannot be turned into a request, or whose response is
-/// too large to hash, is returned immediately: neither becomes true by
-/// waiting. A probe that simply got no answer is treated as "not serving
-/// yet" and retried, exactly as
-/// `admissionlab_gateway::ingress`'s own loop treats it.
-async fn probe_until_settled(
-    local_addr: std::net::SocketAddr,
-    contracts: &[HttpProbeContract],
-    deadline: Instant,
-) -> Result<Vec<HttpProbeResult>, GatewayError> {
-    let mut last_complete: Option<Vec<HttpProbeResult>> = None;
-    loop {
-        let mut round = Vec::with_capacity(contracts.len());
-        let mut answered_all = true;
-        for contract in contracts {
-            match execute_http_probe(local_addr, contract).await {
-                Ok(result) => round.push(result),
-                Err(GatewayError::ProbeUnavailable { .. }) => {
-                    answered_all = false;
-                    break;
-                }
-                Err(other) => return Err(other),
-            }
-        }
+/// Two variants rather than a possibly-empty `Vec`, because the failing
+/// side carries the diagnosis and a `None` would throw away the one
+/// thing a user needs -- the same shape, for the same reason,
+/// `admissionlab_gateway::ingress`'s own `Served` enum takes.
+enum Settled {
+    /// One complete round, every probe answered. It may or may not
+    /// match the case's contracts; a round that did not match, after
+    /// the whole budget, **is** the finding.
+    Round(Vec<HttpProbeResult>),
+    /// No round was ever answered in full, with the reason the last
+    /// attempt gave.
+    Nothing(String),
+}
 
-        if answered_all {
-            let matched = round
-                .iter()
-                .zip(contracts.iter())
-                .all(|(result, contract)| probe_matches_contract(result, contract));
-            if matched {
-                return Ok(round);
-            }
-            last_complete = Some(round);
-        }
-
-        if Instant::now() + MIGRATION_REPROBE_INTERVAL >= deadline {
-            // An empty vector when no round ever completed, which
-            // `migration_comparability` reads as `candidate_not_serving`
-            // -- the honest claim, and never a fabricated result.
-            return Ok(last_complete.unwrap_or_default());
-        }
-        tokio::time::sleep(MIGRATION_REPROBE_INTERVAL).await;
+/// The run-level diagnostic for a candidate whose data plane answered
+/// none of the case's probes.
+///
+/// The migration twin of `admissionlab_gateway::ingress`'s
+/// [`DIAGNOSTIC_INGRESS_NOT_SERVING`], and separate from
+/// [`skip_diagnostic`] because the two are different facts: a *skip* is
+/// "the route never reached a state a request could be sent through, and
+/// here is the condition", while this is "the route did reach that state
+/// and nothing answered anyway". Reporting either as the other would
+/// point a reader at the wrong half of the stack.
+///
+/// [`DIAGNOSTIC_INGRESS_NOT_SERVING`]: admissionlab_gateway::DIAGNOSTIC_INGRESS_NOT_SERVING
+fn not_serving_diagnostic(case_id: &str, endpoint: &str, reason: &str) -> Diagnostic {
+    let mut context = BTreeMap::new();
+    context.insert("case".to_owned(), RedactedValue::Public(case_id.to_owned()));
+    context.insert(
+        "side".to_owned(),
+        RedactedValue::Public(Side::Candidate.to_string()),
+    );
+    context.insert(
+        "endpoint".to_owned(),
+        RedactedValue::Public(endpoint.to_owned()),
+    );
+    Diagnostic {
+        code: DIAGNOSTIC_MIGRATION_NOT_SERVING.to_owned(),
+        message: format!(
+            "the Gateway stack never answered migration case {case_id:?}'s probes, so no \
+             candidate traffic evidence was recorded for it; {reason}"
+        ),
+        context,
     }
 }
 

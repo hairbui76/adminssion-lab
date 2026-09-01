@@ -1,0 +1,306 @@
+# THE CANDIDATE: what this team intends to replace the baseline with.
+#
+# The Gateway API objects a person (or `ingress2gateway`, or a vendor's
+# migration guide) wrote to reproduce `../baseline/ingress.yaml`'s
+# behavior on NGINX Gateway Fabric. **Written by hand, never generated
+# from the baseline** -- see `admissionlab_gateway::migration`'s "Admission
+# Lab converts nothing, and that is the design" for why a suite that
+# generated this file could not detect its own mistakes.
+#
+# Applied to the CANDIDATE cluster by the migration suite, which is why
+# it carries its own `Namespace`, `Service`s and `Deployment`s -- the
+# same objects the baseline side gets, in the same namespace, with the
+# same names. That is deliberate: holding the *backends* identical is
+# what makes a difference in which one answered a statement about the
+# ROUTING rather than about the workloads.
+#
+# # What it gets right, and the one thing it gets wrong
+#
+# Right:
+#
+#   - the `/legacy` prefix match, and the rewrite to `/` -- expressed
+#     with Gateway API's own `URLRewrite` filter, which is the portable
+#     equivalent of `nginx.ingress.kubernetes.io/rewrite-target` and is
+#     why that annotation is deliberately absent from the non-portable
+#     catalog;
+#   - both hostnames, so the route really does accept the second host.
+#
+# Wrong, and THIS IS THE POINT OF THE DEMO: the baseline served those two
+# hostnames from two DIFFERENT backends, and this route has one rule with
+# one `backendRefs`. Every request to either host reaches `echo-a`. It is
+# the mistake that hides best -- the route is `Accepted`, its refs
+# resolve, its data plane is `Programmed`, and every probe gets an
+# ordinary `200`. Nothing in a status, a condition or a manifest diff says
+# anything is wrong. Only the *observed backend identity* does, which is
+# exactly what a migration suite is for.
+#
+# # No vendor object, and that is a finding
+#
+# There is no `NginxProxy` and no
+# `Gateway.spec.infrastructure.parametersRef` here. NGF provisions its
+# data-plane `Service` as `type: LoadBalancer`, and on `kind` that
+# Service's external address stays `<pending>` forever -- but NGF reports
+# `Programmed=True` regardless, because its `Programmed` is a statement
+# about the data plane it started rather than about an address having
+# been assigned. (Istio's is not, which is why
+# `examples/gateway-istio/` must carry a `ConfigMap` override to work on
+# `kind` at all.) Measured for ROADMAP Task 8.1; see
+# `fixtures/gateway/portable/gateway-nginx.yaml`'s own header.
+#
+# The `kubectl port-forward` the probes run through is unaffected either
+# way: it targets the Service's own ports on its ClusterIP, which a
+# `LoadBalancer` Service has just as much as a `ClusterIP` one does.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# The same two echo backends the baseline side gets, in the same
+# namespace and under the same names. Identical workloads on both sides
+# is what makes "a different backend answered" a statement about routing.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-a
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# `echo-b` exists on this side too, and is never routed to. That is the
+# regression stated structurally: the workload the baseline served is
+# still running, and the new routing simply stops sending anything to it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-b
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: lab-gateway
+  namespace: admissionlab-migration-demo
+spec:
+  # NGF's own default class name, created by the chart with controller
+  # `gateway.nginx.org/nginx-gateway-controller`. Same value
+  # `fixtures/gateway/nginx/*.yaml` and the portable NGF overlay use.
+  gatewayClassName: nginx
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      # No `hostname` on the listener: it accepts any authority, and the
+      # ROUTE is what narrows it. Keeping the hostname decision in one
+      # object means an unexpected 404 has exactly one place to look --
+      # and in this demo the hostnames are the whole subject.
+      allowedRoutes:
+        namespaces:
+          from: Same
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: echo-route
+  namespace: admissionlab-migration-demo
+spec:
+  parentRefs:
+    - name: lab-gateway
+      # Named rather than left to default: the Gateway declares exactly
+      # one listener today, and stating it means adding a second one
+      # later cannot silently make this route's parent status ambiguous.
+      sectionName: http
+  hostnames:
+    # BOTH hostnames the baseline served. The route genuinely accepts
+    # the second one -- which is why the regression below produces a
+    # `200` from the wrong backend rather than a `404`, and why a
+    # comparison of manifests, statuses or conditions would find nothing.
+    - migrate.ingress.admissionlab.test
+    - reports.ingress.admissionlab.test
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /legacy
+      filters:
+        # The portable translation of the baseline's
+        # `nginx.ingress.kubernetes.io/rewrite-target: /`.
+        # `ReplacePrefixMatch` replaces exactly the prefix that matched,
+        # so `/legacy/health` reaches the backend as `/health` and
+        # `/legacy` as `/`.
+        #
+        # A NOTE ON WHAT THIS DEMO CAN AND CANNOT SEE. The rewrite is
+        # preserved here, and the run does not *prove* that: an echo
+        # backend answers `200` to every path, and
+        # `admissionlab_gateway::HttpProbeResult` -- the evidence the
+        # migration comparator reads -- carries the status, the backend
+        # identity and the response headers, but not the path the backend
+        # saw. That limit is documented in full in
+        # `admissionlab_gateway::migration` ("What the evidence can and
+        # cannot show"), and it is why this demo's regression is one the
+        # comparator CAN see: a different backend, not a dropped rewrite.
+        - type: URLRewrite
+          urlRewrite:
+            path:
+              type: ReplacePrefixMatch
+              replacePrefixMatch: /
+      backendRefs:
+        # THE REGRESSION. One backend for two hostnames, where the
+        # baseline had one each. Nothing else in this file is wrong.
+        - name: echo-a
+          port: 80

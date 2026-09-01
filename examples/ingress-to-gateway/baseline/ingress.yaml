@@ -1,0 +1,319 @@
+# THE BASELINE: what this team runs today.
+#
+# One legacy `Ingress`, served by the pinned community `ingress-nginx`
+# release (`recipes/ingress-nginx-legacy/`), routing two hostnames to two
+# different echo backends with a rewrite. This is the *definition* of the
+# behavior the migration has to preserve -- not a proposal, not a target.
+# Nothing here is generated from `../candidate/gateway.yaml`, and nothing
+# there is generated from this: `admissionlab_gateway::migration` explains
+# at length why a suite that converted one side into the other could
+# never detect its own converter's mistakes.
+#
+# Applied to the BASELINE cluster by the migration suite (not by a
+# component), which is why it carries its own `Namespace` and its own
+# copies of the echo backends.
+#
+# # The three behaviors this file establishes
+#
+#   1. `migrate.ingress.admissionlab.test/legacy/...` -> `echo-a`,
+#      with the request rewritten to `/`.
+#   2. `reports.ingress.admissionlab.test/legacy/...` -> `echo-b`,
+#      with the same rewrite. A DIFFERENT backend, and the only thing
+#      that distinguishes it is the `Host` header.
+#   3. `nginx.ingress.kubernetes.io/limit-rps`, a data-plane feature with
+#      no portable Gateway API equivalent, declared in
+#      `admissionlab.yaml`'s `expectedNonportable`.
+#
+# The candidate preserves (1) and (3)'s declaration and loses (2). See
+# `admissionlab.yaml`'s header for the whole story.
+#
+# # Two hostnames rather than two paths, deliberately
+#
+# The obvious way to route two backends from one `Ingress` is two paths
+# on one host (`/legacy` and `/legacy/reports`). That was rejected here
+# for a measured reason about *this controller*: when an `Ingress`
+# carries `rewrite-target`, `ingress-nginx` emits every one of its paths
+# as an nginx **regex** location, and nginx resolves regex locations in
+# configuration order rather than by longest match. Whether the generated
+# order puts the longer path first is an implementation detail of the
+# controller's template, and a demo whose backend assertion depends on
+# one is a demo that breaks on a patch release for a reason that has
+# nothing to do with migrations.
+#
+# Two hosts have no such ambiguity: each server block holds exactly one
+# location. The rewrite is kept, because ROADMAP Task 8.8's scenario asks
+# for one and because it is the single most common thing a real
+# `Ingress` does -- it is simply no longer load-bearing for *which*
+# backend answers.
+#
+# # Apply order
+#
+# `admissionlab_gateway::apply` sorts documents into a fixed category
+# order and applies unknown kinds last, and `Ingress` is (correctly) an
+# unknown kind to it -- so the `Namespace`, the `Service`s and the
+# `Deployment`s are all persisted before the `Ingress` that needs them,
+# whatever order this file lists them in. It is nonetheless written in
+# apply order, exactly as
+# `fixtures/migration/ingress-nginx/basic-routing.yaml` is, so a reader
+# never has to know that rule to follow the file.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/part-of: admission-lab
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-a
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: echo-b
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  selector:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# The deterministic echo backend from `crates/admissionlab-echo`, which
+# answers with its own identity so a probe can say *which* workload
+# served it rather than only that something did. A namespaced copy of
+# `fixtures/gateway/backends/echo-a.yaml`, unchanged in every other
+# field -- the same trade
+# `fixtures/migration/ingress-nginx/basic-routing.yaml` documents (an
+# apply engine that applies each document to the namespace the document
+# names cannot be handed a namespace-less shared file).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-a
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-a
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-a
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-a
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-a
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The second backend, and the whole reason this demo can see a
+# regression: `echo-b` answers with `"backend": "echo-b"`, so a request
+# that reaches `echo-a` instead is a *different observed value* rather
+# than a difference in configuration that a comparator would have to
+# infer.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: echo-b
+  namespace: admissionlab-migration-demo
+  labels:
+    app.kubernetes.io/name: admissionlab-echo
+    app.kubernetes.io/instance: echo-b
+    app.kubernetes.io/part-of: admission-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: admissionlab-echo
+      app.kubernetes.io/instance: echo-b
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: admissionlab-echo
+        app.kubernetes.io/instance: echo-b
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: echo
+          image: admissionlab-echo:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: ADMISSIONLAB_BACKEND_ID
+              value: echo-b
+            - name: ADMISSIONLAB_ECHO_DELAY_MS
+              value: "0"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 64Mi
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 1
+            periodSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+---
+# The object under migration.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: echo-ingress
+  namespace: admissionlab-migration-demo
+  annotations:
+    # BEHAVIOR (3): THE EXPECTED NON-PORTABLE FEATURE.
+    #
+    # Per-client request rate limiting, enforced by the data plane.
+    # `admissionlab_gateway::NONPORTABLE_INGRESS_ANNOTATIONS` catalogs it
+    # because Gateway API v1 defines no rate-limit filter at all, so the
+    # limit is simply absent after migration unless something else
+    # provides one. `admissionlab.yaml` declares it in
+    # `expectedNonportable` with the sentence saying what happens
+    # instead, so the run reports it as `expected: true` and grades it
+    # `info` rather than warning about it.
+    #
+    # 100 requests per second, which this demo's handful of sequential
+    # probes cannot come near -- the point is the *declaration*, not a
+    # throttle. (`ingress-nginx` additionally allows a burst of five
+    # times the rate.)
+    nginx.ingress.kubernetes.io/limit-rps: "100"
+    # THE REWRITE. Every request matched by this Ingress reaches its
+    # backend as `/`.
+    #
+    # Deliberately NOT in the non-portable catalog, and that absence is
+    # the point: Gateway API's `URLRewrite` filter expresses exactly this,
+    # so `../candidate/gateway.yaml` translates it faithfully and the
+    # migration loses nothing here. A catalog that flagged
+    # `rewrite-target` would train a reader to ignore the entries that
+    # matter.
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  # Not optional with this chart's defaults: `watchIngressWithoutClass`
+  # is `false`, so an `Ingress` naming no class is ignored by this
+  # controller entirely -- silently, with no event and no status. See
+  # `fixtures/migration/ingress-nginx/basic-routing.yaml`.
+  ingressClassName: nginx
+  rules:
+    # BEHAVIOR (1): PRESERVED BY THE MIGRATION.
+    #
+    # `.test` is reserved by RFC 6761 for exactly this: a name
+    # guaranteed never to resolve in the real DNS. The probe sends it as
+    # a `Host` header over a `kubectl port-forward` to 127.0.0.1.
+    - host: migrate.ingress.admissionlab.test
+      http:
+        paths:
+          - path: /legacy
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-a
+                port:
+                  number: 80
+    # BEHAVIOR (2): THE ONE THE MIGRATION LOSES.
+    #
+    # Same path, same rewrite, DIFFERENT backend -- selected by the
+    # `Host` header alone. `../candidate/gateway.yaml`'s `HTTPRoute`
+    # accepts this hostname and then sends it to `echo-a`, which is the
+    # unintended regression this demo exists to catch. Nothing in
+    # `admissionlab.yaml` declares it, so the run reports it as an
+    # unexpected `backend_changed` and exits 1.
+    - host: reports.ingress.admissionlab.test
+      http:
+        paths:
+          - path: /legacy
+            pathType: Prefix
+            backend:
+              service:
+                name: echo-b
+                port:
+                  number: 80
