@@ -1,8 +1,9 @@
-//! How bad a behavior change is, and the Alpha default answer for every
+//! How bad a behavior change is, and the default answer for every
 //! [`SemanticChangeKind`].
 //!
-//! [`default_severity`] is the complete, frozen Alpha mapping (Task 4.8
-//! step 1, seventeen rows). It is a pure total function of the change's
+//! [`default_severity`] is the complete, frozen mapping (Task 4.8
+//! step 1's seventeen admission rows, plus Task 6.9 step 6's nine
+//! Gateway rows). It is a pure total function of the change's
 //! kind alone -- no clock, no network, no model, no per-run state
 //! (Global Constraint 7) -- so the same kind always grades the same way
 //! before a lab's own policy gets a say. [`crate::evaluate`] is what
@@ -28,7 +29,41 @@
 //! downgrades it, and Task 4.9's expectations file marks specific
 //! instances as intended without downgrading the severity at all.
 //!
-//! # Adding an eighteenth kind
+//! # The one direction exception (Task 6.9 step 6)
+//!
+//! [`default_severity`] grades a *kind*. [`default_change_severity`]
+//! grades a *change*, and differs from it in exactly one documented
+//! case, which the roadmap states in these words:
+//!
+//! > A condition change that moves from False/Unknown to True may be
+//! > downgraded to Info by the comparator because it is an improvement;
+//! > True to False is Critical. The comparator must encode direction
+//! > rather than relying on free-form reason strings.
+//!
+//! Severity is decided here, not in a comparator -- that is this crate's
+//! whole reason to exist (Global Constraint 6) -- so that sentence is
+//! split along the line this project already draws between observing and
+//! grading. The Gateway comparator establishes the *fact* (it saw
+//! `False -> True`) and encodes it as an
+//! [`admissionlab_diff::ChangeDirection`] in the change's payload;
+//! this module decides what that fact is *worth*. Neither half can do
+//! the other's work: the comparator cannot see a lab's policy, and
+//! nothing in this crate can see a `Gateway`'s conditions.
+//!
+//! The exception is deliberately narrow -- the three **condition**-change
+//! kinds the roadmap sentence is about ([`CONDITION_CHANGE_KINDS`]), and
+//! only for [`ChangeDirection::Improvement`]. In particular
+//! `backend_resolution_changed` stays [`Severity::Critical`] in both
+//! directions even though it is emitted alongside
+//! `resolved_refs_condition_changed`: a route whose backends *newly*
+//! resolve is sending traffic somewhere it did not send it before, which
+//! is a routing change to review whichever way the condition moved --
+//! the same conservatism the `newly_allowed` row records above. The
+//! traffic kinds carry no direction at all, because whether a status
+//! change is an improvement depends on a probe contract the comparator
+//! is not handed; see [`admissionlab_diff::SemanticChange::direction`].
+//!
+//! # Adding a twenty-seventh kind
 //!
 //! [`default_severity`] and [`kind_index`] share one exhaustive `match`
 //! ([`classify`]), so a new [`SemanticChangeKind`] variant is a compile
@@ -39,7 +74,7 @@
 //! (every kind's index is its actual position in `ALL_KINDS`), so the
 //! set cannot be complete-but-misordered either.
 
-use admissionlab_diff::SemanticChangeKind;
+use admissionlab_diff::{ChangeDirection, SemanticChange, SemanticChangeKind};
 use serde::Serialize;
 
 /// How bad one behavior change is.
@@ -133,7 +168,7 @@ impl Severity {
 ///
 /// Its completeness is compiler-enforced -- see this module's
 /// documentation.
-pub const ALL_KINDS: [SemanticChangeKind; 17] = [
+pub const ALL_KINDS: [SemanticChangeKind; 26] = [
     SemanticChangeKind::ObjectNewlyDenied,
     SemanticChangeKind::ObjectNewlyAllowed,
     SemanticChangeKind::ContainerAdded,
@@ -151,6 +186,27 @@ pub const ALL_KINDS: [SemanticChangeKind; 17] = [
     SemanticChangeKind::WebhookFailed,
     SemanticChangeKind::WebhookInvocationChanged,
     SemanticChangeKind::WebhookLatencyChanged,
+    SemanticChangeKind::RouteAttached,
+    SemanticChangeKind::RouteDetached,
+    SemanticChangeKind::BackendResolutionChanged,
+    SemanticChangeKind::ListenerBindingChanged,
+    SemanticChangeKind::AcceptedConditionChanged,
+    SemanticChangeKind::ResolvedRefsConditionChanged,
+    SemanticChangeKind::ProgrammedConditionChanged,
+    SemanticChangeKind::TrafficStatusChanged,
+    SemanticChangeKind::TrafficBackendChanged,
+];
+
+/// The three Gateway kinds the roadmap's improvement rule applies to --
+/// the ones that report a *condition* moving.
+///
+/// See this module's "The one direction exception" section for why the
+/// rule stops here and does not extend to `backend_resolution_changed`,
+/// `route_attached`/`route_detached`, or the traffic kinds.
+pub const CONDITION_CHANGE_KINDS: [SemanticChangeKind; 3] = [
+    SemanticChangeKind::AcceptedConditionChanged,
+    SemanticChangeKind::ResolvedRefsConditionChanged,
+    SemanticChangeKind::ProgrammedConditionChanged,
 ];
 
 /// The single exhaustive `match` behind both [`default_severity`] and
@@ -197,14 +253,60 @@ const fn classify(kind: SemanticChangeKind) -> (usize, Severity) {
         // Latency is an optional, best-effort signal that must never
         // fail a run by itself (Global Constraint 19).
         SemanticChangeKind::WebhookLatencyChanged => (16, Severity::Warning),
+        // Task 6.9 step 6's table, verbatim. A route that newly attaches
+        // is the one Gateway row that is not Critical: a parent
+        // appearing in a route's status adds a path that did not carry
+        // traffic before, which is worth seeing and is not, on its own,
+        // something breaking.
+        SemanticChangeKind::RouteAttached => (17, Severity::Info),
+        // Everything below is Critical because each one means traffic
+        // that flowed in the baseline may not flow, or may flow
+        // somewhere else, in the candidate.
+        SemanticChangeKind::RouteDetached => (18, Severity::Critical),
+        SemanticChangeKind::BackendResolutionChanged => (19, Severity::Critical),
+        SemanticChangeKind::ListenerBindingChanged => (20, Severity::Critical),
+        SemanticChangeKind::AcceptedConditionChanged => (21, Severity::Critical),
+        SemanticChangeKind::ResolvedRefsConditionChanged => (22, Severity::Critical),
+        SemanticChangeKind::ProgrammedConditionChanged => (23, Severity::Critical),
+        SemanticChangeKind::TrafficStatusChanged => (24, Severity::Critical),
+        SemanticChangeKind::TrafficBackendChanged => (25, Severity::Critical),
     }
 }
 
-/// Returns the Alpha default severity for `kind`, before any lab's own
-/// `policy.failOn` or `policy.overrides` are applied.
+/// Returns the default severity for `kind`, before any lab's own
+/// `policy.failOn` or `policy.overrides` are applied -- and before the
+/// direction exception, which needs the whole change rather than its
+/// kind (see [`default_change_severity`]).
 #[must_use]
 pub fn default_severity(kind: SemanticChangeKind) -> Severity {
     classify(kind).1
+}
+
+/// Returns the default severity for `change`: its kind's row in the
+/// table, downgraded to [`Severity::Info`] when the change is a Gateway
+/// condition change the comparator marked an improvement.
+///
+/// This is the function [`crate::ResolvedPolicy::severity_for`] layers
+/// `policy.failOn` and `policy.overrides` on top of, so a lab's own
+/// policy still has the last word in both directions: `failOn` can raise
+/// a downgraded improvement back to Critical, and an override can
+/// replace either outright.
+///
+/// Every input that is not a [`CONDITION_CHANGE_KINDS`] change carrying
+/// [`ChangeDirection::Improvement`] grades exactly as
+/// [`default_severity`] does -- including a change with no recorded
+/// direction, which is never read as an improvement (see
+/// [`SemanticChange::direction`] for the two distinct reasons a
+/// direction can be absent). Still pure and total: the direction is a
+/// value already inside the change.
+#[must_use]
+pub fn default_change_severity(change: &SemanticChange) -> Severity {
+    if CONDITION_CHANGE_KINDS.contains(&change.kind)
+        && change.direction() == Some(ChangeDirection::Improvement)
+    {
+        return Severity::Info;
+    }
+    default_severity(change.kind)
 }
 
 /// Returns `kind`'s position in [`ALL_KINDS`].

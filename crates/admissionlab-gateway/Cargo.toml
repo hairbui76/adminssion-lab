@@ -43,6 +43,20 @@ admissionlab-spec = { workspace = true }
 # (Task 6.10 and later) must use that shape. A literal `core -> gateway`
 # dependency must never be added.
 admissionlab-core = { workspace = true }
+# `diff.rs` (Task 6.9) returns `Vec<admissionlab_diff::SemanticChange>` --
+# the roadmap's own frozen signature for `diff_gateway` -- and the nine
+# Gateway kinds it emits are variants of that crate's
+# `SemanticChangeKind`. One semantic-change vocabulary is the point: a
+# Gateway regression is graded by `admissionlab-policy`, named in a
+# user's `expectations.yaml`, and rendered by every report through
+# exactly the same type an admission regression is. §1.1 does not draw
+# this arrow, but the frozen signature does -- the same argument this
+# workspace already recorded for its `diff -> admission` edge. Acyclic
+# in the only direction that matters: `admissionlab-diff` depends on
+# `admission`, `normalize`, `spec` and `core`, none of which reach back
+# here, and a `diff -> gateway` edge must never be added (the comparator
+# lives here precisely so that arrow stays absent).
+admissionlab-diff = { workspace = true }
 # `apply.rs` (Task 6.2) resolves each manifest document's
 # `apiVersion`/`kind` against the live cluster through
 # `admissionlab_fixtures::ResourceResolver`/`KubeResourceResolver`

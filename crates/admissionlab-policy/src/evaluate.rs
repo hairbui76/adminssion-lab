@@ -13,7 +13,9 @@
 //!
 //! Three layers, each overriding the one before it:
 //!
-//! 1. [`crate::severity::default_severity`] -- the frozen Alpha table.
+//! 1. [`crate::severity::default_change_severity`] -- the frozen table
+//!    ([`crate::severity::default_severity`]) plus the one documented
+//!    Gateway direction exception, which that module states in full.
 //! 2. `policy.failOn` -- naming a kind there escalates it to
 //!    [`Severity::Critical`]. `failOn` is *additive only*: it can raise
 //!    a kind's severity and can never lower one. A user asking for
@@ -79,7 +81,7 @@ use crate::error::{PolicySpecErrors, PolicyValidationError};
 use crate::expectation::{ResolvedExpectations, match_expectations};
 use crate::selector::{ChangeSelector, CompiledSelector};
 use crate::severity::severity_name_list;
-use crate::severity::{Severity, default_severity, kind_from_name, kind_name_list};
+use crate::severity::{Severity, default_change_severity, kind_from_name, kind_name_list};
 
 /// One graded behavior change.
 ///
@@ -259,7 +261,7 @@ impl ResolvedPolicy {
     /// overrides match.
     #[must_use]
     pub fn severity_for(&self, change: &SemanticChange) -> Severity {
-        let mut severity = default_severity(change.kind);
+        let mut severity = default_change_severity(change);
         if self.fail_on.contains(change.kind.as_str()) {
             severity = Severity::Critical;
         }

@@ -443,8 +443,22 @@ pub struct AdmissionComparison {
 /// [`FixtureComparison::gateway`] has a stable name to carry from the
 /// start. Gateway work cannot enter the critical path until the Alpha
 /// gate passes (Global Constraint 8), so this stays empty and that field
-/// is always `None` in Alpha; Phase 6 defines the real fields and the
-/// comparison that fills one in.
+/// is always `None` in Alpha.
+///
+/// # The real type exists; this one is Task 6.11's to replace
+///
+/// Task 6.9 landed `admissionlab_gateway::diff::GatewayCaseComparison`
+/// with §1.2's two real fields (`baseline`/`candidate`
+/// `GatewayCaseResult`) alongside the comparator that grades a pair. It
+/// is *that* type [`FixtureComparison::gateway`] must eventually carry.
+/// Swapping this one for it means adding a `report -> gateway`
+/// dependency and deciding how a Gateway case renders in each of the
+/// three renderers -- report-shaped decisions Task 6.11 owns and makes
+/// with the renderer in front of it, which is why Task 6.9 left this
+/// placeholder standing rather than reaching into this crate. Until
+/// then nothing constructs one: an empty struct here is visibly a
+/// reservation, where a hand-rolled partial copy of the real fields
+/// would be a competing synonym of exactly the kind §1.2 forbids.
 ///
 /// Left deliberately empty rather than guessing at fields no task has
 /// asked for yet, and declared under its registry name rather than as a

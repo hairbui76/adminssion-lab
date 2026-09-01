@@ -8,9 +8,28 @@
 //! own repositories. Renaming one silently breaks every such file, so
 //! each variant's wire tag is pinned with an explicit `#[serde(rename)]`
 //! rather than left to derive from the Rust identifier, and
-//! `tests/types.rs` snapshot-asserts all seventeen strings against an
+//! `tests/types.rs` snapshot-asserts all twenty-six strings against an
 //! exhaustive match (adding a variant without extending that table is a
 //! compile error, not a silently unpinned name).
+//!
+//! # Two vocabularies, one enum
+//!
+//! Seventeen of the kinds are *admission* claims, produced by this
+//! crate's own comparisons. The other nine are *Gateway* claims (ROADMAP
+//! Task 6.9), produced by `admissionlab_gateway::diff::diff_gateway`.
+//! They share one enum because they share one downstream: a
+//! `SemanticChange` is a `SemanticChange` wherever it came from, and
+//! `admissionlab-policy` grades, `expectations.yaml` names, and every
+//! renderer prints them through exactly one vocabulary. A second enum
+//! would have forced a second severity table, a second `failOn` list and
+//! a second `expectations.yaml` dialect for no gain to the person
+//! reading the report.
+//!
+//! The Gateway *comparator* still lives in `admissionlab-gateway`, not
+//! here: it compares Gateway evidence types this crate cannot see (§1.1
+//! draws no `diff -> gateway` edge, and `gateway -> diff` is the acyclic
+//! direction), so this module contributes the shared vocabulary and
+//! nothing else.
 //!
 //! # Semantic changes are not raw changes
 //!
@@ -54,7 +73,8 @@ use serde_json::Value;
 
 /// What kind of behavior difference a [`SemanticChange`] claims.
 ///
-/// The seventeen variants are the complete Alpha set. Their wire strings
+/// Seventeen variants are the complete Alpha (admission) set and nine
+/// more are Phase 6's Gateway set. Their wire strings
 /// are human-oriented `snake_case` and are **not** mechanically derived
 /// from the Rust identifiers -- four of them differ deliberately
 /// (`ObjectNewlyDenied` serializes as `newly_denied`, `ObjectNewlyAllowed`
@@ -128,6 +148,46 @@ pub enum SemanticChangeKind {
     /// more than the configured latency policy allows.
     #[serde(rename = "webhook_latency_changed")]
     WebhookLatencyChanged,
+    /// An `HTTPRoute` is attached to a parent `Gateway` on the candidate
+    /// side that it was not attached to on the baseline side -- the
+    /// parent appears in the candidate's `status.parents` and not in the
+    /// baseline's.
+    #[serde(rename = "route_attached")]
+    RouteAttached,
+    /// An `HTTPRoute` is no longer attached to a parent `Gateway` it was
+    /// attached to on the baseline side.
+    #[serde(rename = "route_detached")]
+    RouteDetached,
+    /// Whether a route's backend references resolve changed between the
+    /// two sides: exactly one side published `ResolvedRefs: True`.
+    #[serde(rename = "backend_resolution_changed")]
+    BackendResolutionChanged,
+    /// A route is attached to the same parent `Gateway` through a
+    /// different set of listeners (`parentRef.sectionName`).
+    #[serde(rename = "listener_binding_changed")]
+    ListenerBindingChanged,
+    /// An `Accepted` condition's state differs between the two sides, on
+    /// a `GatewayClass`, a `Gateway`, or one of a route's parent status
+    /// entries.
+    #[serde(rename = "accepted_condition_changed")]
+    AcceptedConditionChanged,
+    /// A route parent's `ResolvedRefs` condition state differs between
+    /// the two sides.
+    #[serde(rename = "resolved_refs_condition_changed")]
+    ResolvedRefsConditionChanged,
+    /// A `Gateway`'s `Programmed` condition state differs between the
+    /// two sides.
+    #[serde(rename = "programmed_condition_changed")]
+    ProgrammedConditionChanged,
+    /// The HTTP status one probe received through the data plane differs
+    /// between the two sides, or the candidate returned no answer at all
+    /// for a probe the baseline answered.
+    #[serde(rename = "traffic_status_changed")]
+    TrafficStatusChanged,
+    /// The same probe reached a different backend workload on the two
+    /// sides, as each backend identified itself.
+    #[serde(rename = "traffic_backend_changed")]
+    TrafficBackendChanged,
 }
 
 impl SemanticChangeKind {
@@ -162,9 +222,100 @@ impl SemanticChangeKind {
             Self::WebhookFailed => "webhook_failed",
             Self::WebhookInvocationChanged => "webhook_invocation_changed",
             Self::WebhookLatencyChanged => "webhook_latency_changed",
+            Self::RouteAttached => "route_attached",
+            Self::RouteDetached => "route_detached",
+            Self::BackendResolutionChanged => "backend_resolution_changed",
+            Self::ListenerBindingChanged => "listener_binding_changed",
+            Self::AcceptedConditionChanged => "accepted_condition_changed",
+            Self::ResolvedRefsConditionChanged => "resolved_refs_condition_changed",
+            Self::ProgrammedConditionChanged => "programmed_condition_changed",
+            Self::TrafficStatusChanged => "traffic_status_changed",
+            Self::TrafficBackendChanged => "traffic_backend_changed",
         }
     }
 }
+
+/// Which way a behavior change moved: toward the good state, or away
+/// from it.
+///
+/// ROADMAP Task 6.9 step 6: *"A condition change that moves from
+/// False/Unknown to True may be downgraded to Info by the comparator
+/// because it is an improvement; True to False is Critical. The
+/// comparator must encode direction rather than relying on free-form
+/// reason strings."*
+///
+/// This type is that encoding. It is declared here, in the shared
+/// vocabulary crate, rather than in `admissionlab-gateway`, because two
+/// crates must agree on it and neither may depend on the other: the
+/// *comparator* that knows the direction is
+/// `admissionlab_gateway::diff`, and the *grader* that acts on it is
+/// `admissionlab_policy::severity`. Both already depend on this crate,
+/// and `policy -> gateway` would drag a Phase 6 crate into Phase 4's
+/// grading path for one enum.
+///
+/// # Where it is carried
+///
+/// In the change's own [`SemanticChange::candidate`] payload, under the
+/// [`DIRECTION_KEY`] key, read back by [`SemanticChange::direction`].
+/// [`SemanticChange`]'s field list is a §1.2-frozen Alpha contract and
+/// direction is meaningful for only a handful of kinds, so it rides in
+/// the payload rather than becoming a twenty-eighth `Option` field that
+/// is `None` for every admission change ever emitted. The candidate side
+/// carries it because that is the side the transition moved *to*, and a
+/// change with no candidate payload has no transition to describe.
+///
+/// A kind whose payloads carry no direction is not "undirected by
+/// omission" -- see [`SemanticChange::direction`] for the two distinct
+/// reasons a direction can be absent.
+///
+/// Derives no `Default`: a direction exists only because a comparison
+/// determined one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ChangeDirection {
+    /// The candidate moved toward the good state -- for a Gateway
+    /// condition, to `True` from something that was not `True`.
+    #[serde(rename = "improvement")]
+    Improvement,
+    /// The candidate moved away from the good state -- for a Gateway
+    /// condition, away from a `True` the baseline published.
+    #[serde(rename = "regression")]
+    Regression,
+}
+
+impl ChangeDirection {
+    /// Returns this direction's stable wire name -- exactly the string
+    /// `serde` serializes it as (asserted in `tests/types.rs`).
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Improvement => "improvement",
+            Self::Regression => "regression",
+        }
+    }
+
+    /// Parses a direction from its wire name, exactly.
+    ///
+    /// Returns [`None`] for anything else, including a near miss: an
+    /// unrecognized direction must read as "no direction was recorded"
+    /// rather than as a guess, since the value it feeds is a severity.
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "improvement" => Some(Self::Improvement),
+            "regression" => Some(Self::Regression),
+            _ => None,
+        }
+    }
+}
+
+/// The key a [`ChangeDirection`] is carried under inside a
+/// [`SemanticChange::candidate`] payload object.
+///
+/// Public because two crates write and read it -- the Gateway
+/// comparator stamps it, `admissionlab-policy` reads it -- and a string
+/// literal duplicated across a crate boundary is exactly how the two
+/// would drift.
+pub const DIRECTION_KEY: &str = "direction";
 
 /// How well supported a [`DivergenceEvidence`] claim is.
 ///
@@ -323,6 +474,34 @@ impl SemanticChange {
     pub fn attributed_to(mut self, fixture_id: &FixtureId) -> Self {
         self.fixture_id = fixture_id.clone();
         self
+    }
+
+    /// The [`ChangeDirection`] the comparator recorded for this change,
+    /// if it recorded one.
+    ///
+    /// Reads [`DIRECTION_KEY`] out of the [`SemanticChange::candidate`]
+    /// payload, which must be a JSON object with a string value there;
+    /// anything else is [`None`]. This is the only reader -- nothing
+    /// else in the workspace may poke at that key by hand.
+    ///
+    /// # [`None`] means one of two things, and never a third
+    ///
+    /// Either the change's *kind* has no notion of direction (every
+    /// admission kind; a Gateway traffic change, whose "better" depends
+    /// on a probe contract the comparator is not handed), or the kind
+    /// has one and this particular transition did not determine it (a
+    /// Gateway condition moving `False -> Unknown` is neither toward
+    /// `True` nor away from it). It never means "this was an
+    /// improvement but nobody said so": a caller that reads [`None`]
+    /// must grade the change at its kind's default severity, which is
+    /// exactly what `admissionlab_policy::default_change_severity` does.
+    #[must_use]
+    pub fn direction(&self) -> Option<ChangeDirection> {
+        self.candidate
+            .as_ref()?
+            .get(DIRECTION_KEY)?
+            .as_str()
+            .and_then(ChangeDirection::from_name)
     }
 }
 

@@ -14,8 +14,10 @@
 //!
 //! # The pieces
 //!
-//! - [`severity`] holds [`Severity`] and the frozen seventeen-row Alpha
-//!   default table ([`default_severity`]), plus the name lookups
+//! - [`severity`] holds [`Severity`] and the frozen twenty-six-row
+//!   default table ([`default_severity`], and
+//!   [`default_change_severity`] for the one Gateway direction
+//!   exception Task 6.9 step 6 defines), plus the name lookups
 //!   (`kind_from_name`, `Severity::from_name`) that turn hand-written
 //!   configuration strings into typed values or an error.
 //! - [`selector`] holds [`ChangeSelector`] -- the §1.2 registry's
@@ -60,4 +62,7 @@ pub use expectation::{
     resolve_expectations,
 };
 pub use selector::{ChangeSelector, CompiledSelector};
-pub use severity::{ALL_KINDS, Severity, default_severity, kind_from_name, kind_index};
+pub use severity::{
+    ALL_KINDS, CONDITION_CHANGE_KINDS, Severity, default_change_severity, default_severity,
+    kind_from_name, kind_index,
+};

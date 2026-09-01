@@ -47,6 +47,13 @@
 //!   means.
 //! - [`case`] bundles Tasks 6.4 and 6.8's evidence into the
 //!   [`GatewayCaseResult`] Tasks 6.9 and 6.11 consume.
+//! - [`diff`] (Task 6.9) is the only module here that looks at *two*
+//!   sides and claims something: it turns a baseline and a candidate
+//!   [`GatewayCaseResult`] into `admissionlab_diff::SemanticChange`s.
+//!   Read its documentation before trusting an empty result -- it
+//!   explains what `converged` is not, how parents and probes are
+//!   paired, why stale evidence silences absence claims, and which half
+//!   of the direction rule belongs to `admissionlab-policy`.
 //! - [`error`] defines [`GatewayError`], this crate's one error type,
 //!   and documents where it draws the line between "the API server
 //!   refused this" and "no answer could be obtained at all".
@@ -76,6 +83,7 @@
 pub mod apply;
 pub mod case;
 pub mod conditions;
+pub mod diff;
 pub mod endpoint;
 pub mod error;
 pub mod model;
@@ -88,6 +96,11 @@ pub use apply::{
     apply_gateway_manifests, apply_gateway_plan_with_client, plan_gateway_apply,
 };
 pub use case::GatewayCaseResult;
+pub use diff::{
+    GatewayCaseComparison, GatewayComparability, GatewayEvidenceLevel, ProbePair, diff_gateway,
+    gateway_comparability, gateway_evidence_level,
+};
+
 pub use conditions::{
     CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionFreshness,
     ConditionState, GatewayClassEvidence, GatewayEvidence, ObservedCondition, ParentIdentity,

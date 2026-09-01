@@ -12,8 +12,8 @@
 
 use admissionlab_core::FixtureId;
 use admissionlab_diff::{
-    DivergenceConfidence, DivergenceEvidence, RawChange, RawChangeOp, SemanticChange,
-    SemanticChangeKind, raw_object_diff,
+    ChangeDirection, DIRECTION_KEY, DivergenceConfidence, DivergenceEvidence, RawChange,
+    RawChangeOp, SemanticChange, SemanticChangeKind, raw_object_diff,
 };
 use serde_json::{Value, json};
 
@@ -21,10 +21,13 @@ use serde_json::{Value, json};
 /// it must serialize as.
 ///
 /// The length is asserted below, and [`expected_wire_name`]'s exhaustive
-/// `match` makes adding an eighteenth variant a compile error rather than
-/// a silently untested one -- between them, "all seventeen are covered"
-/// is enforced by the compiler and the test, not by review.
-const ALL_KINDS: [(SemanticChangeKind, &str); 17] = [
+/// `match` makes adding a twenty-seventh variant a compile error rather
+/// than a silently untested one -- between them, "all twenty-six are
+/// covered" is enforced by the compiler and the test, not by review.
+///
+/// The first seventeen are Task 4.3's admission kinds; the last nine are
+/// Task 6.9's Gateway kinds, transcribed from that task's own list.
+const ALL_KINDS: [(SemanticChangeKind, &str); 26] = [
     (SemanticChangeKind::ObjectNewlyDenied, "newly_denied"),
     (SemanticChangeKind::ObjectNewlyAllowed, "newly_allowed"),
     (SemanticChangeKind::ContainerAdded, "container_added"),
@@ -69,6 +72,36 @@ const ALL_KINDS: [(SemanticChangeKind, &str); 17] = [
         SemanticChangeKind::WebhookLatencyChanged,
         "webhook_latency_changed",
     ),
+    (SemanticChangeKind::RouteAttached, "route_attached"),
+    (SemanticChangeKind::RouteDetached, "route_detached"),
+    (
+        SemanticChangeKind::BackendResolutionChanged,
+        "backend_resolution_changed",
+    ),
+    (
+        SemanticChangeKind::ListenerBindingChanged,
+        "listener_binding_changed",
+    ),
+    (
+        SemanticChangeKind::AcceptedConditionChanged,
+        "accepted_condition_changed",
+    ),
+    (
+        SemanticChangeKind::ResolvedRefsConditionChanged,
+        "resolved_refs_condition_changed",
+    ),
+    (
+        SemanticChangeKind::ProgrammedConditionChanged,
+        "programmed_condition_changed",
+    ),
+    (
+        SemanticChangeKind::TrafficStatusChanged,
+        "traffic_status_changed",
+    ),
+    (
+        SemanticChangeKind::TrafficBackendChanged,
+        "traffic_backend_changed",
+    ),
 ];
 
 /// The wire name each variant must have, restated as an exhaustive
@@ -96,15 +129,24 @@ fn expected_wire_name(kind: SemanticChangeKind) -> &'static str {
         SemanticChangeKind::WebhookFailed => "webhook_failed",
         SemanticChangeKind::WebhookInvocationChanged => "webhook_invocation_changed",
         SemanticChangeKind::WebhookLatencyChanged => "webhook_latency_changed",
+        SemanticChangeKind::RouteAttached => "route_attached",
+        SemanticChangeKind::RouteDetached => "route_detached",
+        SemanticChangeKind::BackendResolutionChanged => "backend_resolution_changed",
+        SemanticChangeKind::ListenerBindingChanged => "listener_binding_changed",
+        SemanticChangeKind::AcceptedConditionChanged => "accepted_condition_changed",
+        SemanticChangeKind::ResolvedRefsConditionChanged => "resolved_refs_condition_changed",
+        SemanticChangeKind::ProgrammedConditionChanged => "programmed_condition_changed",
+        SemanticChangeKind::TrafficStatusChanged => "traffic_status_changed",
+        SemanticChangeKind::TrafficBackendChanged => "traffic_backend_changed",
     }
 }
 
-/// Fails if any of the seventeen kinds serializes as anything other than
+/// Fails if any of the twenty-six kinds serializes as anything other than
 /// its pinned `snake_case` name -- including the four whose wire name is
 /// deliberately *not* the Rust identifier lowercased
 /// (`ObjectNewlyDenied` -> `newly_denied`, `ObjectNewlyAllowed` ->
 /// `newly_allowed`), which is exactly what a `rename_all` refactor would
-/// break. Also fails if the table above stops covering all seventeen
+/// break. Also fails if the table above stops covering all twenty-six
 /// distinct variants.
 #[test]
 fn every_semantic_change_kind_serializes_to_its_pinned_name() {
@@ -130,7 +172,7 @@ fn every_semantic_change_kind_serializes_to_its_pinned_name() {
         assert!(seen.insert(expected), "{expected:?} listed twice");
     }
 
-    assert_eq!(seen.len(), 17, "all seventeen kinds must be covered");
+    assert_eq!(seen.len(), 26, "all twenty-six kinds must be covered");
 }
 
 /// Fails if a pinned wire name does not deserialize back to its own
@@ -153,6 +195,72 @@ fn every_semantic_change_kind_deserializes_from_its_pinned_name() {
 fn unknown_semantic_change_kind_name_is_rejected() {
     let parsed = serde_json::from_str::<SemanticChangeKind>("\"newly_denyed\"");
     assert!(parsed.is_err(), "a misspelled kind must not parse");
+}
+
+/// Fails if [`ChangeDirection`]'s two wire tags drift, or if
+/// `as_str`/`from_name` stop agreeing with them. Task 6.9 step 6 makes
+/// this string the thing a severity is decided from, so it is as much a
+/// contract as a kind name.
+#[test]
+fn change_direction_wire_names_are_pinned() {
+    for (direction, expected) in [
+        (ChangeDirection::Improvement, "improvement"),
+        (ChangeDirection::Regression, "regression"),
+    ] {
+        assert_eq!(
+            serde_json::to_string(&direction).unwrap(),
+            format!("\"{expected}\"")
+        );
+        assert_eq!(direction.as_str(), expected);
+        assert_eq!(ChangeDirection::from_name(expected), Some(direction));
+    }
+    assert_eq!(
+        ChangeDirection::from_name("improvment"),
+        None,
+        "a near miss must not be guessed at -- it decides a severity"
+    );
+    assert_eq!(DIRECTION_KEY, "direction");
+}
+
+/// Fails if [`SemanticChange::direction`] stops reading the direction a
+/// comparator stamped into the candidate payload, or starts inventing
+/// one where none was recorded. The three `None` cases are the three
+/// that must never be confused with "improvement".
+#[test]
+fn semantic_change_direction_is_read_from_the_candidate_payload() {
+    let with_direction = |candidate: Option<Value>| SemanticChange {
+        kind: SemanticChangeKind::AcceptedConditionChanged,
+        fixture_id: FixtureId::parse("gateway-echo").unwrap(),
+        object_path: None,
+        subject: Some("echo-route".to_owned()),
+        baseline: Some(json!({"state": "True"})),
+        candidate,
+        origin: None,
+    };
+
+    assert_eq!(
+        with_direction(Some(json!({"state": "False", "direction": "regression"}))).direction(),
+        Some(ChangeDirection::Regression)
+    );
+    assert_eq!(
+        with_direction(Some(json!({"state": "True", "direction": "improvement"}))).direction(),
+        Some(ChangeDirection::Improvement)
+    );
+    assert_eq!(
+        with_direction(Some(json!({"state": "Unknown"}))).direction(),
+        None,
+        "a payload with no direction key has no direction"
+    );
+    assert_eq!(
+        with_direction(None).direction(),
+        None,
+        "a change with no candidate payload has no transition to describe"
+    );
+    assert_eq!(
+        with_direction(Some(json!("False"))).direction(),
+        None,
+        "a non-object candidate payload carries no direction"
+    );
 }
 
 /// Fails if [`DivergenceConfidence`]'s three wire tags drift. These

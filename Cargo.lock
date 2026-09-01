@@ -144,6 +144,7 @@ version = "0.1.0"
 dependencies = [
  "admissionlab-admission",
  "admissionlab-core",
+ "admissionlab-diff",
  "admissionlab-echo",
  "admissionlab-fixtures",
  "admissionlab-spec",

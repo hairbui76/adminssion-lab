@@ -99,7 +99,7 @@ pub use divergence::{first_divergence, first_divergence_with_objects};
 pub use raw::{RawChange, RawChangeOp, raw_object_diff};
 pub use trace::{TraceComparability, diff_admission_trace, trace_comparability};
 pub use types::{
-    DivergenceConfidence, DivergenceEvidence, SemanticChange, SemanticChangeKind,
-    UNATTRIBUTED_FIXTURE, unattributed_fixture_id,
+    ChangeDirection, DIRECTION_KEY, DivergenceConfidence, DivergenceEvidence, SemanticChange,
+    SemanticChangeKind, UNATTRIBUTED_FIXTURE, unattributed_fixture_id,
 };
 pub use workload::diff_workload_objects;

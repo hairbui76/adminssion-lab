@@ -3,7 +3,7 @@
 //! unknown names, and the pass/warn/fail rule.
 //!
 //! Two things here are a *public* contract and are asserted on
-//! serialized text rather than on Rust values: the seventeen default
+//! serialized text rather than on Rust values: the twenty-six default
 //! severities (people read them out of the product documentation and
 //! write `policy.overrides` against them) and the `severity`/
 //! `disposition` wire names (people branch CI jobs on them).
@@ -13,19 +13,21 @@
 use admissionlab_core::FixtureId;
 use admissionlab_diff::{SemanticChange, SemanticChangeKind};
 use admissionlab_policy::{
-    ALL_KINDS, ChangeSelector, CompiledSelector, PolicyDisposition, ResolvedPolicy, Severity,
-    default_severity, evaluate, kind_from_name, kind_index, resolve_policy, validate_policy_spec,
+    ALL_KINDS, CONDITION_CHANGE_KINDS, ChangeSelector, CompiledSelector, PolicyDisposition,
+    ResolvedPolicy, Severity, default_change_severity, default_severity, evaluate, kind_from_name,
+    kind_index, resolve_policy, validate_policy_spec,
 };
 use admissionlab_spec::PolicySpec;
 
-/// The exact table `ROADMAP.md` Task 4.8 step 1 specifies, transcribed
-/// from the roadmap's own seventeen rows by wire name.
+/// The exact tables `ROADMAP.md` Task 4.8 step 1 and Task 6.9 step 6
+/// specify, transcribed from the roadmap's own twenty-six rows by wire
+/// name.
 ///
 /// Written as `(&str, Severity)` rather than `(SemanticChangeKind,
 /// Severity)` on purpose: transcribing the roadmap's *strings* means a
 /// variant renamed on either side is caught here, where a transcription
 /// of Rust identifiers would silently follow the rename.
-const ROADMAP_TABLE: [(&str, Severity); 17] = [
+const ROADMAP_TABLE: [(&str, Severity); 26] = [
     ("newly_denied", Severity::Critical),
     ("newly_allowed", Severity::Critical),
     ("container_added", Severity::Warning),
@@ -43,6 +45,16 @@ const ROADMAP_TABLE: [(&str, Severity); 17] = [
     ("webhook_failed", Severity::Critical),
     ("webhook_invocation_changed", Severity::Warning),
     ("webhook_latency_changed", Severity::Warning),
+    // ROADMAP Task 6.9 step 6's Gateway table.
+    ("route_attached", Severity::Info),
+    ("route_detached", Severity::Critical),
+    ("backend_resolution_changed", Severity::Critical),
+    ("listener_binding_changed", Severity::Critical),
+    ("accepted_condition_changed", Severity::Critical),
+    ("resolved_refs_condition_changed", Severity::Critical),
+    ("programmed_condition_changed", Severity::Critical),
+    ("traffic_status_changed", Severity::Critical),
+    ("traffic_backend_changed", Severity::Critical),
 ];
 
 /// Builds a fixture identifier, panicking on an invalid one (a test
@@ -78,7 +90,7 @@ fn policy_spec(yaml: &str) -> PolicySpec {
     serde_norway::from_str(yaml).expect("test policy section parses")
 }
 
-/// Fails if any of the seventeen Alpha default severities drifts from
+/// Fails if any of the twenty-six default severities drifts from
 /// the roadmap's table, or if a kind's name changes.
 #[test]
 fn default_severity_matches_the_roadmap_table() {
@@ -93,7 +105,7 @@ fn default_severity_matches_the_roadmap_table() {
 }
 
 /// Fails if the table above stops covering every kind -- for example if
-/// an eighteenth `SemanticChangeKind` is added and graded but never
+/// a twenty-seventh `SemanticChangeKind` is added and graded but never
 /// transcribed here.
 #[test]
 fn the_roadmap_table_covers_every_kind_exactly_once() {
@@ -111,7 +123,7 @@ fn the_roadmap_table_covers_every_kind_exactly_once() {
 /// the compiler-checked `classify` match assigns.
 ///
 /// `kind_index` comes from an exhaustive `match`, so every variant has
-/// an index; asserting the indices are exactly `0..17` in array order
+/// an index; asserting the indices are exactly `0..26` in array order
 /// makes "the array lists every variant, once, in this order" a checked
 /// claim rather than a reviewed one.
 #[test]
@@ -119,6 +131,127 @@ fn all_kinds_agrees_with_the_compiler_checked_index() {
     for (index, kind) in ALL_KINDS.into_iter().enumerate() {
         assert_eq!(kind_index(kind), index, "index of {}", kind.as_str());
     }
+}
+
+/// Builds a Gateway condition change carrying the direction a
+/// comparator would have stamped into its candidate payload -- the shape
+/// `admissionlab_gateway::diff::diff_gateway` emits, rewritten here by
+/// hand so this crate's grading is asserted against the *wire* contract
+/// rather than against a Phase 6 crate it must not depend on.
+fn directed_change(kind: SemanticChangeKind, direction: Option<&str>) -> SemanticChange {
+    let mut candidate = serde_json::json!({"state": "True"});
+    if let Some(direction) = direction {
+        candidate["direction"] = serde_json::json!(direction);
+    }
+    SemanticChange {
+        kind,
+        fixture_id: fixture("gateway-echo"),
+        object_path: None,
+        subject: Some("echo-route".to_owned()),
+        baseline: Some(serde_json::json!({"state": "False"})),
+        candidate: Some(candidate),
+        origin: None,
+    }
+}
+
+/// Fails if ROADMAP Task 6.9 step 6's improvement rule stops applying --
+/// *"A condition change that moves from False/Unknown to True may be
+/// downgraded to Info ... True to False is Critical"* -- to the three
+/// Gateway condition kinds it is about.
+#[test]
+fn an_improving_gateway_condition_change_is_downgraded_to_info() {
+    for kind in CONDITION_CHANGE_KINDS {
+        assert_eq!(
+            default_severity(kind),
+            Severity::Critical,
+            "{} must still be Critical as a bare kind",
+            kind.as_str()
+        );
+        assert_eq!(
+            default_change_severity(&directed_change(kind, Some("improvement"))),
+            Severity::Info,
+            "{} moving to True is an improvement",
+            kind.as_str()
+        );
+        assert_eq!(
+            default_change_severity(&directed_change(kind, Some("regression"))),
+            Severity::Critical,
+            "{} moving away from True stays Critical",
+            kind.as_str()
+        );
+        assert_eq!(
+            default_change_severity(&directed_change(kind, None)),
+            Severity::Critical,
+            "{}: an unrecorded direction is never read as an improvement",
+            kind.as_str()
+        );
+    }
+}
+
+/// Fails if the improvement exception leaks past the three condition
+/// kinds -- a `backend_resolution_changed` or a traffic change carrying
+/// an improvement marker must still grade at its table row, which is the
+/// narrowness `severity.rs` documents and argues for.
+#[test]
+fn the_improvement_exception_does_not_reach_other_gateway_kinds() {
+    for kind in [
+        SemanticChangeKind::BackendResolutionChanged,
+        SemanticChangeKind::RouteDetached,
+        SemanticChangeKind::ListenerBindingChanged,
+        SemanticChangeKind::TrafficStatusChanged,
+        SemanticChangeKind::TrafficBackendChanged,
+    ] {
+        assert_eq!(
+            default_change_severity(&directed_change(kind, Some("improvement"))),
+            Severity::Critical,
+            "{} must not be downgraded by a direction marker",
+            kind.as_str()
+        );
+    }
+}
+
+/// Fails if an admission change ever acquires a direction-based
+/// downgrade: the exception is Gateway-only, and a `newly_allowed`
+/// carrying an "improvement" marker (whatever wrote it) must still be
+/// graded Critical by the conservative Alpha row.
+#[test]
+fn the_improvement_exception_never_reaches_an_admission_kind() {
+    assert_eq!(
+        default_change_severity(&directed_change(
+            SemanticChangeKind::ObjectNewlyAllowed,
+            Some("improvement")
+        )),
+        Severity::Critical
+    );
+}
+
+/// Fails if a lab's own policy loses the last word over a downgraded
+/// improvement: `failOn` must still be able to raise it, and an override
+/// must still be able to replace it. The three severity layers are
+/// documented in `evaluate.rs`, and the exception sits underneath all of
+/// them.
+#[test]
+fn policy_still_outranks_an_improvement_downgrade() {
+    let improvement = directed_change(
+        SemanticChangeKind::AcceptedConditionChanged,
+        Some("improvement"),
+    );
+
+    let permissive = ResolvedPolicy::permissive();
+    assert_eq!(permissive.severity_for(&improvement), Severity::Info);
+
+    let fail_on = resolve_policy(&policy_spec("failOn:\n  - accepted_condition_changed\n"))
+        .expect("policy resolves");
+    assert_eq!(fail_on.severity_for(&improvement), Severity::Critical);
+
+    let override_policy = resolve_policy(&policy_spec(
+        "overrides:\n  - kind: accepted_condition_changed\n    severity: warning\n",
+    ))
+    .expect("policy resolves");
+    assert_eq!(
+        override_policy.severity_for(&improvement),
+        Severity::Warning
+    );
 }
 
 /// Fails if a severity's or disposition's JSON name changes -- both are

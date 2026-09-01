@@ -372,6 +372,30 @@ is applied.
 | `webhook_invocation_changed` | warning | The observed set or ordering of webhook invocations differs. |
 | `webhook_latency_changed` | warning | Exceeded both latency thresholds. Never fails a run by itself. |
 
+The nine kinds below are produced by Gateway comparisons (Phase 6). They are
+named, graded, and excepted exactly like the admission kinds above.
+
+| Wire name | Default severity | Meaning |
+| --- | --- | --- |
+| `route_attached` | info | The candidate's route status names a parent `Gateway` the baseline's did not — a path that did not carry traffic before. |
+| `route_detached` | **critical** | A parent `Gateway` the baseline's route status named is absent from the candidate's. |
+| `backend_resolution_changed` | **critical** | Whether the route's backend references resolve changed: exactly one side published `ResolvedRefs: True`. |
+| `listener_binding_changed` | **critical** | The route binds to a different set of a `Gateway`'s listeners (`parentRef.sectionName`). |
+| `accepted_condition_changed` | **critical** | An `Accepted` condition's state differs, on a `GatewayClass`, a `Gateway`, or a route's parent entry. |
+| `resolved_refs_condition_changed` | **critical** | A route parent's `ResolvedRefs` condition state differs. |
+| `programmed_condition_changed` | **critical** | A `Gateway`'s `Programmed` condition state differs. |
+| `traffic_status_changed` | **critical** | A probe through the data plane returned a different HTTP status, or the candidate answered nothing where the baseline answered. |
+| `traffic_backend_changed` | **critical** | The same probe reached a different backend workload, as each backend identified itself. |
+
+**Improvements are downgraded.** A condition change that moves *to* `True`
+(`accepted_condition_changed`, `resolved_refs_condition_changed`,
+`programmed_condition_changed`) is graded `info` instead of `critical`: the
+candidate accepted, resolved, or programmed something the baseline did not.
+Moving away from `True` stays `critical`. The direction is recorded in the
+change's own `candidate.direction` field (`improvement` / `regression`), never
+inferred from a controller's `reason` text. `failOn` and `overrides` still have
+the last word over a downgraded change, in both directions.
+
 Severities are `info`, `warning`, `critical` — one spelling each,
 case-sensitive.
 
