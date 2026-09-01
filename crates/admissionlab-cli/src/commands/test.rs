@@ -49,14 +49,17 @@ use std::sync::Arc;
 use admissionlab_admission::{KubeFixtureCapture, KubeMetricsSource};
 use admissionlab_cluster::KindClusterManager;
 use admissionlab_core::{
-    ArtifactStore, DoctorReport, ProcessRunner, RunPaths, TokioProcessRunner, collect_doctor_report,
+    ArtifactStore, DoctorReport, ProcessRunner, ProcessSpawner, RunPaths, TokioProcessRunner,
+    collect_doctor_report,
 };
 use admissionlab_fixtures::FixtureSource;
 use admissionlab_report::TerminalOptions;
+use admissionlab_spec::GatewaySuiteSpec;
 use async_trait::async_trait;
 use clap::Args;
 
 use crate::exit;
+use crate::pipeline::gateway::KubeGatewaySuite;
 use crate::pipeline::install::KubeStackInstaller;
 use crate::pipeline::{Console, LabBackend, RunRequest, run_lab};
 
@@ -131,6 +134,16 @@ pub struct KindBackend {
     process_runner: Arc<dyn ProcessRunner>,
     /// The `kind` backend, built once from `process_runner`.
     cluster_manager: Arc<KindClusterManager>,
+    /// The same runner again, behind the trait a long-lived child needs.
+    ///
+    /// `TokioProcessRunner` implements both [`ProcessRunner`] (a command
+    /// run to completion) and [`ProcessSpawner`] (a child whose stdout is
+    /// read while it keeps running), and Rust cannot upcast one `Arc<dyn
+    /// Trait>` to a sibling trait object -- so the one value is held
+    /// under both views rather than constructed twice, which is what
+    /// keeps `kubectl port-forward` inheriting the same argv-only, no-
+    /// shell, redaction-aware discipline every other command does.
+    port_forward_spawner: Arc<dyn ProcessSpawner>,
     /// Which filesystem the free-space check reports on. The run
     /// workspace and every `kind` node's storage live under the OS temp
     /// directory, so that is the filesystem whose free space actually
@@ -142,9 +155,11 @@ impl KindBackend {
     /// Builds the production backend for a run rooted at `run_root`.
     #[must_use]
     pub fn new(run_root: &std::path::Path) -> Self {
-        let process_runner: Arc<dyn ProcessRunner> = Arc::new(TokioProcessRunner::new());
+        let tokio_runner = Arc::new(TokioProcessRunner::new());
+        let process_runner: Arc<dyn ProcessRunner> = tokio_runner.clone();
         Self {
             cluster_manager: Arc::new(KindClusterManager::new(Arc::clone(&process_runner))),
+            port_forward_spawner: tokio_runner,
             process_runner,
             // The root itself may not exist yet on a first run, and the
             // free-space check needs an existing path; its parent (the
@@ -162,6 +177,7 @@ impl LabBackend for KindBackend {
     type Clusters = KindClusterManager;
     type Installer = KubeStackInstaller;
     type Capture = KubeFixtureCapture;
+    type Gateway = KubeGatewaySuite;
 
     async fn doctor_report(&self) -> DoctorReport {
         // The same function `admissionlab doctor` calls, rather than a
@@ -176,6 +192,15 @@ impl LabBackend for KindBackend {
 
     fn stack_installer(&self, paths: &RunPaths) -> Self::Installer {
         KubeStackInstaller::new(Arc::clone(&self.process_runner), paths)
+    }
+
+    fn gateway_suite(&self, suite: GatewaySuiteSpec, store: ArtifactStore) -> Self::Gateway {
+        // The same `ProcessRunner` every other external command in this
+        // run goes through, handed over as the `ProcessSpawner` a
+        // long-lived `kubectl port-forward` needs -- `TokioProcessRunner`
+        // implements both, and which one an API takes is the whole of
+        // the distinction (see `admissionlab_core::process`).
+        KubeGatewaySuite::new(suite, store, Arc::clone(&self.port_forward_spawner))
     }
 
     fn fixture_capture(&self, fixtures: Vec<FixtureSource>, store: ArtifactStore) -> Self::Capture {

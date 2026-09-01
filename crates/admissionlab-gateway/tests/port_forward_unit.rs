@@ -381,6 +381,7 @@ fn cluster_handle() -> ClusterHandle {
             name: CLUSTER.to_owned(),
             kubernetes_version: "1.36.0".to_owned(),
             node_image: "kindest/node:v1.36.0".to_owned(),
+            images: Vec::new(),
         },
         kubeconfig: PathBuf::from("/tmp/admissionlab-port-forward-test.kubeconfig"),
         audit_log: PathBuf::from("/tmp/admissionlab-port-forward-test-audit.log"),

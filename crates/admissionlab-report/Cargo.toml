@@ -36,6 +36,23 @@ admissionlab-core = { workspace = true }
 # `model::FixtureBucket`). The `report -> diff` edge §1.1 draws
 # explicitly.
 admissionlab-diff = { workspace = true }
+# `FixtureComparison::gateway` is an
+# `admissionlab_gateway::GatewayCaseComparison` -- §1.2's cross-task type
+# registry freezes that field's type, and ROADMAP Task 6.11 is the task
+# that replaces Alpha's empty placeholder with the real thing.
+#
+# This edge is not in §1.1's diagram, and it is the same deliberate,
+# documented exception the `report -> admission` edge above already is,
+# for the identical reason: a report that carries the evidence its claims
+# rest on has to name the type that evidence is. The alternative was a
+# hand-rolled mirror of `GatewayCaseResult`/`ReconciliationEvidence`/
+# `HttpProbeResult` inside this crate, which is precisely the competing
+# synonym §1.2 forbids and which would silently stop matching what the
+# Gateway engine actually observed. Acyclic and required to stay so:
+# `admissionlab-gateway` depends on `spec`/`core`/`diff`/`fixtures`/
+# `admission`/`echo`, none of which reach back here, and nothing may ever
+# add a `gateway -> report` edge.
+admissionlab-gateway = { workspace = true }
 # `LabResult::policy` is an `admissionlab_policy::PolicyResult`, and
 # bucket counting reads each `ClassifiedChange`'s `severity`/`expected`.
 # This crate never *decides* a severity -- §1.1's "do not let report

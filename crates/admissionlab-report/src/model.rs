@@ -309,8 +309,27 @@ pub struct FixtureComparison {
     /// [`FixtureBucket::Identical`].
     #[serde(rename = "admission")]
     pub admission: Option<AdmissionComparison>,
-    /// Reserved for Phase 6's Gateway comparison; always `None` in
-    /// Alpha. See [`GatewayCaseComparison`].
+    /// The Gateway comparison, when this entry is a Gateway route
+    /// contract rather than an admission fixture (ROADMAP Task 6.11).
+    /// `None` for every admission fixture, and for a lab with no
+    /// `gateway:` section at all.
+    ///
+    /// # An entry carries one or the other, never both
+    ///
+    /// A `FixtureComparison` is one *compared unit* of a run, and a run
+    /// has two kinds: an admission fixture replayed through both API
+    /// servers, and a Gateway route contract observed on both sides.
+    /// Phase 6's own vocabulary already calls the latter a fixture
+    /// ("Gateway fixtures are persisted in the disposable cluster"), and
+    /// its [`admissionlab_gateway::model::RouteContract::id`] is unique
+    /// within its suite exactly as a `FixtureId` is within a corpus --
+    /// which is what lets one carry the other's identity and lets a
+    /// Gateway [`admissionlab_diff::SemanticChange`] flow through the
+    /// same generic, already-graded channel as every admission one.
+    ///
+    /// The two are never mixed on one entry, and [`Self::bucket`] is
+    /// where that shows: an entry with neither is inconclusive because
+    /// nothing was observed at all.
     #[serde(rename = "gateway")]
     pub gateway: Option<GatewayCaseComparison>,
     /// Every graded change attributed to this fixture, in
@@ -335,13 +354,16 @@ impl FixtureComparison {
     /// Checked in this order, first match wins:
     ///
     /// 1. **[`Inconclusive`](FixtureBucket::Inconclusive)** -- the
-    ///    evidence does not support a comparison. Two cases:
-    ///    [`FixtureComparison::admission`] is `None` (nothing was
-    ///    observed), or
+    ///    evidence does not support a comparison, as
+    ///    [`Self::evidence_supports_a_comparison`] decides: nothing was
+    ///    observed at all, or
     ///    [`admissionlab_diff::decision_comparability`] reports
-    ///    [`DecisionComparability::Incomparable`] for the two outcomes
-    ///    (at least one side could not be replayed as a real admission
-    ///    decision).
+    ///    [`DecisionComparability::Incomparable`] for the two admission
+    ///    outcomes (at least one side could not be replayed as a real
+    ///    admission decision), or
+    ///    [`admissionlab_gateway::gateway_comparability`] reports
+    ///    anything but `Comparable` for the two Gateway case results (at
+    ///    least one side's route never converged).
     /// 2. **[`Critical`](FixtureBucket::Critical)** -- any change graded
     ///    `critical` that no expectation accounted for.
     /// 3. **[`Warnings`](FixtureBucket::Warnings)** -- any change graded
@@ -376,10 +398,7 @@ impl FixtureComparison {
     /// [`DecisionComparability::Incomparable`]: admissionlab_diff::DecisionComparability::Incomparable
     #[must_use]
     pub fn bucket(&self) -> FixtureBucket {
-        let Some(admission) = &self.admission else {
-            return FixtureBucket::Inconclusive;
-        };
-        if !decision_comparability(&admission.baseline, &admission.candidate).is_comparable() {
+        if !self.evidence_supports_a_comparison() {
             return FixtureBucket::Inconclusive;
         }
 
@@ -400,6 +419,43 @@ impl FixtureComparison {
             FixtureBucket::Identical
         } else {
             FixtureBucket::Expected
+        }
+    }
+
+    /// Whether this entry's evidence supports comparing its two sides at
+    /// all -- [`Self::bucket`]'s first and highest-precedence check.
+    ///
+    /// One question, asked of whichever kind of evidence the entry
+    /// carries, and in both cases answered by the crate that owns the
+    /// judgement rather than re-derived here:
+    ///
+    /// - an admission fixture, by
+    ///   [`admissionlab_diff::decision_comparability`];
+    /// - a Gateway route contract, by
+    ///   [`admissionlab_gateway::gateway_comparability`], through
+    ///   [`GatewayCaseComparison::comparability`].
+    ///
+    /// The Gateway arm is the exact mirror of the admission one, and
+    /// deliberately treats
+    /// [`admissionlab_gateway::GatewayComparability::Partial`] as not
+    /// comparable: `Partial` means exactly one side converged, so an
+    /// empty change list there is "we could not tell", not "the two
+    /// sides behaved the same" -- which is the whole reason
+    /// `gateway_comparability` exists separately from `diff_gateway`,
+    /// and the difference this bucket has to preserve. Changes claimed
+    /// on a `Partial` case are still carried, still graded, and still
+    /// shown; only the *counting* records that the run did not establish
+    /// the relationship.
+    ///
+    /// An entry with neither kind of evidence is not comparable for the
+    /// simplest reason: nothing was observed.
+    fn evidence_supports_a_comparison(&self) -> bool {
+        match (&self.admission, &self.gateway) {
+            (Some(admission), _) => {
+                decision_comparability(&admission.baseline, &admission.candidate).is_comparable()
+            }
+            (None, Some(gateway)) => gateway.comparability().is_comparable(),
+            (None, None) => false,
         }
     }
 }
@@ -437,41 +493,24 @@ pub struct AdmissionComparison {
     pub first_divergence: Option<DivergenceEvidence>,
 }
 
-/// Placeholder for one Gateway case's comparison.
+/// One Gateway route contract's result on both sides.
 ///
-/// Reserved by §1.2's cross-task type registry so
-/// [`FixtureComparison::gateway`] has a stable name to carry from the
-/// start. Gateway work cannot enter the critical path until the Alpha
-/// gate passes (Global Constraint 8), so this stays empty and that field
-/// is always `None` in Alpha.
+/// §1.2's cross-task type registry reserved this name so
+/// [`FixtureComparison::gateway`] had a stable field type from the
+/// start, and through Alpha it was an empty placeholder here (Global
+/// Constraint 8 kept Gateway work off the Alpha critical path). ROADMAP
+/// Task 6.11 replaced the placeholder with the real type rather than
+/// keeping a second one: `admissionlab_gateway::diff` owns the
+/// comparator that produces it, and a mirror struct in this crate would
+/// be the competing synonym §1.2 forbids -- free to drift from what the
+/// Gateway engine actually observed, in a document whose whole purpose
+/// is to carry that observation.
 ///
-/// # The real type exists; this one is Task 6.11's to replace
-///
-/// Task 6.9 landed `admissionlab_gateway::diff::GatewayCaseComparison`
-/// with §1.2's two real fields (`baseline`/`candidate`
-/// `GatewayCaseResult`) alongside the comparator that grades a pair. It
-/// is *that* type [`FixtureComparison::gateway`] must eventually carry.
-/// Swapping this one for it means adding a `report -> gateway`
-/// dependency and deciding how a Gateway case renders in each of the
-/// three renderers -- report-shaped decisions Task 6.11 owns and makes
-/// with the renderer in front of it, which is why Task 6.9 left this
-/// placeholder standing rather than reaching into this crate. Until
-/// then nothing constructs one: an empty struct here is visibly a
-/// reservation, where a hand-rolled partial copy of the real fields
-/// would be a competing synonym of exactly the kind §1.2 forbids.
-///
-/// Left deliberately empty rather than guessing at fields no task has
-/// asked for yet, and declared under its registry name rather than as a
-/// `serde_json::Value` seam or a competing synonym -- exactly the
-/// approach `admissionlab_spec::GatewaySuiteSpec` already took for
-/// `ResolvedLab::gateway`, so the two reservations read alike.
-///
-/// Serializes as `{}` if one is ever constructed; the always-`None`
-/// field itself serializes as an explicit `null` rather than being
-/// skipped, so a consumer reading an Alpha document sees the key and can
-/// tell "no Gateway evidence" from "this producer predates the field".
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
-pub struct GatewayCaseComparison {}
+/// The re-export (rather than a bare `use`) keeps
+/// `admissionlab_report::GatewayCaseComparison` resolving to the
+/// registry name it always did, so no consumer of this crate's public
+/// surface had to change.
+pub use admissionlab_gateway::GatewayCaseComparison;
 
 /// Serializes a [`RunId`] as its bare string form ([`RunId::as_str`]).
 ///

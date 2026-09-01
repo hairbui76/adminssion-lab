@@ -478,6 +478,7 @@ fn cluster_spec(run_id: &RunId, kubernetes_version: &str) -> Result<ClusterSpec,
         name,
         kubernetes_version: resolved.version.clone(),
         node_image: resolved.pinned_image.clone(),
+        images: Vec::new(),
     })
 }
 

@@ -96,6 +96,33 @@ pub struct ClusterSpec {
     /// digest-pinned. Passed through verbatim by a `kind`-backed
     /// implementation.
     pub node_image: String,
+    /// Container images already present in the operator's local image
+    /// store that must be side-loaded into this cluster before it is
+    /// handed back (ROADMAP Task 6.11), from
+    /// [`admissionlab_spec::ResolvedEnvironment::images`]. Empty for
+    /// every lab that names none, which is the overwhelmingly common
+    /// case.
+    ///
+    /// # Why this is part of the cluster's *spec*
+    ///
+    /// Because it is a statement about what the cluster must be, not a
+    /// step someone performs on it afterwards. A manifest referencing a
+    /// locally built image with `imagePullPolicy: IfNotPresent` does not
+    /// fail at install time — it fails minutes later as an
+    /// `ErrImageNeverPull` on a pod nobody was watching, reading as a
+    /// broken fixture rather than a missing image. Making the load part
+    /// of [`ClusterManager::create`]'s contract means a cluster either
+    /// has the images its lab declared or does not exist, and the two
+    /// cases are never confused.
+    ///
+    /// Each entry is passed to the backend as **one argv element**
+    /// (Global Constraint 12); nothing here is interpolated into a
+    /// shell string. An implementation with no notion of a local image
+    /// store may ignore this field, but must then reject a non-empty
+    /// list rather than silently proceeding — a run that quietly did not
+    /// load what it was told to load is one whose later failure is
+    /// unattributable.
+    pub images: Vec<String>,
 }
 
 /// A successfully created cluster: enough for a caller to use it

@@ -153,6 +153,32 @@ in the CLI: `RecipeNormalizeRule -> NormalizeRule` (`pipeline/compare.rs`) and
 `FixtureSource`/`NormalizationProfile` -> run-manifest provenance
 (`pipeline/provenance.rs`).
 
+**(e) The Gateway suite port is declared in the CLI, not in `core`.** §1.1 draws
+`core -> gateway  # only used after Gateway feature is enabled`. That edge does
+not exist either, and cannot: `admissionlab-gateway` depends on `core` (its
+`ClusterHandle`, its `Diagnostic`), so the reverse is the same cycle §2.2(a)
+describes.
+
+The R22 answer — pull the abstraction up into `core` — works for
+`ClusterManager`, `StackInstaller` and `FixtureCapture` because each of those
+traits can be *spelled* without naming a type from the crate that implements it.
+`FixtureCapture::capture_side` returns a `SideCapture`, which carries paths on
+disk and no `AdmissionOutcome` at all. A Gateway suite has no such
+path-only summary: what one side produces is a `GatewayCaseResult` per route
+contract, and all three of its fields are `admissionlab-gateway` types
+(`ReconciliationEvidence`, `HttpProbeResult`, the contract id). A condition state
+is not a file location, and the evidence cannot be read back off disk either —
+it is `Serialize`-only, for the same reason `outcome.json` is.
+
+So `GatewaySuiteRunner` (`pipeline/gateway.rs`) is declared at the altitude that
+can name both halves, exactly as `OutcomeCapture` already is, and
+`pipeline::run_lab` drives it directly rather than through a `LabRunner` method.
+`admissionlab-report` gains a `gateway` edge for the same class of reason
+§2.2(b) records for `report -> admission`: §1.2 freezes
+`FixtureComparison::gateway` as an `admissionlab_gateway::GatewayCaseComparison`,
+and a mirror struct in `report` would be a competing synonym free to drift from
+what the Gateway engine observed. `gateway -> report` must never be added.
+
 This is not "the CLI duplicating orchestration logic", which §1.1 forbids. There
 is exactly one orchestrator per half: `LabRunner` owns everything that happens
 while clusters exist, and `pipeline::run_lab` owns the order of the whole run and
@@ -172,6 +198,8 @@ compiler — most of them would be caught by Cargo as a cycle, but not all.
 | `spec -> diff` / `policy` | `spec` stays a leaf beneath everything. |
 | `recipes -> diff` / `policy` | Global Constraint 6 / PRODUCT.md §14: a recipe may describe a stack, never classify a regression. |
 | `installer -> cluster` | The installer works against a `ClusterHandle`; it never provisions. |
+| `core -> gateway` | Closes a cycle with the real `gateway -> core` edge. The CLI-side `GatewaySuiteRunner` port in §2.2(e) is the substitute. |
+| `gateway -> report` | `report -> gateway` is the real edge (§2.2(e)); the Gateway engine must not know how its evidence is rendered. |
 
 ---
 
@@ -191,6 +219,7 @@ stretch of the run.
 | `cluster_creation` | Both ephemeral clusters exist. | `cluster` (`KindClusterManager`), driven by `LabRunner` | `3` |
 | `installation` | Both sides' components installed **and ready**. | `installer` (`install_stack`), driven by `LabRunner` | `4` |
 | `fixture_capture` | Every fixture replayed through both sides and its evidence written. | `admission` (`KubeFixtureCapture`) + `fixtures` (resolution, dry-run) | `5` |
+| `gateway_suite` | The configured `gateway:` suite applied to both sides, every route's reconciliation observed, every traffic probe sent or explicitly skipped. Skipped entirely for a lab with no `gateway:` section. | `gateway` (apply, reconcile, endpoint, port-forward, probe) via the CLI-side `GatewaySuiteRunner` | `5` |
 | `comparison` | Both sides' evidence normalized, compared and graded. | `normalize`, `diff`, `policy` | `2` or `6` |
 | `reporting` | `result.json`, `report.html` and the job summary written. | `report` | `3` or `6` |
 | `completed` | The run finished. Says nothing about the verdict. | — | `0` / `1` |

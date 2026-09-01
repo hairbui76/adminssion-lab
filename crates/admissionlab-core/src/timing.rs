@@ -143,6 +143,17 @@ pub struct StageTimings {
     /// Replaying the fixture corpus through both sides.
     #[serde(rename = "fixtureCapture", skip_serializing_if = "Option::is_none")]
     pub fixture_capture: Option<CaptureStage>,
+    /// Applying the Gateway suite to both sides, observing every route's
+    /// reconciliation, and sending or skipping every traffic probe
+    /// (ROADMAP Task 6.11).
+    ///
+    /// Absent — the key omitted entirely — for a lab with no `gateway:`
+    /// section, which never runs the stage. That is the same rule every
+    /// other field here follows and the reason it is optional: an
+    /// admission-only run has no Gateway stage that took zero time, it
+    /// has none at all.
+    #[serde(rename = "gatewaySuite", skip_serializing_if = "Option::is_none")]
+    pub gateway_suite: Option<SideStage>,
     /// Normalizing both sides' evidence, diffing it, attributing the
     /// first divergence, grading it against the policy and the
     /// expectations, and assembling the result — exactly the stretch
@@ -336,6 +347,9 @@ impl StageTimings {
             }
             parts.push(rendered);
         }
+        if let Some(gateway) = &self.gateway_suite {
+            parts.push(format!("gateway {}", gateway.render()));
+        }
         if let Some(comparison) = self.comparison {
             parts.push(format!("compare {}", seconds(comparison)));
         }
@@ -424,6 +438,9 @@ pub enum TimedStage {
     /// Replaying the corpus through both sides
     /// ([`crate::run_manifest::RunStage::FixtureCapture`]).
     FixtureCapture,
+    /// Running the Gateway suite on both sides
+    /// ([`crate::run_manifest::RunStage::GatewaySuite`]).
+    GatewaySuite,
     /// Normalizing, diffing, and grading
     /// ([`crate::run_manifest::RunStage::Comparison`]).
     Comparison,
@@ -449,6 +466,8 @@ pub enum TimedSideStage {
     Installation,
     /// One side's fixture capture.
     FixtureCapture,
+    /// One side's Gateway suite run.
+    GatewaySuite,
     /// One side's cluster deletion.
     Cleanup,
 }
@@ -461,6 +480,7 @@ impl TimedSideStage {
             Self::ClusterCreation => TimedStage::ClusterCreation,
             Self::Installation => TimedStage::Installation,
             Self::FixtureCapture => TimedStage::FixtureCapture,
+            Self::GatewaySuite => TimedStage::GatewaySuite,
             Self::Cleanup => TimedStage::Cleanup,
         }
     }
@@ -474,6 +494,7 @@ struct Recorded {
     install_components: SideComponents,
     fixture_capture: SideRecord,
     fixtures: Option<usize>,
+    gateway_suite: SideRecord,
     comparison: Option<Duration>,
     reporting: Option<Duration>,
     cleanup: SideRecord,
@@ -650,6 +671,7 @@ impl TimingRecorder {
             cluster_creation: recorded.cluster_creation.published(),
             installation,
             fixture_capture,
+            gateway_suite: recorded.gateway_suite.published(),
             comparison: recorded.comparison,
             reporting: recorded.reporting,
             cleanup: recorded.cleanup.published(),
@@ -663,6 +685,7 @@ impl TimingRecorder {
             TimedStage::ClusterCreation => recorded.cluster_creation.set(side, elapsed),
             TimedStage::Installation => recorded.installation.set(side, elapsed),
             TimedStage::FixtureCapture => recorded.fixture_capture.set(side, elapsed),
+            TimedStage::GatewaySuite => recorded.gateway_suite.set(side, elapsed),
             TimedStage::Comparison => recorded.comparison = Some(elapsed),
             TimedStage::Reporting => recorded.reporting = Some(elapsed),
             TimedStage::Cleanup => recorded.cleanup.set(side, elapsed),

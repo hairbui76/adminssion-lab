@@ -223,6 +223,20 @@ impl KindClusterManager {
         self.run_and_check(spec).await
     }
 
+    /// Side-loads one image from the operator's local Docker store into
+    /// `cluster_name`'s node, using `kind.rs`'s `load_image_argv`.
+    async fn run_load_image(&self, image: &str, cluster_name: &str) -> Result<(), ClusterError> {
+        let spec = CommandSpec {
+            program: kind::KIND_PROGRAM.into(),
+            args: kind::load_image_argv(image, cluster_name),
+            cwd: None,
+            env: BTreeMap::new(),
+            sensitive_env_keys: BTreeSet::new(),
+            timeout: kind::LOAD_IMAGE_TIMEOUT,
+        };
+        self.run_and_check(spec).await
+    }
+
     /// Runs `spec` and maps its outcome to `Result<(), ClusterError>`:
     /// a [`ProcessError`] converts via `#[from]`, and a non-zero exit
     /// becomes [`ClusterError::CommandFailed`].
@@ -415,6 +429,22 @@ impl ClusterManager for KindClusterManager {
             return Err(self
                 .rollback(&spec.name, &layout.kubeconfig_path, error)
                 .await);
+        }
+
+        // Side-loading is part of creating this cluster, not a step
+        // afterwards -- see `ClusterSpec::images` for why. Serial and in
+        // declared order so a failure names one image, and inside the
+        // rollback window so a cluster that could not be given the
+        // images its lab declared is deleted rather than handed back
+        // half-provisioned: a run that proceeded would fail minutes
+        // later on an `ErrImageNeverPull` that reads as a broken
+        // fixture.
+        for image in &spec.images {
+            if let Err(error) = self.run_load_image(image, &spec.name).await {
+                return Err(self
+                    .rollback(&spec.name, &layout.kubeconfig_path, error)
+                    .await);
+            }
         }
 
         Ok(ClusterHandle {

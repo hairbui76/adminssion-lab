@@ -126,10 +126,7 @@ pub fn build_result(
         .map(|compared| FixtureComparison {
             fixture_id: compared.fixture_id.clone(),
             admission: compared.admission.clone(),
-            // Always `None` in Alpha: Gateway behavior cannot enter the
-            // critical path until the Alpha gate passes (Global
-            // Constraint 8).
-            gateway: None,
+            gateway: compared.gateway.clone(),
             changes: policy
                 .changes
                 .iter()

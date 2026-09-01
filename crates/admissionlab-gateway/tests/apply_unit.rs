@@ -84,6 +84,7 @@ fn cluster_handle() -> ClusterHandle {
             name: "gateway-apply-test-cluster".to_string(),
             kubernetes_version: "1.36.0".to_string(),
             node_image: "kindest/node:v1.36.0".to_string(),
+            images: Vec::new(),
         },
         kubeconfig: std::env::temp_dir().join("admissionlab-gateway-apply-test.kubeconfig"),
         audit_log: std::env::temp_dir().join("admissionlab-gateway-apply-test-audit.log"),

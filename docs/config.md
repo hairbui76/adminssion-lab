@@ -21,6 +21,7 @@ as you type.
 - [`components[]`](#components)
 - [`install`](#install)
 - [`fixtures`](#fixtures)
+- [`gateway`](#gateway)
 - [`policy`](#policy)
 - [Semantic change kinds and default severities](#semantic-change-kinds-and-default-severities)
 - [`expectations.yaml`](#expectationsyaml)
@@ -78,6 +79,7 @@ kind: Lab
 baseline: { ... }        # required
 candidate: { ... }       # required
 fixtures: { ... }        # required
+gateway: { ... }         # optional; omit for an admission-only lab
 policy: { ... }          # optional; every field defaults
 expectationsFile: ...    # optional
 ```
@@ -89,6 +91,7 @@ expectationsFile: ...    # optional
 | `baseline` | object | yes | — | The unmodified stack being compared against. |
 | `candidate` | object | yes | — | The stack under test. |
 | `fixtures` | object | yes | — | Which fixtures to replay through both sides. |
+| `gateway` | object | no | none | The Gateway behavior suite. Omit the whole section for an admission-only lab; see [`gateway`](#gateway). |
 | `policy` | object | no | all defaults | Omit the whole section to accept every default. |
 | `expectationsFile` | path | no | none | Path to an `Expectations` document, resolved against the config file's directory. A missing file here is exit `2` — you named it, so it is your configuration at fault. |
 
@@ -99,13 +102,41 @@ expectationsFile: ...    # optional
 ```yaml
 baseline:
   kubernetes: "1.36.4"
+  images: []
   components: []
 ```
 
 | Field | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
 | `kubernetes` | string | yes | — | The Kubernetes version to provision. Must be non-empty. It is resolved against `compatibility/kubernetes.yaml`, which pins an exact patch version and node-image digest per minor — a version outside that matrix fails with exit `2` before any cluster is created. |
+| `images` | list of strings | no | `[]` | Container images already in your **local** image store to side-load into this side's cluster before anything is installed. See below. |
 | `components` | list | no | `[]` | Components to install on top of the base cluster, **in installation order**. A bare Kubernetes cluster with no components is a valid environment. |
+
+### `images[]`
+
+For workloads that were built locally and never pushed anywhere. A `kind` node
+pulls a registry image itself, so most labs list nothing here; a manifest that
+references a locally built tag with `imagePullPolicy: IfNotPresent` needs the
+image to be *in the node* first, and without this it fails minutes into the run
+with an `ErrImageNeverPull` that reads as a broken fixture.
+
+```yaml
+baseline:
+  kubernetes: "1.36.4"
+  images:
+    - admissionlab-echo:dev
+```
+
+Each entry is one image reference, passed to the cluster backend as a single
+argument — never through a shell. Loading happens once, immediately after the
+cluster is created and before the first component is installed, and a failure to
+load fails the cluster rather than surfacing later as a scheduling error. Build
+the image before the run (`./scripts/build-test-images.sh` with no arguments
+builds Admission Lab's own two and loads nothing).
+
+Both sides list their images independently, so a lab that side-loads a different
+build into the candidate is expressible — and is exactly as visible in the
+configuration as a different chart version would be.
 
 Baseline and candidate are always separate ephemeral clusters and never share
 mutable state. They may legitimately install different Kubernetes versions —
@@ -284,6 +315,126 @@ nothing to replay, so no comparison can be produced.
 
 See [`docs/fixtures.md`](fixtures.md) for the fixture format itself, ID
 derivation, and the setup-outside-the-glob pattern.
+
+---
+
+## `gateway`
+
+The Gateway behavior suite: Gateway API objects persisted in **both** sides'
+clusters, the routes whose reconciliation is compared, and the HTTP requests
+sent through the resulting data plane. Omit the whole section — as almost every
+lab does — for an admission-only run.
+
+Unlike admission fixtures, these manifests are **applied for real, not
+dry-run**: a controller cannot reconcile an object that was never persisted, and
+a Gateway with no status has nothing to compare. What makes that safe is the
+disposable cluster; Admission Lab never applies them anywhere else.
+
+```yaml
+gateway:
+  manifests:
+    - gateway/suite.yaml
+  gatewayEndpoint:
+    type: serviceBySelector
+    namespace: "{gatewayNamespace}"
+    selector:
+      gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+    portName: http
+  readiness:
+    - type: deploymentAvailable
+      namespace: demo
+      name: echo-a
+  reconciliationTimeout: 120000
+  routes:
+    - id: echo-route
+      gatewayNamespace: demo
+      gatewayName: lab-gateway
+      routeNamespace: demo
+      routeName: echo-route
+      listenerName: http
+      probes:
+        - host: echo.example.test
+          path: /
+          method: GET
+          expectedStatus: 200
+          expectedBackend: echo-a
+```
+
+| Field | Type | Required | Default | Notes |
+| --- | --- | --- | --- | --- |
+| `manifests` | list of paths | yes | — | Kubernetes manifest files defining the suite: namespaces, backends, `GatewayClass`, `Gateway`, `HTTPRoute`, `ReferenceGrant`. Must be non-empty. Resolved against the config file's directory. Applied in a fixed category order, never deleted. |
+| `routes` | list | yes | — | The route contracts observed and probed. Must be non-empty; every `id` must be unique. |
+| `gatewayEndpoint` | object | no | none | How to find the `Service` fronting each Gateway's data plane. **Without it no traffic probe is ever sent** — every probe is recorded as an explicit skip, and only reconciliation is compared. |
+| `readiness` | list | no | `[]` | Conditions the suite's own manifests must satisfy after they are applied and before any route is observed. Same vocabulary as [`components[].readiness`](#readiness). |
+| `reconciliationTimeout` | integer (ms) | no | `120000` | How long each route gets, per side, to reach a stable, current status in which it is carrying traffic. Must be non-zero. |
+
+### `routes[]`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `id` | string | yes | Unique within the suite, and how the two sides' results are paired. It is also the identifier this route is reported under, so it must be lowercase letters, digits and `-`, and must not collide with a fixture id. |
+| `gatewayNamespace` / `gatewayName` | string | yes | The `Gateway` this route attaches to. Never inferred — see below. |
+| `routeNamespace` / `routeName` | string | yes | The `HTTPRoute` under contract. |
+| `listenerName` | string | no | Which listener, by `parentRef.sectionName`. Omitting it is unambiguous only while the route reports exactly one parent entry for this Gateway. |
+| `probes` | list | no | HTTP requests to send once the route is carrying traffic. May be empty: a contract that only asserts a route reconciles is a complete test. |
+
+Gateway identity is always explicit. Admission Lab never guesses the target
+`Gateway` from "the first one in the manifest directory" or from the route's own
+`parentRefs`: a contract that read its target out of the fixture it is testing
+could never detect the fixture pointing at the wrong Gateway, because it would
+follow it there.
+
+### `probes[]`
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `host` | string | yes | The `Host` header, which is what a listener's `hostname` and a route's `hostnames` match on. The request still *arrives* at a local port-forward. |
+| `path` | string | yes | Must begin with `/`. |
+| `method` | string | yes | Uppercase, from Gateway API's own `HTTPMethod` set. |
+| `headers` | map | no | Extra request headers. |
+| `expectedStatus` | integer | yes | `100`–`599`. |
+| `expectedBackend` | string | no | Which backend must answer, as it identifies itself. Omit for a probe asserting a status no backend produced. |
+
+`expectedStatus`/`expectedBackend` say what a route *should* do; they carry no
+severity and are not a second grader. Whether an observed difference matters is
+[`policy`](#policy)'s decision, exactly as it is for admission.
+
+### When a probe is skipped
+
+A probe is sent only when the route is actually carrying traffic for its
+contract: the `Gateway` is `Programmed`, and the contract's own parent entry is
+`Accepted` with `ResolvedRefs`. Anything else is recorded as a skip **with the
+specific condition, state and controller reason that caused it** — in
+`probes.json` beside the request that was not sent, as a `gateway.probe_skipped`
+diagnostic in the terminal report and `result.json`, and, when the other side
+*did* answer, as a `traffic_status_changed` finding.
+
+Probing anyway would record the data plane's own error page (Gateway API
+specifies a `503` for an unaccepted route and a `500` for an unresolved backend)
+and then compare that invented status against a real one. The condition change
+is the finding; a status code produced by the same broken state is not a second,
+independent one.
+
+### `gatewayEndpoint`
+
+Two forms, `serviceBySelector` (preferred) and `serviceByName`. Two placeholders
+are substituted in `namespace`, `selector` *values*, and `name`:
+`{gatewayName}` and `{gatewayNamespace}`. Anything else in braces is an error at
+load time, not a literal.
+
+| Field | Type | Required | Notes |
+| --- | --- | --- | --- |
+| `type` | string | yes | `serviceBySelector` or `serviceByName`. |
+| `namespace` | string | yes | Usually `"{gatewayNamespace}"`. |
+| `selector` | map | `serviceBySelector` | Every pair must match. Keys are literal. |
+| `name` | string | `serviceByName` | The `Service`'s exact name. |
+| `portName` / `port` | string / integer | no | Which port to forward to. Required whenever the matched `Service` exposes more than one — Admission Lab reports an ambiguous port rather than picking one. |
+
+This is the same block a certified recipe declares under `gatewayEndpoint:`,
+and it parses into the same thing. A lab file spells it out for the same reason
+it spells out `install:` and `readiness:`: `admissionlab.yaml` has no recipe
+resolution, so a lab that hand-writes how an implementation is installed must
+equally hand-write where its data plane is.
 
 ---
 
@@ -501,6 +652,6 @@ Stated so you do not go looking:
 - **Component install timeout** (fixed at 600 s), **fixture concurrency**
   (serial within each cluster, by design), **audit policy**, and the **run root**
   (`${TMPDIR}/admissionlab-runs`).
-- **`gateway` and `migration` sections.** Reserved names with no fields;
-  Gateway configuration is planned for Public Beta and there is nothing to
-  configure today.
+- **`migration` section.** A reserved name with no fields; Ingress-to-Gateway
+  migration configuration is planned for v1.0 and there is nothing to configure
+  today.

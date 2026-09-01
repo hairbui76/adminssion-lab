@@ -103,6 +103,18 @@ pub(crate) const DELETE_TIMEOUT: Duration = Duration::from_secs(60);
 /// for a slow/loaded CI runner rather than tuned to the common case.
 pub(crate) const DIAGNOSTICS_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Bounds one `kind load docker-image` invocation.
+///
+/// The work is local: `kind` saves an image already present in the
+/// operator's Docker store and streams the archive into the node
+/// container. Measured at a few seconds for Admission Lab's own
+/// ~30 MB echo image on a warm machine. 180 seconds is sized for the
+/// pathological case a bound exists for at all (Global Constraint 13) —
+/// a multi-gigabyte image on a loaded runner — rather than for the happy
+/// path, because a timeout that fires on a slow copy turns a working
+/// cluster into a spurious infrastructure failure.
+pub(crate) const LOAD_IMAGE_TIMEOUT: Duration = Duration::from_secs(180);
+
 /// Number of leading characters of a [`RunId`] used as the
 /// `<short-run-id>` suffix in [`cluster_name`]. See the module
 /// documentation's "Why 12 characters" section.
@@ -271,6 +283,38 @@ pub(crate) fn delete_argv(name: &str, kubeconfig_path: &Path) -> Vec<OsString> {
         name.into(),
         "--kubeconfig".into(),
         path_to_os_string(kubeconfig_path),
+    ]
+}
+
+/// Builds the exact argv (excluding the program name) for
+/// `kind load docker-image <image> --name <cluster>`: side-loading one
+/// image from the operator's local Docker image store into an
+/// already-created cluster's node (ROADMAP Task 6.11, for
+/// [`admissionlab_core::ClusterSpec::images`]).
+///
+/// `image` is passed as **one argv element**, verbatim, with no quoting,
+/// splitting, or shell involved (Global Constraint 12) — an image
+/// reference is user-supplied text, and the only safe way to hand it to
+/// a subprocess is as its own argument.
+///
+/// One image per invocation rather than `kind load docker-image a b c`,
+/// which `kind` does accept: with several per command, a single failure
+/// reports one non-zero exit for the batch and the caller cannot say
+/// *which* image was missing without parsing `kind`'s prose. One
+/// invocation per image costs a fraction of a second each (the images
+/// are already local) and buys an error that names the image.
+///
+/// Deliberately no `--kubeconfig` flag: `kind load` neither reads nor
+/// writes a kubeconfig (it copies an image archive into the node's
+/// container runtime), and `kind load docker-image --help` accepts no
+/// such flag — the same reasoning [`get_clusters_argv`] records.
+pub(crate) fn load_image_argv(image: &str, cluster_name: &str) -> Vec<OsString> {
+    vec![
+        "load".into(),
+        "docker-image".into(),
+        image.into(),
+        "--name".into(),
+        cluster_name.into(),
     ]
 }
 

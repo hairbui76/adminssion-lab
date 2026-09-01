@@ -103,6 +103,7 @@ fn cluster_handle(kubeconfig: &str) -> ClusterHandle {
             name: "adlab-baseline-testcluster01".to_owned(),
             kubernetes_version: "1.36.4".to_owned(),
             node_image: "kindest/node:v1.36.4@sha256:099e049362a1526b2db71494e1947aae99bd16290d7c895f2b7ea312e3cbfaed".to_owned(),
+            images: Vec::new(),
         },
         kubeconfig: PathBuf::from(kubeconfig),
         audit_log: PathBuf::from("/run/adlab/baseline-audit.log"),

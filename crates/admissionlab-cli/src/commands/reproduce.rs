@@ -169,6 +169,7 @@ impl LabBackend for ReproduceBackend {
     type Clusters = <KindBackend as LabBackend>::Clusters;
     type Installer = <KindBackend as LabBackend>::Installer;
     type Capture = <KindBackend as LabBackend>::Capture;
+    type Gateway = <KindBackend as LabBackend>::Gateway;
 
     async fn doctor_report(&self) -> DoctorReport {
         self.inner.doctor_report().await
@@ -180,6 +181,14 @@ impl LabBackend for ReproduceBackend {
 
     fn stack_installer(&self, paths: &RunPaths) -> Self::Installer {
         self.inner.stack_installer(paths)
+    }
+
+    fn gateway_suite(
+        &self,
+        suite: admissionlab_spec::GatewaySuiteSpec,
+        store: ArtifactStore,
+    ) -> Self::Gateway {
+        self.inner.gateway_suite(suite, store)
     }
 
     fn fixture_capture(&self, fixtures: Vec<FixtureSource>, store: ArtifactStore) -> Self::Capture {

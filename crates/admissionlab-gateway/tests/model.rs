@@ -565,6 +565,8 @@ fn reexported_types_are_the_spec_crate_types() {
         manifests: vec![PathBuf::from("m.yaml")],
         routes: vec![contract],
         reconciliation_timeout: DEFAULT_RECONCILIATION_TIMEOUT,
+        gateway_endpoint: None,
+        readiness: Vec::new(),
     };
 
     assert_eq!(suite.routes[0].probes[0].expected_status, 200);

@@ -331,7 +331,10 @@ fn the_semantic_comparison_of_a_hundred_fixtures_stays_under_one_second() {
     // below is the comparison itself, which is what the target is about
     // ("after artifacts are collected").
     let started = Instant::now();
-    let comparison = compare(&lab, &fixtures, &outcomes).expect("the comparison succeeds");
+    // `None`: this benchmark measures the admission comparison, which is
+    // what PRODUCT.md §33's sub-second target is about. A lab with no
+    // `gateway:` section passes no Gateway results either.
+    let comparison = compare(&lab, &fixtures, &outcomes, None).expect("the comparison succeeds");
     let graded = evaluate_with_expectations(&policy, &expectations, &comparison.changes());
     let elapsed = started.elapsed();
 

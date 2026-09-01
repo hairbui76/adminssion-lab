@@ -27,7 +27,7 @@
 //! `capabilities:` list is ever parsed, which makes it the correct owner
 //! of that mapping, not an arbitrary one.
 
-use admissionlab_spec::{Capability, GatewayEndpointStrategy, substitute_gateway_placeholders};
+use admissionlab_spec::{Capability, GatewayEndpointStrategy};
 
 use crate::model::RawGatewayEndpoint;
 
@@ -101,135 +101,26 @@ pub const GATEWAY_NAME_LABEL: &str = "gateway.networking.k8s.io/gateway-name";
 /// Validates a recipe's `gatewayEndpoint:` block and resolves it into a
 /// [`GatewayEndpointStrategy`].
 ///
-/// Every string field a [`GatewayEndpointStrategy`] substitutes into is
-/// checked here, at recipe-load time, against
-/// [`admissionlab_spec::GATEWAY_PLACEHOLDERS`] — so a typo such as
-/// `{gateway}` fails when the recipe is loaded rather than silently
-/// resolving to a `Service` selector that matches nothing at run time.
-/// The check is performed by running the real substitution against a
-/// placeholder identity and discarding the result, so this function and
-/// `admissionlab-gateway`'s own resolution can never disagree about
-/// which tokens are legal.
+/// A one-line delegate to
+/// [`admissionlab_spec::resolve_gateway_endpoint`], which is where the
+/// rules themselves live as of ROADMAP Task 6.11: `admissionlab.yaml`'s
+/// own `gateway.gatewayEndpoint:` block reads the same YAML shape into
+/// the same resolved type, and one vocabulary validated in two crates is
+/// two validators free to drift. Kept as a named function here rather
+/// than inlined at the call site so this crate's loader still reads as
+/// "parse, then resolve" and so the recipe-level tests below keep
+/// exercising the path a recipe actually takes.
 ///
 /// # Errors
 ///
 /// Returns `Err((locator, message))`, where `locator` is a dotted path
 /// *relative to* `gatewayEndpoint` (for example `"namespace"` or
-/// `"selector[\"app\"]"`), when a required field is empty, when
-/// `selector` is empty, when `port` is zero, or when any substitutable
-/// field contains an unrecognized placeholder.
+/// `"selector[\"app\"]"`) -- see
+/// [`admissionlab_spec::resolve_gateway_endpoint`] for the full rule set.
 pub(crate) fn resolve_gateway_endpoint(
-    raw: RawGatewayEndpoint,
+    raw: &RawGatewayEndpoint,
 ) -> Result<GatewayEndpointStrategy, (String, String)> {
-    match raw {
-        RawGatewayEndpoint::ServiceBySelector {
-            namespace,
-            selector,
-            port_name,
-            port,
-        } => {
-            let namespace = endpoint_template("namespace", &namespace)?;
-            if selector.is_empty() {
-                return Err((
-                    "selector".to_owned(),
-                    "must not be empty -- a selector matching every Service in the namespace \
-                     could only ever be ambiguous"
-                        .to_owned(),
-                ));
-            }
-            let selector = selector
-                .into_iter()
-                .map(|(key, value)| {
-                    let key = key.trim().to_owned();
-                    if key.is_empty() {
-                        return Err((
-                            "selector".to_owned(),
-                            "a label key must not be empty".to_owned(),
-                        ));
-                    }
-                    // Only values are substituted: a label *key* names
-                    // the vocabulary (`gateway.networking.k8s.io/gateway-name`),
-                    // not the instance, so a placeholder in one would be
-                    // meaningless. Checked rather than assumed, so a
-                    // recipe writing one is told why instead of getting
-                    // a key that silently matches nothing.
-                    if key.contains(['{', '}']) {
-                        return Err((
-                            format!("selector[{key:?}]"),
-                            "a label key must not contain a placeholder -- only label values are \
-                             substituted"
-                                .to_owned(),
-                        ));
-                    }
-                    let value = endpoint_template(&format!("selector[{key:?}]"), &value)?;
-                    Ok((key, value))
-                })
-                .collect::<Result<_, _>>()?;
-            Ok(GatewayEndpointStrategy::ServiceBySelector {
-                namespace,
-                selector,
-                port_name: endpoint_port_name(port_name)?,
-                port: endpoint_port(port)?,
-            })
-        }
-        RawGatewayEndpoint::ServiceByName {
-            namespace,
-            name,
-            port_name,
-            port,
-        } => Ok(GatewayEndpointStrategy::ServiceByName {
-            namespace: endpoint_template("namespace", &namespace)?,
-            name: endpoint_template("name", &name)?,
-            port_name: endpoint_port_name(port_name)?,
-            port: endpoint_port(port)?,
-        }),
-    }
-}
-
-/// Trims `value`, rejects it if empty, and proves every placeholder it
-/// contains is one [`substitute_gateway_placeholders`] recognizes.
-fn endpoint_template(locator: &str, value: &str) -> Result<String, (String, String)> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Err((locator.to_owned(), "must not be empty".to_owned()));
-    }
-    // The identity here is arbitrary: only the Err/Ok distinction is
-    // used, and running the real substitution (rather than a private
-    // second scanner) is what keeps this check and
-    // `admissionlab-gateway`'s own resolution in step.
-    substitute_gateway_placeholders(trimmed, "placeholder-namespace", "placeholder-name")
-        .map_err(|message| (locator.to_owned(), message))?;
-    Ok(trimmed.to_owned())
-}
-
-/// A `portName`, if present, must be a non-empty literal. Deliberately
-/// **not** substitutable: a Service port name is part of the workload's
-/// own contract (`http`, `https`, `status-port`), never derived from a
-/// `Gateway`'s identity.
-fn endpoint_port_name(raw: Option<String>) -> Result<Option<String>, (String, String)> {
-    let Some(raw) = raw else { return Ok(None) };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err((
-            "portName".to_owned(),
-            "must not be empty -- omit the field entirely to resolve the port some other way"
-                .to_owned(),
-        ));
-    }
-    Ok(Some(trimmed.to_owned()))
-}
-
-/// A `port`, if present, must be a real TCP port. Values above 65535 are
-/// already rejected by `serde` (the field is a `u16`); zero is not.
-fn endpoint_port(raw: Option<u16>) -> Result<Option<u16>, (String, String)> {
-    if raw == Some(0) {
-        return Err((
-            "port".to_owned(),
-            "must not be 0 -- omit the field entirely to resolve the port some other way"
-                .to_owned(),
-        ));
-    }
-    Ok(raw)
+    admissionlab_spec::resolve_gateway_endpoint(raw)
 }
 
 #[cfg(test)]
@@ -293,7 +184,7 @@ mod tests {
     #[test]
     fn the_istio_shaped_selector_strategy_resolves() {
         let resolved =
-            resolve_gateway_endpoint(by_selector(&[(GATEWAY_NAME_LABEL, "{gatewayName}")]))
+            resolve_gateway_endpoint(&by_selector(&[(GATEWAY_NAME_LABEL, "{gatewayName}")]))
                 .expect("the well-known-label strategy must resolve");
         assert_eq!(
             resolved,
@@ -309,7 +200,7 @@ mod tests {
     #[test]
     fn an_unknown_placeholder_in_a_selector_value_is_rejected_at_load_time() {
         let (locator, message) =
-            resolve_gateway_endpoint(by_selector(&[(GATEWAY_NAME_LABEL, "{gateway}")]))
+            resolve_gateway_endpoint(&by_selector(&[(GATEWAY_NAME_LABEL, "{gateway}")]))
                 .expect_err("{gateway} is not a known placeholder");
         assert_eq!(locator, format!("selector[{GATEWAY_NAME_LABEL:?}]"));
         assert!(message.contains("{gateway}"), "got: {message}");
@@ -317,7 +208,7 @@ mod tests {
 
     #[test]
     fn an_unknown_placeholder_in_a_namespace_is_rejected() {
-        let (locator, _) = resolve_gateway_endpoint(RawGatewayEndpoint::ServiceByName {
+        let (locator, _) = resolve_gateway_endpoint(&RawGatewayEndpoint::ServiceByName {
             namespace: "{gatewayNamesapce}".to_owned(),
             name: "lab-gateway-istio".to_owned(),
             port_name: None,
@@ -329,7 +220,7 @@ mod tests {
 
     #[test]
     fn a_placeholder_in_a_label_key_is_rejected_with_an_explanation() {
-        let (locator, message) = resolve_gateway_endpoint(by_selector(&[("{gatewayName}", "x")]))
+        let (locator, message) = resolve_gateway_endpoint(&by_selector(&[("{gatewayName}", "x")]))
             .expect_err("a label key must not be templated");
         assert_eq!(locator, "selector[\"{gatewayName}\"]");
         assert!(message.contains("only label values"), "got: {message}");
@@ -337,8 +228,8 @@ mod tests {
 
     #[test]
     fn an_empty_selector_is_rejected() {
-        let (locator, _) =
-            resolve_gateway_endpoint(by_selector(&[])).expect_err("an empty selector is ambiguous");
+        let (locator, _) = resolve_gateway_endpoint(&by_selector(&[]))
+            .expect_err("an empty selector is ambiguous");
         assert_eq!(locator, "selector");
     }
 
@@ -374,14 +265,14 @@ mod tests {
             ),
         ] {
             let (locator, _) =
-                resolve_gateway_endpoint(raw).expect_err("an empty {expected} must be rejected");
+                resolve_gateway_endpoint(&raw).expect_err("an empty {expected} must be rejected");
             assert_eq!(locator, expected);
         }
     }
 
     #[test]
     fn port_zero_is_rejected_but_an_absent_port_is_not() {
-        let (locator, _) = resolve_gateway_endpoint(RawGatewayEndpoint::ServiceByName {
+        let (locator, _) = resolve_gateway_endpoint(&RawGatewayEndpoint::ServiceByName {
             namespace: "ns".to_owned(),
             name: "svc".to_owned(),
             port_name: None,
@@ -390,7 +281,7 @@ mod tests {
         .expect_err("port 0 is not a TCP port");
         assert_eq!(locator, "port");
 
-        resolve_gateway_endpoint(RawGatewayEndpoint::ServiceByName {
+        resolve_gateway_endpoint(&RawGatewayEndpoint::ServiceByName {
             namespace: "ns".to_owned(),
             name: "svc".to_owned(),
             port_name: None,

@@ -104,6 +104,11 @@ pub struct ResolvedEnvironment {
     /// The Kubernetes version to provision. Never empty, and trimmed of
     /// surrounding whitespace — validated by [`resolve_lab`].
     pub kubernetes: String,
+    /// Local container images to side-load into this side's cluster
+    /// before anything is installed. Each entry is non-empty and
+    /// trimmed; the list is empty for a lab that names none. See
+    /// [`crate::EnvironmentSpec::images`].
+    pub images: Vec<String>,
     /// The environment's resolved components. Names are unique within
     /// this list — validated by [`resolve_lab`].
     pub components: Vec<ResolvedComponent>,
@@ -222,6 +227,7 @@ fn resolve_environment(
     source_path: &Path,
 ) -> Result<ResolvedEnvironment, SpecError> {
     let kubernetes = validate::kubernetes_version(field, &raw.kubernetes, source_path)?;
+    let images = validate::environment_images(field, &raw.images, source_path)?;
 
     let components = raw
         .components
@@ -235,6 +241,7 @@ fn resolve_environment(
 
     Ok(ResolvedEnvironment {
         kubernetes,
+        images,
         components,
     })
 }
@@ -259,6 +266,8 @@ fn resolve_gateway(
         manifests,
         routes,
         reconciliation_timeout,
+        gateway_endpoint,
+        readiness,
     } = raw;
     Ok(GatewaySuiteSpec {
         manifests: manifests
@@ -267,6 +276,8 @@ fn resolve_gateway(
             .collect(),
         routes,
         reconciliation_timeout,
+        gateway_endpoint,
+        readiness,
     })
 }
 

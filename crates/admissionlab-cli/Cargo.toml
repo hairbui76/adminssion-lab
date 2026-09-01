@@ -50,6 +50,17 @@ path = "src/main.rs"
 admissionlab-admission = { workspace = true }
 admissionlab-diff = { workspace = true }
 admissionlab-fixtures = { workspace = true }
+# `pipeline::gateway` drives the whole Phase 6 engine -- applying a
+# suite's manifests, waiting for each route's status, resolving the
+# data-plane endpoint, port-forwarding to it, and probing through it --
+# and `pipeline::compare` pairs the two sides' `GatewayCaseResult`s into
+# the `GatewayCaseComparison` a report carries. Both are
+# `admissionlab-gateway` types that `admissionlab-core` cannot name
+# (`gateway -> core` is the real edge; the reverse would be a cycle), so
+# the Gateway port is declared in this crate for exactly the reason the
+# compare-and-report half already lives here. See
+# `pipeline::gateway`'s own module documentation.
+admissionlab-gateway = { workspace = true }
 admissionlab-installer = { workspace = true }
 admissionlab-normalize = { workspace = true }
 admissionlab-policy = { workspace = true }

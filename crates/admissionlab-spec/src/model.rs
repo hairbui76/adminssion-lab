@@ -134,6 +134,37 @@ pub struct EnvironmentSpec {
     /// The Kubernetes version to provision, for example `"1.30.4"`. Must
     /// not be empty — validated by [`crate::resolve_lab`].
     pub kubernetes: String,
+    /// Container images already present in the operator's **local**
+    /// image store that must be side-loaded into this side's ephemeral
+    /// cluster before anything is installed into it.
+    ///
+    /// Empty by default, and empty for every lab whose workloads come
+    /// from a registry: a `kind` node pulls those itself. The field
+    /// exists for the case a registry cannot answer at all — a manifest
+    /// referencing an image that was built locally and never pushed,
+    /// which is exactly what Admission Lab's own Gateway suites do (the
+    /// deterministic echo backend in `crates/admissionlab-echo` is built
+    /// by `scripts/build-test-images.sh` and tagged
+    /// `admissionlab-echo:dev`, and the manifests that reference it use
+    /// `imagePullPolicy: IfNotPresent`). Without this list such a
+    /// manifest fails inside the run with an `ErrImageNeverPull` that
+    /// reads as a broken fixture rather than as a missing image.
+    ///
+    /// Each entry is a plain image reference (`name:tag`), passed
+    /// through verbatim as one argument to the cluster backend's own
+    /// side-load command — never interpolated into a shell string
+    /// (Global Constraint 12). Loading happens once, immediately after
+    /// the cluster is created and before the first component is
+    /// installed, and a failure to load fails the cluster rather than
+    /// being discovered later as a scheduling error.
+    ///
+    /// **This is not a way to skip a registry for convenience.** Both
+    /// sides list their own images independently, so a lab that loads
+    /// different images per side is expressible and is exactly as
+    /// visible in the configuration as a different chart version would
+    /// be.
+    #[serde(default)]
+    pub images: Vec<String>,
     /// Components to install on top of the base cluster, in installation
     /// order. Empty by default: a bare Kubernetes cluster with no extra
     /// components is a valid environment.
@@ -658,6 +689,137 @@ pub struct GatewaySuiteSpec {
     #[serde(with = "duration_millis", default = "default_reconciliation_timeout")]
     #[schemars(with = "u64")]
     pub reconciliation_timeout: Duration,
+    /// How to find the `Service` that fronts each Gateway's data plane,
+    /// so a probe can be sent through it.
+    ///
+    /// `None` — the default — means **no traffic probe is ever sent**.
+    /// Every [`RouteContract`] still has its reconciliation observed and
+    /// compared; a contract that also declares [`RouteContract::probes`]
+    /// has each of them recorded as an explicit skip rather than
+    /// silently dropped, because a run that cannot reach a data plane
+    /// has not observed that route's traffic behavior and must not
+    /// imply it did (Global Constraint 15).
+    ///
+    /// # Why this is written here and not inherited from a recipe
+    ///
+    /// [`crate::GatewayEndpointStrategy`]'s own documentation calls this
+    /// *install metadata*, and a certified recipe declares it
+    /// (`recipes/istio-gateway/recipe.yaml`'s `gatewayEndpoint:` block
+    /// parses into the very same [`GatewayEndpointSpec`] this field
+    /// takes). But `admissionlab.yaml` has no recipe resolution:
+    /// [`ComponentSpec::recipe`] is carried through unresolved, and
+    /// every component in a lab file spells out its own
+    /// `install`/`readiness` by hand. A lab that hand-writes how Istio
+    /// is installed must equally hand-write where Istio's data plane
+    /// is; inferring it from a recipe the run never loaded would be a
+    /// guess wearing a citation. When recipe-driven components land,
+    /// this field becomes the override rather than the only source, and
+    /// the type is already the one a recipe produces.
+    #[serde(default)]
+    pub gateway_endpoint: Option<GatewayEndpointSpec>,
+    /// Conditions the suite's own manifests must satisfy after they are
+    /// applied and before any route's behavior is observed.
+    ///
+    /// Empty by default, and the same vocabulary [`ComponentSpec::readiness`]
+    /// uses — for the same reason, restated one layer down: applying a
+    /// manifest returns when its objects *exist*, never when the
+    /// workloads they describe are running. A backend `Deployment` that
+    /// is not yet `Available` has no endpoints, so a request routed to
+    /// it is answered by the data plane's own `503` — a statement about
+    /// this run's timing rather than about the route, and one that would
+    /// differ between the two sides on every run.
+    ///
+    /// # Gate on what the fixture owns
+    ///
+    /// The right entries here are the suite's *own* objects: the echo
+    /// backends, a `Job` that seeds them. Gating on something the
+    /// implementation under test provisions (Istio's generated
+    /// data-plane `Deployment`, say) is a real trade and is sometimes
+    /// still correct — but it exchanges "reported as a behavior
+    /// difference" for "fails the run before a comparison happens", so
+    /// it belongs only where that object's absence is *not* the thing
+    /// being compared. Nothing here is inferred; a suite that declares
+    /// no readiness waits for nothing.
+    #[serde(default)]
+    pub readiness: Vec<ReadinessCheckSpec>,
+}
+
+/// The hand-written form of [`crate::GatewayEndpointStrategy`]: how to
+/// find the `Service` fronting a Gateway's data plane, exactly as it is
+/// written in YAML.
+///
+/// ```yaml
+/// gatewayEndpoint:
+///   type: serviceBySelector
+///   namespace: "{gatewayNamespace}"
+///   selector:
+///     gateway.networking.k8s.io/gateway-name: "{gatewayName}"
+///   portName: http
+/// ```
+///
+/// # One raw type, two documents
+///
+/// This is the raw shape for **both** `admissionlab.yaml`'s
+/// [`GatewaySuiteSpec::gateway_endpoint`] and a recipe's own
+/// `gatewayEndpoint:` block: `admissionlab_recipes::model` names this
+/// type rather than declaring a second one. Two deserializable shapes
+/// for one resolved [`crate::GatewayEndpointStrategy`] is precisely the
+/// synonym §1.2 forbids — they would be free to drift a field apart,
+/// and the recipe half and the lab half would then mean subtly
+/// different things while looking identical in YAML. Defining it here
+/// is what makes that impossible, and it is the same direction
+/// [`crate::GatewayEndpointStrategy`] itself already resolved: the leaf
+/// crate both producers and both consumers can name.
+///
+/// Internally tagged (a `type:` discriminant beside the variant's own
+/// fields), matching [`InstallMethodSpec`] and [`ReadinessCheckSpec`] —
+/// see the first for why `serde_norway` cannot represent a natural
+/// `type:` key with external tagging. `deny_unknown_fields` at this
+/// level too, so an invented key is a parse error here exactly as it is
+/// everywhere else in this schema.
+///
+/// Both ports are optional and neither is defaulted at parse time: what
+/// they mean is a question about a `Service` that does not exist yet
+/// when a document is read, so it is answered where the `Service` is
+/// actually read (`admissionlab_gateway::endpoint`). Validating them
+/// here would mean guessing.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, JsonSchema)]
+#[serde(
+    tag = "type",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+pub enum GatewayEndpointSpec {
+    /// Find the data-plane `Service` by label selector — the form this
+    /// should normally take (see [`crate::GatewayEndpointStrategy`]'s
+    /// "Prefer the selector to the name").
+    ServiceBySelector {
+        /// The namespace to search, usually `"{gatewayNamespace}"`.
+        namespace: String,
+        /// Label requirements every candidate `Service` must satisfy.
+        /// Keys are literal; only values are substituted.
+        selector: BTreeMap<String, String>,
+        /// Which of the matched `Service`'s ports to use, by name.
+        #[serde(default)]
+        port_name: Option<String>,
+        /// Which of the matched `Service`'s ports to use, by number.
+        #[serde(default)]
+        port: Option<u16>,
+    },
+    /// Find the data-plane `Service` by an exact name.
+    ServiceByName {
+        /// The `Service`'s namespace.
+        namespace: String,
+        /// The `Service`'s name.
+        name: String,
+        /// See [`GatewayEndpointSpec::ServiceBySelector::port_name`].
+        #[serde(default)]
+        port_name: Option<String>,
+        /// See [`GatewayEndpointSpec::ServiceBySelector::port`].
+        #[serde(default)]
+        port: Option<u16>,
+    },
 }
 
 /// The default [`GatewaySuiteSpec::reconciliation_timeout`]: two

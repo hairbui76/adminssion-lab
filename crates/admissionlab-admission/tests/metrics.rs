@@ -597,6 +597,7 @@ fn cluster_handle_with_missing_kubeconfig() -> ClusterHandle {
             name: "metrics-test-cluster".to_string(),
             kubernetes_version: "1.36.0".to_string(),
             node_image: "kindest/node:v1.36.0".to_string(),
+            images: Vec::new(),
         },
         kubeconfig: std::env::temp_dir().join(format!(
             "admissionlab-metrics-test-{}.yaml",

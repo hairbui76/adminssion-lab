@@ -159,6 +159,7 @@ fn spec(side: Side) -> ClusterSpec {
         name: format!("adlab-{side}"),
         kubernetes_version: "1.36.4".to_owned(),
         node_image: "kindest/node:v1.36.4".to_owned(),
+        images: Vec::new(),
     }
 }
 

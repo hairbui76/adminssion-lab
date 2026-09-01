@@ -199,6 +199,11 @@
           "const": "fixture_capture"
         },
         {
+          "description": "The configured Gateway suite was applied to both sides, every\nroute's reconciliation was observed, and every traffic probe was\nsent or explicitly skipped. Absent from a run whose configuration\nhas no `gateway:` section, which never enters this stage at all.",
+          "type": "string",
+          "const": "gateway_suite"
+        },
+        {
           "description": "Both sides' evidence was normalized, compared, and graded.",
           "type": "string",
           "const": "comparison"

@@ -274,13 +274,17 @@ fn an_unmeasured_latency_is_not_rendered_as_zero() {
 }
 
 #[test]
-fn a_fixture_with_no_admission_evidence_says_nothing_was_established() {
+fn an_entry_with_no_evidence_at_all_says_nothing_was_established() {
     let mut result = canonical_result();
     result.fixtures[3].admission = None;
 
     let page = render_html(&result);
 
-    assert!(page.contains("No admission evidence was captured for this fixture"));
+    // "on either side" rather than "admission evidence": since ROADMAP
+    // Task 6.11 an entry carries admission *or* Gateway evidence, and a
+    // message naming only the first would be wrong for half the entries
+    // a lab with a `gateway:` section produces.
+    assert!(page.contains("No evidence was captured for this entry on either side"));
 }
 
 #[test]

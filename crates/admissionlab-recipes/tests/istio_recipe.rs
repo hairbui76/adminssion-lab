@@ -339,6 +339,7 @@ async fn run_one_version(
         name,
         kubernetes_version: resolved.version.clone(),
         node_image: resolved.pinned_image.clone(),
+        images: Vec::new(),
     };
 
     let handle = manager

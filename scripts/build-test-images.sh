@@ -25,13 +25,23 @@
 #                                  and `echo-b.yaml`.
 #
 # Usage:
-#   ./scripts/build-test-images.sh <kind-cluster-name> [<kind-cluster-name> ...]
+#   ./scripts/build-test-images.sh [<kind-cluster-name> ...]
 #
 # Each named cluster must already exist (`kind create cluster` having
 # already run) -- this script only builds and loads images, the same
 # division of responsibility `admissionlab-cluster::KindClusterManager`
 # itself keeps between cluster lifecycle and everything installed inside
 # one.
+#
+# With NO cluster names, both images are built and nothing is loaded.
+# That mode exists for the case `admissionlab test` itself creates the
+# clusters mid-run (ROADMAP Task 6.11): the cluster names are not known
+# until the run is already underway, and the run side-loads the images
+# itself from the local Docker store through its configuration's
+# `images:` list (`admissionlab_spec::EnvironmentSpec::images`). What a
+# caller must still do beforehand is put the images *in* that store,
+# which is exactly what this mode does. See
+# `crates/admissionlab-cli/tests/gateway_e2e.rs`, which uses it.
 #
 # Both images are always built and always loaded, rather than taking an
 # image name as an argument: a cluster that has one but not the other
@@ -56,12 +66,13 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 <kind-cluster-name> [<kind-cluster-name> ...]" >&2
+  echo "usage: $0 [<kind-cluster-name> ...]" >&2
+  echo "  with no cluster names, both images are built and none is loaded" >&2
 }
 
-if [ "$#" -lt 1 ]; then
+if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   usage
-  exit 2
+  exit 0
 fi
 
 # Each entry is "<image tag>|<Dockerfile path, relative to the repo
@@ -112,6 +123,11 @@ for image in "${IMAGES[@]}"; do
   echo "build-test-images: built ${image_tag}"
   built_tags+=("${image_tag}")
 done
+
+if [ "$#" -eq 0 ]; then
+  echo "build-test-images: done -- ${built_tags[*]} are in the local image store; no cluster was named, so nothing was loaded"
+  exit 0
+fi
 
 failures=()
 for cluster_name in "$@"; do

@@ -47,7 +47,7 @@ Run alpha-demo-run — result schema admissionlab.io/result/v1alpha1 (experiment
 
 ### Critical findings (1)
 
-| Fixture | Subject | Change | First divergence |
+| Fixture | Subject | Change | Evidence |
 | --- | --- | --- | --- |
 | deployment-sidecar | istio-proxy | container\_added at /spec/template/spec/containers/1 | observed: the container appears in inject.example.com's candidate patch (baseline none -> candidate inject.example.com) |
 

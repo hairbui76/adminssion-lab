@@ -57,15 +57,16 @@ mod validate;
 pub use component::{
     Capability, GATEWAY_NAME_PLACEHOLDER, GATEWAY_NAMESPACE_PLACEHOLDER, GATEWAY_PLACEHOLDERS,
     GatewayEndpointStrategy, InstallMethod, ManifestInstallSpec, ReadinessCheck,
-    RecipeNormalizeRule, ResolvedComponent, substitute_gateway_placeholders,
+    RecipeNormalizeRule, ResolvedComponent, resolve_gateway_endpoint, resolve_readiness,
+    substitute_gateway_placeholders,
 };
 pub use error::SpecError;
 pub use load::load_lab;
 pub use model::{
     ALLOWED_HTTP_METHODS, ComponentSpec, CustomResourceConditionSpec,
-    DEFAULT_RECONCILIATION_TIMEOUT, EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec,
-    HelmInstallSpec, HttpProbeContract, InstallMethodSpec, LabSpec, LatencyPolicy,
-    ManifestsInstallSpec, MigrationSuiteSpec, NamedObjectSpec, NamespacedObjectSpec,
+    DEFAULT_RECONCILIATION_TIMEOUT, EnvironmentSpec, FixtureSelectionSpec, GatewayEndpointSpec,
+    GatewaySuiteSpec, HelmInstallSpec, HttpProbeContract, InstallMethodSpec, LabSpec,
+    LatencyPolicy, ManifestsInstallSpec, MigrationSuiteSpec, NamedObjectSpec, NamespacedObjectSpec,
     PolicyOverrideSpec, PolicySpec, ReadinessCheckSpec, RouteContract, is_valid_http_status,
 };
 pub use resolve::{

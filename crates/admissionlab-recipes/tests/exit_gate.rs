@@ -523,10 +523,12 @@ async fn run_exit_gate() -> Result<(), String> {
         source_path: root.join("admissionlab.yaml"),
         baseline: ResolvedEnvironment {
             kubernetes: kubernetes_version.clone(),
+            images: Vec::new(),
             components: components.clone(),
         },
         candidate: ResolvedEnvironment {
             kubernetes: kubernetes_version.clone(),
+            images: Vec::new(),
             components: components.clone(),
         },
         fixtures: admissionlab_spec::ResolvedFixtureSelection {

@@ -414,6 +414,152 @@ pub fn substitute_gateway_placeholders(
     }
 }
 
+/// Validates a hand-written [`crate::GatewayEndpointSpec`] and resolves
+/// it into a [`GatewayEndpointStrategy`].
+///
+/// Every string field a [`GatewayEndpointStrategy`] substitutes into is
+/// checked against [`GATEWAY_PLACEHOLDERS`] — so a typo such as
+/// `{gateway}` fails when the document is read rather than silently
+/// resolving to a `Service` selector that matches nothing at run time.
+/// The check runs the *real* substitution against a placeholder identity
+/// and discards the result, so this function and
+/// `admissionlab-gateway`'s own resolution can never disagree about
+/// which tokens are legal.
+///
+/// # Why this lives here rather than in `admissionlab-recipes`
+///
+/// It was in `admissionlab_recipes::capability` until ROADMAP Task 6.11
+/// gave `admissionlab.yaml` a `gateway.gatewayEndpoint:` block of its
+/// own. Two callers now read the same YAML shape into the same resolved
+/// type, and leaving the validation in the crate only one of them
+/// depends on would have forced the second to grow a copy — two
+/// validators for one vocabulary, free to drift. It lives beside
+/// [`GatewayEndpointStrategy`] and [`substitute_gateway_placeholders`],
+/// which are the two things it is defined in terms of;
+/// `admissionlab_recipes::capability::resolve_gateway_endpoint` is now a
+/// one-line delegate to it.
+///
+/// # Errors
+///
+/// Returns `Err((locator, message))`, where `locator` is a dotted path
+/// *relative to* the `gatewayEndpoint` block (for example `"namespace"`
+/// or `"selector[\"app\"]"`), when a required field is empty, when
+/// `selector` is empty, when `port` is zero, or when any substitutable
+/// field contains an unrecognized placeholder.
+pub fn resolve_gateway_endpoint(
+    raw: &crate::model::GatewayEndpointSpec,
+) -> Result<GatewayEndpointStrategy, (String, String)> {
+    match raw {
+        crate::model::GatewayEndpointSpec::ServiceBySelector {
+            namespace,
+            selector,
+            port_name,
+            port,
+        } => {
+            let namespace = endpoint_template("namespace", namespace)?;
+            if selector.is_empty() {
+                return Err((
+                    "selector".to_owned(),
+                    "must not be empty -- a selector matching every Service in the namespace \
+                     could only ever be ambiguous"
+                        .to_owned(),
+                ));
+            }
+            let selector = selector
+                .iter()
+                .map(|(key, value)| {
+                    let key = key.trim().to_owned();
+                    if key.is_empty() {
+                        return Err((
+                            "selector".to_owned(),
+                            "a label key must not be empty".to_owned(),
+                        ));
+                    }
+                    // Only values are substituted: a label *key* names
+                    // the vocabulary (`gateway.networking.k8s.io/gateway-name`),
+                    // not the instance, so a placeholder in one would be
+                    // meaningless. Checked rather than assumed, so a
+                    // document writing one is told why instead of getting
+                    // a key that silently matches nothing.
+                    if key.contains(['{', '}']) {
+                        return Err((
+                            format!("selector[{key:?}]"),
+                            "a label key must not contain a placeholder -- only label values are \
+                             substituted"
+                                .to_owned(),
+                        ));
+                    }
+                    let value = endpoint_template(&format!("selector[{key:?}]"), value)?;
+                    Ok((key, value))
+                })
+                .collect::<Result<_, _>>()?;
+            Ok(GatewayEndpointStrategy::ServiceBySelector {
+                namespace,
+                selector,
+                port_name: endpoint_port_name(port_name.as_deref())?,
+                port: endpoint_port(*port)?,
+            })
+        }
+        crate::model::GatewayEndpointSpec::ServiceByName {
+            namespace,
+            name,
+            port_name,
+            port,
+        } => Ok(GatewayEndpointStrategy::ServiceByName {
+            namespace: endpoint_template("namespace", namespace)?,
+            name: endpoint_template("name", name)?,
+            port_name: endpoint_port_name(port_name.as_deref())?,
+            port: endpoint_port(*port)?,
+        }),
+    }
+}
+
+/// Trims `value`, rejects it if empty, and proves every placeholder it
+/// contains is one [`substitute_gateway_placeholders`] recognizes.
+fn endpoint_template(locator: &str, value: &str) -> Result<String, (String, String)> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err((locator.to_owned(), "must not be empty".to_owned()));
+    }
+    // The identity here is arbitrary: only the Err/Ok distinction is
+    // used, and running the real substitution (rather than a private
+    // second scanner) is what keeps this check and
+    // `admissionlab-gateway`'s own resolution in step.
+    substitute_gateway_placeholders(trimmed, "placeholder-namespace", "placeholder-name")
+        .map_err(|message| (locator.to_owned(), message))?;
+    Ok(trimmed.to_owned())
+}
+
+/// A `portName`, if present, must be a non-empty literal. Deliberately
+/// **not** substitutable: a Service port name is part of the workload's
+/// own contract (`http`, `https`, `status-port`), never derived from a
+/// `Gateway`'s identity.
+fn endpoint_port_name(raw: Option<&str>) -> Result<Option<String>, (String, String)> {
+    let Some(raw) = raw else { return Ok(None) };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err((
+            "portName".to_owned(),
+            "must not be empty -- omit the field entirely to resolve the port some other way"
+                .to_owned(),
+        ));
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// A `port`, if present, must be a real TCP port. Values above 65535 are
+/// already rejected by `serde` (the field is a `u16`); zero is not.
+fn endpoint_port(raw: Option<u16>) -> Result<Option<u16>, (String, String)> {
+    if raw == Some(0) {
+        return Err((
+            "port".to_owned(),
+            "must not be 0 -- omit the field entirely to resolve the port some other way"
+                .to_owned(),
+        ));
+    }
+    Ok(raw)
+}
+
 /// Converts one [`ComponentSpec`] into a [`ResolvedComponent`], resolving
 /// every relative path inside its `install` block against `config_dir`
 /// (see `resolve.rs`'s module documentation and
@@ -501,7 +647,15 @@ pub(crate) fn resolve_component(
 ///
 /// Matched exhaustively with no wildcard arm, so a sixth variant on
 /// either side is a compile error rather than a silently dropped check.
-fn resolve_readiness(raw: &ReadinessCheckSpec) -> ReadinessCheck {
+///
+/// `pub` since ROADMAP Task 6.11: a component's readiness is resolved
+/// here by [`resolve_component`], and a Gateway suite's own
+/// [`crate::GatewaySuiteSpec::readiness`] is resolved by its runner in
+/// `admissionlab-cli`, which has to be able to call the *same*
+/// conversion. Two conversions for one vocabulary is the drift this
+/// crate's ownership rules exist to prevent.
+#[must_use]
+pub fn resolve_readiness(raw: &ReadinessCheckSpec) -> ReadinessCheck {
     match raw {
         ReadinessCheckSpec::DeploymentAvailable(object) => ReadinessCheck::DeploymentAvailable {
             namespace: object.namespace.clone(),

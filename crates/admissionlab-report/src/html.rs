@@ -77,12 +77,20 @@ use admissionlab_admission::{
 };
 use admissionlab_core::Diagnostic;
 use admissionlab_diff::{DivergenceConfidence, DivergenceEvidence};
+use admissionlab_gateway::{
+    CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionState,
+    GatewayCaseResult, GatewayComparability, GatewayEvidenceLevel, HttpProbeResult,
+    ObservedCondition, ParentIdentity, RouteEvidence, RouteParentStatus,
+};
 use admissionlab_policy::{ClassifiedChange, PolicyDisposition, Severity};
 use serde_json::Value;
 
 use crate::error::ReportError;
 use crate::json::write_atomic;
-use crate::model::{AdmissionComparison, FixtureBucket, FixtureComparison, LabResult, RunSummary};
+use crate::model::{
+    AdmissionComparison, FixtureBucket, FixtureComparison, GatewayCaseComparison, LabResult,
+    RunSummary,
+};
 
 /// The page skeleton, embedded at compile time so the built binary
 /// carries no runtime file dependency of its own.
@@ -274,8 +282,8 @@ fn render_fixture(fixture: &FixtureComparison) -> String {
         id = escape_html(fixture.fixture_id.as_str()),
     );
 
-    match &fixture.admission {
-        Some(admission) => {
+    match (&fixture.admission, &fixture.gateway) {
+        (Some(admission), _) => {
             out.push_str("<h3>Decision</h3>");
             out.push_str(&render_decision_table(admission));
             out.push_str("<h3>First divergence</h3>");
@@ -288,14 +296,246 @@ fn render_fixture(fixture: &FixtureComparison) -> String {
             out.push_str("<h3>Raw evidence</h3>");
             out.push_str(&render_raw_availability(admission));
         }
-        None => out.push_str(
-            "<p class=\"note\">No admission evidence was captured for this fixture, \
+        // A Gateway route contract (ROADMAP Task 6.11). Deliberately the
+        // same panel shape as an admission fixture -- an evidence
+        // section, then the graded changes -- rather than a second
+        // layout, because a reader scanning a report should not have to
+        // learn two ways to read a finding.
+        (None, Some(gateway)) => {
+            out.push_str("<h3>Comparability</h3>");
+            out.push_str(&render_gateway_comparability(gateway));
+            out.push_str("<h3>Reconciliation</h3>");
+            out.push_str(&render_gateway_conditions(gateway));
+            out.push_str("<h3>Traffic</h3>");
+            out.push_str(&render_gateway_traffic(gateway));
+            out.push_str("<h3>Changes</h3>");
+            out.push_str(&render_changes(&fixture.changes));
+        }
+        (None, None) => out.push_str(
+            "<p class=\"note\">No evidence was captured for this entry on either side, \
              so nothing about the two sides' behavior was established.</p>",
         ),
     }
 
     out.push_str("</details>");
     out
+}
+
+/// How comparable one route contract's two sides were, in the same words
+/// the terminal report uses.
+fn render_gateway_comparability(gateway: &GatewayCaseComparison) -> String {
+    let (class, text) = match gateway.comparability() {
+        GatewayComparability::Comparable => (
+            "note",
+            "Both sides converged, so differences and absences between them are evidence."
+                .to_owned(),
+        ),
+        GatewayComparability::Partial {
+            baseline,
+            candidate,
+        } => (
+            "warn",
+            format!(
+                "Only one side converged (baseline {}, candidate {}). Differences between \
+                 values both sides published are real, but this contract is counted \
+                 inconclusive: an empty change list here would not mean the two sides agreed.",
+                evidence_level_label(baseline),
+                evidence_level_label(candidate),
+            ),
+        ),
+        GatewayComparability::Incomparable {
+            baseline,
+            candidate,
+        } => (
+            "warn",
+            format!(
+                "Neither side converged (baseline {}, candidate {}). Nothing was compared.",
+                evidence_level_label(baseline),
+                evidence_level_label(candidate),
+            ),
+        ),
+    };
+    format!("<p class=\"{class}\">{}</p>", escape_html(&text))
+}
+
+/// One side's evidence level, in words.
+fn evidence_level_label(level: GatewayEvidenceLevel) -> &'static str {
+    match level {
+        GatewayEvidenceLevel::Converged => "converged",
+        GatewayEvidenceLevel::Unconverged => "unconverged but current",
+        GatewayEvidenceLevel::Stale => "stale",
+    }
+}
+
+/// Both sides' `GatewayClass`, `Gateway` and per-parent `HTTPRoute`
+/// conditions, side by side -- the same table shape the decision pair
+/// uses.
+fn render_gateway_conditions(gateway: &GatewayCaseComparison) -> String {
+    let mut out = String::from("<table><tr><th></th><th>baseline</th><th>candidate</th></tr>");
+    let row = |label: String, baseline: String, candidate: String| {
+        format!(
+            "<tr><th>{}</th><td>{}</td><td>{}</td></tr>",
+            escape_html(&label),
+            escape_html(&baseline),
+            escape_html(&candidate),
+        )
+    };
+    let sides = [&gateway.baseline, &gateway.candidate];
+    out.push_str(&row(
+        "converged".to_owned(),
+        converged_text(&gateway.baseline),
+        converged_text(&gateway.candidate),
+    ));
+    out.push_str(&row(
+        "GatewayClass Accepted".to_owned(),
+        gateway_class_text(&gateway.baseline),
+        gateway_class_text(&gateway.candidate),
+    ));
+    for type_name in [CONDITION_ACCEPTED, CONDITION_PROGRAMMED] {
+        out.push_str(&row(
+            format!("Gateway {type_name}"),
+            condition_text(&sides[0].reconciliation.gateway.condition(type_name)),
+            condition_text(&sides[1].reconciliation.gateway.condition(type_name)),
+        ));
+    }
+    // Keyed by the parent identity each side published, so a parent
+    // present on only one side shows as `Missing` on the other rather
+    // than shifting every row below it.
+    let mut parents: Vec<&ParentIdentity> = Vec::new();
+    for side in sides {
+        for parent in &side.reconciliation.route.parents {
+            if !parents.contains(&&parent.parent) {
+                parents.push(&parent.parent);
+            }
+        }
+    }
+    for parent in parents {
+        for type_name in [CONDITION_ACCEPTED, CONDITION_RESOLVED_REFS] {
+            out.push_str(&row(
+                format!("HTTPRoute via {} {type_name}", parent_text(parent)),
+                parent_condition_text(&sides[0].reconciliation.route, parent, type_name),
+                parent_condition_text(&sides[1].reconciliation.route, parent, type_name),
+            ));
+        }
+    }
+    out.push_str("</table>");
+    out
+}
+
+/// Whether one side converged, and how long its wait took.
+fn converged_text(case: &GatewayCaseResult) -> String {
+    format!(
+        "{} in {}ms",
+        if case.reconciliation.converged {
+            "yes"
+        } else {
+            "NO"
+        },
+        case.reconciliation.elapsed.as_millis(),
+    )
+}
+
+/// One side's `GatewayClass` name and `Accepted` condition, or a plain
+/// statement that it observed none.
+fn gateway_class_text(case: &GatewayCaseResult) -> String {
+    match &case.reconciliation.gateway_class {
+        Some(class) => format!("{}: {}", class.name, condition_text(&class.accepted)),
+        None => "no GatewayClass was observed".to_owned(),
+    }
+}
+
+/// One parent's condition on one side, looked up by identity.
+fn parent_condition_text(
+    route: &RouteEvidence,
+    parent: &ParentIdentity,
+    type_name: &str,
+) -> String {
+    let matches: Vec<&RouteParentStatus> = route
+        .parents
+        .iter()
+        .filter(|entry| &entry.parent == parent)
+        .collect();
+    match matches.as_slice() {
+        [entry] => condition_text(&entry.condition(type_name)),
+        // The ambiguous case `admissionlab_gateway::conditions` refuses
+        // to resolve by position, reported rather than resolved here too.
+        [] => "this side published no status for this parent".to_owned(),
+        several => format!(
+            "{} status entries match this parent; none can be chosen",
+            several.len()
+        ),
+    }
+}
+
+/// One condition, with its controller-supplied reason when it has one.
+fn condition_text(condition: &ObservedCondition) -> String {
+    let state = match condition.state {
+        ConditionState::True => "True",
+        ConditionState::False => "False",
+        ConditionState::Unknown => "Unknown",
+        ConditionState::Missing => "Missing",
+    };
+    match &condition.reason {
+        Some(reason) => format!("{state} ({reason})"),
+        None => state.to_owned(),
+    }
+}
+
+/// A route's claimed parent, as `namespace/name#listener`.
+fn parent_text(parent: &ParentIdentity) -> String {
+    let namespace = parent
+        .namespace
+        .as_deref()
+        .unwrap_or("(the route's own namespace)");
+    match &parent.section_name {
+        Some(listener) => format!("{namespace}/{}#{listener}", parent.name),
+        None => format!("{namespace}/{}", parent.name),
+    }
+}
+
+/// Both sides' probe results, paired by index, plus every probe only one
+/// side answered.
+///
+/// A side with no probe at all says so in words. That is ROADMAP Task
+/// 6.11 step 3's explicit skip: the run did not send a request through
+/// that route, and an empty row would read as a request that returned
+/// nothing.
+fn render_gateway_traffic(gateway: &GatewayCaseComparison) -> String {
+    let baseline = &gateway.baseline.probes;
+    let candidate = &gateway.candidate.probes;
+    if baseline.is_empty() && candidate.is_empty() {
+        return "<p class=\"note\">No traffic probe was sent on either side. \
+                See this run's diagnostics for the reason each side was skipped.</p>"
+            .to_owned();
+    }
+    let mut out = String::from("<table><tr><th>probe</th><th>baseline</th><th>candidate</th></tr>");
+    for index in 0..baseline.len().max(candidate.len()) {
+        let _: Result<(), std::fmt::Error> = write!(
+            out,
+            "<tr><th>#{index}</th><td>{}</td><td>{}</td></tr>",
+            escape_html(&probe_text(baseline.get(index))),
+            escape_html(&probe_text(candidate.get(index))),
+        );
+    }
+    out.push_str("</table>");
+    out
+}
+
+/// One probe result, or a statement that this side answered none.
+fn probe_text(probe: Option<&HttpProbeResult>) -> String {
+    let Some(probe) = probe else {
+        return "no probe was sent on this side".to_owned();
+    };
+    format!(
+        "HTTP {} from {} ({} attempt(s), {}ms)",
+        probe.status,
+        probe
+            .backend
+            .as_deref()
+            .unwrap_or("a backend that did not identify itself"),
+        probe.attempts,
+        probe.elapsed.as_millis(),
+    )
 }
 
 /// The baseline/candidate decision pair, side by side.

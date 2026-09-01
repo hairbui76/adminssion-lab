@@ -65,7 +65,13 @@ use std::fmt::Write as _;
 
 use admissionlab_admission::AdmissionDecision;
 use admissionlab_diff::{DivergenceConfidence, DivergenceEvidence};
+use admissionlab_gateway::{
+    CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionState,
+    GatewayCaseResult, GatewayComparability, GatewayEvidenceLevel, ObservedCondition,
+    ParentIdentity,
+};
 use admissionlab_policy::{ClassifiedChange, PolicyDisposition, Severity};
+use serde_json::Value;
 
 use crate::model::{
     AdmissionComparison, EnvironmentReport, FixtureBucket, FixtureComparison, LabResult, RunSummary,
@@ -135,6 +141,7 @@ pub fn render_terminal(result: &LabResult, options: &TerminalOptions) -> String 
         "Warnings",
         &palette,
     );
+    render_gateway(&mut out, result, &palette);
     render_inconclusive(&mut out, result, &palette);
     render_stale_expectations(&mut out, result, &palette);
     render_diagnostics(&mut out, result, &palette);
@@ -316,6 +323,19 @@ fn render_change(
     }
     out.push('\n');
 
+    // A Gateway change has no webhook chain to have first diverged in,
+    // so it gets the evidence it *does* have -- the two sides' own
+    // condition states and probe results, read straight out of the
+    // change's payloads -- rather than a "first divergence: not
+    // attributed" line answering a question that does not apply to it.
+    if fixtures
+        .get(change.fixture_id.as_str())
+        .is_some_and(|fixture| fixture.gateway.is_some())
+    {
+        render_gateway_change(out, classified, palette);
+        return;
+    }
+
     // A change's own attribution is preferred over the fixture-level
     // one: it was computed for *this* difference, while the fixture's
     // `first_divergence` answers the coarser question of where the two
@@ -338,6 +358,102 @@ fn render_change(
             );
         }
     }
+}
+
+/// One Gateway finding's evidence: which object it is about, and what
+/// each side published.
+///
+/// Read out of the change's own `baseline`/`candidate` payloads, which
+/// `admissionlab_gateway::diff` builds with a fixed set of keys
+/// (`object`/`name`/`namespace`/`condition`/`state`/`reason` for a
+/// condition change, `probeIndex`/`status`/`backend` for a traffic one).
+/// Rendering from the payload rather than from the case evidence is what
+/// keeps this line describing *this* change: a route with two parents
+/// has one finding per parent, and each one carries its own.
+///
+/// A side whose payload is absent prints as such. For a traffic change
+/// that means exactly one thing -- that side answered no probe, because
+/// its route never reached a state worth sending one through -- and it
+/// is the "skipped traffic behavior" half of ROADMAP Task 6.12's first
+/// user-facing failure.
+fn render_gateway_change(out: &mut String, classified: &ClassifiedChange, palette: &Palette) {
+    let change = &classified.change;
+    if let Some(object) = change
+        .baseline
+        .as_ref()
+        .or(change.candidate.as_ref())
+        .and_then(payload_object_line)
+    {
+        let _ = writeln!(
+            out,
+            "    {dim}{object}{reset}",
+            dim = palette.dim,
+            reset = palette.reset,
+        );
+    }
+    let _ = writeln!(
+        out,
+        "    {dim}baseline{reset} {baseline} {dim}->{reset} {dim}candidate{reset} {candidate}",
+        dim = palette.dim,
+        reset = palette.reset,
+        baseline = payload_side_text(change.baseline.as_ref()),
+        candidate = payload_side_text(change.candidate.as_ref()),
+    );
+}
+
+/// Which object a Gateway change payload is about, as
+/// `HTTPRoute default/echo-route via default/lab-gateway#http`.
+///
+/// [`None`] when the payload names no object at all, which no payload
+/// this crate renders does -- the fallible read is here so an unexpected
+/// payload shape prints one line less rather than panicking.
+fn payload_object_line(payload: &Value) -> Option<String> {
+    let object = payload.get("object")?.as_str()?;
+    let name = payload.get("name").and_then(Value::as_str)?;
+    let mut line = match payload.get("namespace").and_then(Value::as_str) {
+        Some(namespace) => format!("{object} {namespace}/{name}"),
+        None => format!("{object} {name}"),
+    };
+    if let Some(parent) = payload.get("parent") {
+        let parent_name = parent.get("name").and_then(Value::as_str).unwrap_or("?");
+        let namespace = parent
+            .get("namespace")
+            .and_then(Value::as_str)
+            .unwrap_or("(the route's own namespace)");
+        let _: Result<(), std::fmt::Error> = write!(line, " via {namespace}/{parent_name}");
+        if let Some(listener) = parent.get("sectionName").and_then(Value::as_str) {
+            let _: Result<(), std::fmt::Error> = write!(line, "#{listener}");
+        }
+    }
+    Some(line)
+}
+
+/// One side of a Gateway change payload, as
+/// `ResolvedRefs=False (RefNotPermitted)` or `HTTP 200 from echo-a`.
+fn payload_side_text(payload: Option<&Value>) -> String {
+    let Some(payload) = payload else {
+        return "answered nothing".to_owned();
+    };
+    if let Some(condition) = payload.get("condition").and_then(Value::as_str) {
+        let state = payload
+            .get("state")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        return match payload.get("reason").and_then(Value::as_str) {
+            Some(reason) => format!("{condition}={state} ({reason})"),
+            None => format!("{condition}={state}"),
+        };
+    }
+    if let Some(status) = payload.get("status").and_then(Value::as_u64) {
+        return match payload.get("backend").and_then(Value::as_str) {
+            Some(backend) => format!("HTTP {status} from {backend}"),
+            None => format!("HTTP {status} from a backend that did not identify itself"),
+        };
+    }
+    // A membership change (`route_attached`/`route_detached`/
+    // `listener_binding_changed`) has no state and no status; the object
+    // line above already said which Gateway and listener it is about.
+    "present".to_owned()
 }
 
 /// A divergence attribution, with its confidence spelled out.
@@ -402,6 +518,237 @@ fn webhook_side(webhook: Option<&str>, position: Option<(u32, u32)>) -> String {
     }
 }
 
+/// Every Gateway route contract the run observed, with each side's
+/// reconciliation and traffic evidence (ROADMAP Task 6.11).
+///
+/// Omitted entirely for an admission-only run: a lab with no `gateway:`
+/// section has no Gateway section, rather than an empty heading claiming
+/// zero routes. Every other section here is unconditional because its
+/// count is meaningful (a run always has some number of critical
+/// findings, including none); "how many Gateway routes" is not a
+/// question an admission-only run answers at all.
+///
+/// Present *whatever* the comparison found, including when it found
+/// nothing: this section is the evidence, not the findings, and a route
+/// whose two sides agreed is exactly as much a part of it as one that
+/// regressed. `admissionlab_gateway::diff`'s own documentation is
+/// explicit that an empty change list can also mean "nothing was worth
+/// comparing", which is why the comparability of each pair is stated
+/// here rather than left to be inferred from a silent findings list.
+fn render_gateway(out: &mut String, result: &LabResult, palette: &Palette) {
+    let cases: Vec<&FixtureComparison> = result
+        .fixtures
+        .iter()
+        .filter(|fixture| fixture.gateway.is_some())
+        .collect();
+    if cases.is_empty() {
+        return;
+    }
+
+    let _ = writeln!(
+        out,
+        "{bold}Gateway{reset}  {count} route contract(s)",
+        bold = palette.bold,
+        reset = palette.reset,
+        count = cases.len(),
+    );
+    for fixture in cases {
+        let Some(gateway) = &fixture.gateway else {
+            continue;
+        };
+        let _ = writeln!(
+            out,
+            "  {bold}{contract}{reset}  {dim}{comparability}{reset}",
+            bold = palette.bold,
+            dim = palette.dim,
+            reset = palette.reset,
+            contract = fixture.fixture_id.as_str(),
+            comparability = comparability_label(gateway.comparability()),
+        );
+        for (side, case) in [
+            ("baseline", &gateway.baseline),
+            ("candidate", &gateway.candidate),
+        ] {
+            render_gateway_side(out, side, case, palette);
+        }
+    }
+    out.push('\n');
+}
+
+/// One side of one route contract: whether it converged, what its three
+/// objects published, and what its probes returned.
+fn render_gateway_side(out: &mut String, side: &str, case: &GatewayCaseResult, palette: &Palette) {
+    let evidence = &case.reconciliation;
+    let _ = writeln!(
+        out,
+        "    {dim}{side}:{reset} {converged} in {elapsed}",
+        dim = palette.dim,
+        reset = palette.reset,
+        converged = if evidence.converged {
+            "converged"
+        } else {
+            // Never softened to "still settling": the waiter spent the
+            // whole deadline, and `admissionlab_gateway::reconcile`
+            // returns this as evidence rather than an error precisely
+            // so a reader sees it (Global Constraint 15).
+            "did NOT converge"
+        },
+        elapsed = format_millis(evidence.elapsed),
+    );
+    if let Some(class) = &evidence.gateway_class {
+        let _ = writeln!(
+            out,
+            "      GatewayClass {name}  {accepted}",
+            name = class.name,
+            accepted = condition_text(&class.accepted),
+        );
+    }
+    let _ = writeln!(
+        out,
+        "      Gateway {identity}  {conditions}",
+        identity = evidence.gateway.identity,
+        conditions = conditions_text(&[CONDITION_ACCEPTED, CONDITION_PROGRAMMED], |type_name| {
+            evidence.gateway.condition(type_name)
+        }),
+    );
+    for parent in &evidence.route.parents {
+        let _ = writeln!(
+            out,
+            "      HTTPRoute {namespace}/{name} via {parent}  {conditions}",
+            namespace = evidence.route.namespace,
+            name = evidence.route.name,
+            parent = parent_text(&parent.parent),
+            conditions = conditions_text(
+                &[CONDITION_ACCEPTED, CONDITION_RESOLVED_REFS],
+                |type_name| parent.condition(type_name)
+            ),
+        );
+    }
+    if evidence.route.parents.is_empty() {
+        let _ = writeln!(
+            out,
+            "      HTTPRoute {namespace}/{name}  {dim}published no parent status at all{reset}",
+            dim = palette.dim,
+            reset = palette.reset,
+            namespace = evidence.route.namespace,
+            name = evidence.route.name,
+        );
+    }
+    if case.probes.is_empty() {
+        // The explicit skip (ROADMAP Task 6.11 step 3). *Why* it was
+        // skipped is a run-level `gateway.probe_skipped` diagnostic,
+        // rendered in the Diagnostics section with the specific
+        // condition that was not `True`; saying "none" here without
+        // saying "no probe was sent" would let an empty list read as a
+        // probe that returned nothing.
+        let _ = writeln!(
+            out,
+            "      {dim}traffic: no probe was sent{reset}",
+            dim = palette.dim,
+            reset = palette.reset,
+        );
+    }
+    for (index, probe) in case.probes.iter().enumerate() {
+        let _ = writeln!(
+            out,
+            "      traffic: probe #{index} -> HTTP {status} from {backend}",
+            status = probe.status,
+            backend = probe
+                .backend
+                .as_deref()
+                // Never "unknown backend" softened into a name: the
+                // response did not identify itself, which is a different
+                // fact from "a backend called none answered".
+                .unwrap_or("a backend that did not identify itself"),
+        );
+    }
+}
+
+/// How comparable one route contract's two sides were, in words.
+fn comparability_label(comparability: GatewayComparability) -> String {
+    match comparability {
+        GatewayComparability::Comparable => {
+            "both sides converged; differences and absences are evidence".to_owned()
+        }
+        GatewayComparability::Partial {
+            baseline,
+            candidate,
+        } => format!(
+            "only one side converged (baseline {}, candidate {}); counted inconclusive",
+            evidence_level_label(baseline),
+            evidence_level_label(candidate),
+        ),
+        GatewayComparability::Incomparable {
+            baseline,
+            candidate,
+        } => format!(
+            "neither side converged (baseline {}, candidate {}); nothing was compared",
+            evidence_level_label(baseline),
+            evidence_level_label(candidate),
+        ),
+    }
+}
+
+/// One side's own evidence level, in words.
+fn evidence_level_label(level: GatewayEvidenceLevel) -> &'static str {
+    match level {
+        GatewayEvidenceLevel::Converged => "converged",
+        GatewayEvidenceLevel::Unconverged => "unconverged but current",
+        GatewayEvidenceLevel::Stale => "stale",
+    }
+}
+
+/// A run of conditions looked up by type, rendered as
+/// `Accepted=True Programmed=False (AddressNotAssigned)`.
+fn conditions_text(type_names: &[&str], lookup: impl Fn(&str) -> ObservedCondition) -> String {
+    type_names
+        .iter()
+        .map(|type_name| condition_text(&lookup(type_name)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One condition: its type, its state, and its controller-supplied
+/// reason when it published one.
+///
+/// The reason is shown but never *compared* -- `admissionlab_gateway::diff`
+/// is explicit that a reason string is never itself a change. It is here
+/// because it is the one piece of evidence that tells a reader why a
+/// condition is `False`.
+fn condition_text(condition: &ObservedCondition) -> String {
+    let state = match condition.state {
+        ConditionState::True => "True",
+        ConditionState::False => "False",
+        ConditionState::Unknown => "Unknown",
+        ConditionState::Missing => "Missing",
+    };
+    match &condition.reason {
+        Some(reason) => format!("{}={state} ({reason})", condition.type_name),
+        None => format!("{}={state}", condition.type_name),
+    }
+}
+
+/// A route's claimed parent, as `namespace/name#listener`, with each
+/// absent half spelled out rather than silently defaulted.
+fn parent_text(parent: &ParentIdentity) -> String {
+    let namespace = parent
+        .namespace
+        .as_deref()
+        // Gateway API's own default, stated rather than substituted:
+        // the report shows what the status said.
+        .unwrap_or("(the route's own namespace)");
+    match &parent.section_name {
+        Some(listener) => format!("{namespace}/{}#{listener}", parent.name),
+        None => format!("{namespace}/{}", parent.name),
+    }
+}
+
+/// Whole milliseconds, the same resolution
+/// `admissionlab_core::StageTimings` publishes.
+fn format_millis(elapsed: std::time::Duration) -> String {
+    format!("{}ms", elapsed.as_millis())
+}
+
 /// Fixtures whose evidence does not support a comparison, with each
 /// side's own reason.
 ///
@@ -441,12 +788,25 @@ fn render_inconclusive(out: &mut String, result: &LabResult, palette: &Palette) 
             reset = palette.reset,
             fixture = fixture.fixture_id.as_str(),
         );
-        match &fixture.admission {
-            Some(admission) => render_incomparable_sides(out, admission, palette),
-            None => {
+        match (&fixture.admission, &fixture.gateway) {
+            (Some(admission), _) => render_incomparable_sides(out, admission, palette),
+            // A Gateway route contract whose two sides are not
+            // comparable states *why* in its own vocabulary, which is
+            // the comparability answer the Gateway section prints beside
+            // it rather than a second, differently worded one.
+            (None, Some(gateway)) => {
                 let _ = writeln!(
                     out,
-                    "    {dim}no admission evidence was captured{reset}",
+                    "    {dim}{reason}{reset}",
+                    dim = palette.dim,
+                    reset = palette.reset,
+                    reason = comparability_label(gateway.comparability()),
+                );
+            }
+            (None, None) => {
+                let _ = writeln!(
+                    out,
+                    "    {dim}no evidence was captured on either side{reset}",
                     dim = palette.dim,
                     reset = palette.reset,
                 );

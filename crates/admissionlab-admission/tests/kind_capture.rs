@@ -184,6 +184,7 @@ async fn run_capture_test() -> Result<(), String> {
         name,
         kubernetes_version: resolved.version.clone(),
         node_image: resolved.pinned_image.clone(),
+        images: Vec::new(),
     };
 
     let handle = manager

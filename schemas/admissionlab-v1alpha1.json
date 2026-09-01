@@ -119,6 +119,14 @@
             "$ref": "#/$defs/ComponentSpec"
           }
         },
+        "images": {
+          "description": "Container images already present in the operator's **local**\nimage store that must be side-loaded into this side's ephemeral\ncluster before anything is installed into it.\n\nEmpty by default, and empty for every lab whose workloads come\nfrom a registry: a `kind` node pulls those itself. The field\nexists for the case a registry cannot answer at all — a manifest\nreferencing an image that was built locally and never pushed,\nwhich is exactly what Admission Lab's own Gateway suites do (the\ndeterministic echo backend in `crates/admissionlab-echo` is built\nby `scripts/build-test-images.sh` and tagged\n`admissionlab-echo:dev`, and the manifests that reference it use\n`imagePullPolicy: IfNotPresent`). Without this list such a\nmanifest fails inside the run with an `ErrImageNeverPull` that\nreads as a broken fixture rather than as a missing image.\n\nEach entry is a plain image reference (`name:tag`), passed\nthrough verbatim as one argument to the cluster backend's own\nside-load command — never interpolated into a shell string\n(Global Constraint 12). Loading happens once, immediately after\nthe cluster is created and before the first component is\ninstalled, and a failure to load fails the cluster rather than\nbeing discovered later as a scheduling error.\n\n**This is not a way to skip a registry for convenience.** Both\nsides list their own images independently, so a lab that loads\ndifferent images per side is expressible and is exactly as\nvisible in the configuration as a different chart version would\nbe.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
         "kubernetes": {
           "description": "The Kubernetes version to provision, for example `\"1.30.4\"`. Must\nnot be empty — validated by [`crate::resolve_lab`].",
           "type": "string"
@@ -144,15 +152,127 @@
       },
       "additionalProperties": false
     },
+    "GatewayEndpointSpec": {
+      "description": "The hand-written form of [`crate::GatewayEndpointStrategy`]: how to\nfind the `Service` fronting a Gateway's data plane, exactly as it is\nwritten in YAML.\n\n```yaml\ngatewayEndpoint:\n  type: serviceBySelector\n  namespace: \"{gatewayNamespace}\"\n  selector:\n    gateway.networking.k8s.io/gateway-name: \"{gatewayName}\"\n  portName: http\n```\n\n# One raw type, two documents\n\nThis is the raw shape for **both** `admissionlab.yaml`'s\n[`GatewaySuiteSpec::gateway_endpoint`] and a recipe's own\n`gatewayEndpoint:` block: `admissionlab_recipes::model` names this\ntype rather than declaring a second one. Two deserializable shapes\nfor one resolved [`crate::GatewayEndpointStrategy`] is precisely the\nsynonym §1.2 forbids — they would be free to drift a field apart,\nand the recipe half and the lab half would then mean subtly\ndifferent things while looking identical in YAML. Defining it here\nis what makes that impossible, and it is the same direction\n[`crate::GatewayEndpointStrategy`] itself already resolved: the leaf\ncrate both producers and both consumers can name.\n\nInternally tagged (a `type:` discriminant beside the variant's own\nfields), matching [`InstallMethodSpec`] and [`ReadinessCheckSpec`] —\nsee the first for why `serde_norway` cannot represent a natural\n`type:` key with external tagging. `deny_unknown_fields` at this\nlevel too, so an invented key is a parse error here exactly as it is\neverywhere else in this schema.\n\nBoth ports are optional and neither is defaulted at parse time: what\nthey mean is a question about a `Service` that does not exist yet\nwhen a document is read, so it is answered where the `Service` is\nactually read (`admissionlab_gateway::endpoint`). Validating them\nhere would mean guessing.",
+      "oneOf": [
+        {
+          "description": "Find the data-plane `Service` by label selector — the form this\nshould normally take (see [`crate::GatewayEndpointStrategy`]'s\n\"Prefer the selector to the name\").",
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "description": "The namespace to search, usually `\"{gatewayNamespace}\"`.",
+              "type": "string"
+            },
+            "port": {
+              "description": "Which of the matched `Service`'s ports to use, by number.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "default": null,
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "portName": {
+              "description": "Which of the matched `Service`'s ports to use, by name.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "selector": {
+              "description": "Label requirements every candidate `Service` must satisfy.\nKeys are literal; only values are substituted.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "serviceBySelector"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "selector"
+          ]
+        },
+        {
+          "description": "Find the data-plane `Service` by an exact name.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The `Service`'s name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The `Service`'s namespace.",
+              "type": "string"
+            },
+            "port": {
+              "description": "See [`GatewayEndpointSpec::ServiceBySelector::port`].",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "default": null,
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "portName": {
+              "description": "See [`GatewayEndpointSpec::ServiceBySelector::port_name`].",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "serviceByName"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        }
+      ]
+    },
     "GatewaySuiteSpec": {
       "description": "The Gateway behavior suite (ROADMAP Task 6.1): the Gateway API\nfixtures a lab persists in each side's cluster, plus the traffic\ncontract each route is expected to satisfy.\n\n# Why this type lives in `admissionlab-spec` and not `admissionlab-gateway`\n\nROADMAP Task 6.1 lists `crates/admissionlab-gateway/src/model.rs` as\nthis type's file, but §1.2's cross-task type registry *also* freezes\n[`crate::ResolvedLab::gateway`] as an `Option<GatewaySuiteSpec>`.\nThose two statements can only both hold if exactly one crate defines\nthe type and the other names it — and the direction is forced:\n`admissionlab-gateway` depends on `admissionlab-core`, which depends\non this crate, so a `spec -> gateway` edge would be a dependency\ncycle Cargo rejects outright. The canonical definition therefore\nlives here, next to every other type a user hand-writes in\n`admissionlab.yaml`, and `admissionlab_gateway::model` **re-exports\nthis exact type** rather than declaring a second one — §1.2's \"these\nnames are canonical\" rule forbids a synonym, and a parallel\n`GatewayRouteContract`-style twin is exactly the drift that rule\nexists to prevent. Everything Phase 6 adds that a *user never writes*\n(observed conditions, reconciliation evidence, probe results) is\ndeclared in `admissionlab-gateway` itself; only the hand-written\nconfiguration surface is here. That is the same split this workspace\nalready uses between [`ComponentSpec`] (hand-written) and\n[`crate::ResolvedComponent`] (runtime).\n\n# One type for both the raw and the resolved stage\n\nUnlike [`EnvironmentSpec`]/[`crate::ResolvedEnvironment`], there is\nno separate resolved twin, because §1.2 freezes the single name\n`GatewaySuiteSpec` on [`crate::ResolvedLab`]. The two stages are\ndistinguished by *where the value is read from*, and the difference\nis confined to one field:\n\n- in [`LabSpec::gateway`], every [`GatewaySuiteSpec::manifests`] path\n  is exactly as the user wrote it (possibly relative);\n- in [`crate::ResolvedLab::gateway`], every path has been joined onto\n  the configuration file's own directory by [`crate::resolve_lab`].\n\nNothing else changes between the stages: [`RouteContract`] and\n[`HttpProbeContract`] contain no filesystem paths at all, and\n[`crate::resolve_lab`] validates them in place rather than rewriting\nthem.\n\n# Traffic expectations are not regression policy\n\n[`HttpProbeContract::expected_status`] and\n[`HttpProbeContract::expected_backend`] say what a route *should do*.\nThey deliberately carry no severity, no `failOn` category, and no\n\"expected regression\" marker: Global Constraint 6 keeps\nclassification out of vendor-supplied metadata, and this project\nalready has exactly one place where a behavioral difference is graded\n([`PolicySpec`], evaluated by `admissionlab-policy`) and exactly one\nplace where a known-and-accepted difference is recorded (the\nexpectations file, [`LabSpec::expectations_file`]). A severity field\nhere would be a second, competing grader whose answer could disagree\nwith the first for the same run — see [`PolicyOverrideSpec`] for the\nvocabulary that already exists for \"this difference is acceptable\".",
       "type": "object",
       "properties": {
+        "gatewayEndpoint": {
+          "description": "How to find the `Service` that fronts each Gateway's data plane,\nso a probe can be sent through it.\n\n`None` — the default — means **no traffic probe is ever sent**.\nEvery [`RouteContract`] still has its reconciliation observed and\ncompared; a contract that also declares [`RouteContract::probes`]\nhas each of them recorded as an explicit skip rather than\nsilently dropped, because a run that cannot reach a data plane\nhas not observed that route's traffic behavior and must not\nimply it did (Global Constraint 15).\n\n# Why this is written here and not inherited from a recipe\n\n[`crate::GatewayEndpointStrategy`]'s own documentation calls this\n*install metadata*, and a certified recipe declares it\n(`recipes/istio-gateway/recipe.yaml`'s `gatewayEndpoint:` block\nparses into the very same [`GatewayEndpointSpec`] this field\ntakes). But `admissionlab.yaml` has no recipe resolution:\n[`ComponentSpec::recipe`] is carried through unresolved, and\nevery component in a lab file spells out its own\n`install`/`readiness` by hand. A lab that hand-writes how Istio\nis installed must equally hand-write where Istio's data plane\nis; inferring it from a recipe the run never loaded would be a\nguess wearing a citation. When recipe-driven components land,\nthis field becomes the override rather than the only source, and\nthe type is already the one a recipe produces.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GatewayEndpointSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "manifests": {
           "description": "Kubernetes manifest files defining the Gateway API fixture:\nnamespaces, backends, `GatewayClass`, `Gateway`, `HTTPRoute`, and\nanything else the suite needs. Resolved against the configuration\nfile's own directory by [`crate::resolve_lab`], the same as every\nother path in the document (see [`crate::resolve::config_directory`]).\nMust not be empty — validated by [`crate::resolve_lab`], for the\nsame reason [`ManifestsInstallSpec::paths`] must not be: a suite\nthat installs nothing and calls that success is a quiet no-op.\n\n**These manifests are persisted, not dry-run.** Global Constraint\n16 makes server-side dry-run the authoritative *admission*\nfixture mode; ROADMAP Phase 6's own execution note carves out\nGateway fixtures explicitly, because controller reconciliation\nand data-plane programming require durable resources. The\nisolation that makes that safe is the disposable cluster itself —\nsee `admissionlab_gateway::apply`'s module documentation, which\nis where that statement is enforced rather than merely repeated.",
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "readiness": {
+          "description": "Conditions the suite's own manifests must satisfy after they are\napplied and before any route's behavior is observed.\n\nEmpty by default, and the same vocabulary [`ComponentSpec::readiness`]\nuses — for the same reason, restated one layer down: applying a\nmanifest returns when its objects *exist*, never when the\nworkloads they describe are running. A backend `Deployment` that\nis not yet `Available` has no endpoints, so a request routed to\nit is answered by the data plane's own `503` — a statement about\nthis run's timing rather than about the route, and one that would\ndiffer between the two sides on every run.\n\n# Gate on what the fixture owns\n\nThe right entries here are the suite's *own* objects: the echo\nbackends, a `Job` that seeds them. Gating on something the\nimplementation under test provisions (Istio's generated\ndata-plane `Deployment`, say) is a real trade and is sometimes\nstill correct — but it exchanges \"reported as a behavior\ndifference\" for \"fails the run before a comparison happens\", so\nit belongs only where that object's absence is *not* the thing\nbeing compared. Nothing here is inferred; a suite that declares\nno readiness waits for nothing.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadinessCheckSpec"
           }
         },
         "reconciliationTimeout": {

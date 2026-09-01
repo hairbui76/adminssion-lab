@@ -288,6 +288,7 @@ fn build_spec(
         name,
         kubernetes_version: kubernetes_version.to_owned(),
         node_image: node_image.to_owned(),
+        images: Vec::new(),
     })
 }
 

@@ -277,49 +277,24 @@ pub(crate) struct RawRecipe {
 ///   portName: http
 /// ```
 ///
-/// An internally tagged enum, matching [`RawInstallMethod`] and
-/// [`RawReadinessCheck`] — see the first of those for why external
-/// tagging cannot represent a natural `type:` key under `serde_norway`.
-/// `deny_unknown_fields` at this level too, so `port:` written under a
-/// `serviceBySelector` block that also names `portName:` is at least a
-/// *recognized* pair (validated for agreement against the live Service
-/// by `admissionlab_gateway::endpoint`), while an invented key such as
-/// `severity:` is a parse error exactly as it is everywhere else in this
-/// schema.
+/// **This is `admissionlab_spec::GatewayEndpointSpec`, not a type of
+/// this crate's own.** It was declared here until ROADMAP Task 6.11 gave
+/// `admissionlab.yaml` a `gateway.gatewayEndpoint:` block that parses
+/// the identical YAML shape into the identical resolved
+/// [`GatewayEndpointStrategy`]. Two `Deserialize` shapes for one
+/// resolved type is the synonym §1.2 forbids -- they would be free to
+/// drift a field apart while looking identical in YAML -- so the
+/// canonical raw shape moved to `admissionlab-spec` (the leaf crate both
+/// readers already depend on, and the same crate that owns the resolved
+/// strategy for the same reason) and this alias keeps the recipe
+/// loader's own vocabulary reading as it did.
 ///
-/// The two ports are both optional and neither is defaulted here: what
-/// they mean is a question about a `Service` that does not exist yet at
-/// recipe-load time (which ports does it expose? is there exactly one?),
-/// so it is answered where the `Service` is actually read —
-/// `admissionlab_gateway::endpoint`, whose module documentation states
-/// the full rule. Validating them here would mean guessing.
-#[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(
-    tag = "type",
-    rename_all = "camelCase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub(crate) enum RawGatewayEndpoint {
-    /// Find the data-plane `Service` by label selector.
-    ServiceBySelector {
-        namespace: String,
-        selector: BTreeMap<String, String>,
-        #[serde(default)]
-        port_name: Option<String>,
-        #[serde(default)]
-        port: Option<u16>,
-    },
-    /// Find the data-plane `Service` by an exact name.
-    ServiceByName {
-        namespace: String,
-        name: String,
-        #[serde(default)]
-        port_name: Option<String>,
-        #[serde(default)]
-        port: Option<u16>,
-    },
-}
+/// Unlike [`RawInstallMethod`], where a narrower recipe-specific shape
+/// is deliberate because the lab file's `install:` block carries fields
+/// this crate cannot resolve, there is nothing here for a recipe to omit
+/// or a lab file to add: the two documents want exactly the same four
+/// fields, and a `gatewayEndpoint` means the same thing in both.
+pub(crate) use admissionlab_spec::GatewayEndpointSpec as RawGatewayEndpoint;
 
 /// The raw shape of [`RawRecipe::install`].
 ///
@@ -552,7 +527,7 @@ pub(crate) fn resolve_recipe(
     let gateway_endpoint = raw
         .gateway_endpoint
         .map(|raw_endpoint| {
-            resolve_gateway_endpoint(raw_endpoint).map_err(|(locator, message)| {
+            resolve_gateway_endpoint(&raw_endpoint).map_err(|(locator, message)| {
                 RecipeError::validation(
                     source_label,
                     format_args!("gatewayEndpoint.{locator}"),

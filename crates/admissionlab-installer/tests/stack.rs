@@ -73,6 +73,7 @@ fn cluster_handle(side: Side) -> ClusterHandle {
             name: format!("adlab-{}-teststack", side.as_str()),
             kubernetes_version: "1.36.4".to_owned(),
             node_image: "kindest/node:v1.36.4@sha256:0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
+            images: Vec::new(),
         },
         kubeconfig: PathBuf::from(format!("/fake/{}/kubeconfig", side.as_str())),
         audit_log: PathBuf::from(format!("/fake/{}/audit.log", side.as_str())),

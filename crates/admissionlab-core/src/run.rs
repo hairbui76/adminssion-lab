@@ -414,21 +414,27 @@ pub enum RunError {
     },
 }
 
-/// Assembles a [`ClusterSpec`] for `side` in `run_id`'s run, requesting
-/// `kubernetes_version` and using the already-resolved `node_image` (see
-/// [`ClusterManager::resolve_node_image`]).
+/// Assembles a [`ClusterSpec`] for `side` in `run_id`'s run from that
+/// side's resolved `environment`, using the already-resolved
+/// `node_image` (see [`ClusterManager::resolve_node_image`]).
 fn build_cluster_spec(
     side: Side,
     run_id: &RunId,
-    kubernetes_version: &str,
+    environment: &admissionlab_spec::ResolvedEnvironment,
     node_image: String,
 ) -> ClusterSpec {
     let short_run_id: String = run_id.as_str().chars().take(SHORT_RUN_ID_LEN).collect();
     ClusterSpec {
         side,
         name: format!("adlab-{}-{short_run_id}", side.as_str()),
-        kubernetes_version: kubernetes_version.to_owned(),
+        kubernetes_version: environment.kubernetes.clone(),
         node_image,
+        // Taken from this side's own environment rather than from a
+        // run-wide list: the two sides declare their images
+        // independently, so a lab that side-loads a different build into
+        // the candidate is expressible and is as visible in the
+        // configuration as a different chart version would be.
+        images: environment.images.clone(),
     }
 }
 
@@ -623,13 +629,13 @@ impl<C: ClusterManager> LabRunner<C> {
         let baseline_spec = build_cluster_spec(
             Side::Baseline,
             &run_id,
-            &lab.baseline.kubernetes,
+            &lab.baseline,
             images.baseline.clone(),
         );
         let candidate_spec = build_cluster_spec(
             Side::Candidate,
             &run_id,
-            &lab.candidate.kubernetes,
+            &lab.candidate,
             images.candidate.clone(),
         );
 

@@ -185,6 +185,7 @@ fn timings() -> StageTimings {
             baseline: Some(side_install(92_310)),
             candidate: Some(side_install(96_377)),
         }),
+        gateway_suite: None,
         fixture_capture: Some(CaptureStage {
             wall: Duration::from_millis(6_120),
             baseline: Some(Duration::from_millis(5_942)),

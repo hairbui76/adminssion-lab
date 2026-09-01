@@ -362,6 +362,7 @@ mod tests {
                 name: "resources-test-cluster".to_string(),
                 kubernetes_version: "1.36.0".to_string(),
                 node_image: "kindest/node:v1.36.0".to_string(),
+                images: Vec::new(),
             },
             kubeconfig,
             audit_log: std::env::temp_dir().join("admissionlab-fixtures-resources-test-audit.log"),

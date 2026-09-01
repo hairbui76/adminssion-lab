@@ -21,7 +21,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use admissionlab_admission::{AdmissionDecision, AdmissionOutcome, AdmissionTrace, TraceEvidence};
-use admissionlab_cli::pipeline::{Console, LabBackend, OutcomeCapture, RunRequest, run_lab};
+use admissionlab_cli::pipeline::{
+    Console, GatewaySuiteError, GatewaySuiteRunner, LabBackend, OutcomeCapture, RunRequest,
+    SideGatewayOutcome, run_lab,
+};
 use admissionlab_core::run_manifest::SCHEMA_VERSION;
 use admissionlab_core::{
     ArtifactStore, CapturedFixture, ClusterDiagnostics, ClusterError, ClusterHandle,
@@ -337,6 +340,31 @@ impl OutcomeCapture for FakeCapture {
 }
 
 /// A whole fake world, optionally reproducing a recorded one.
+/// A `GatewaySuiteRunner` for a backend that is never asked to run one.
+///
+/// `run_side` fails rather than returning an empty outcome: an empty
+/// `SideGatewayOutcome` would be a claim that a suite ran and observed
+/// nothing, which is exactly the fabrication Global Constraint 15
+/// forbids. Reaching it at all means `run_lab` ran a Gateway stage for a
+/// configuration these tests never gave one, which is a bug worth
+/// failing on.
+struct NoGatewaySuite;
+
+#[async_trait]
+impl GatewaySuiteRunner for NoGatewaySuite {
+    async fn run_side(
+        &self,
+        _cluster: &ClusterHandle,
+        _side: Side,
+        _paths: &RunPaths,
+    ) -> Result<SideGatewayOutcome, GatewaySuiteError> {
+        Err(GatewaySuiteError {
+            contract: None,
+            message: "this test's lab declares no gateway suite".to_owned(),
+        })
+    }
+}
+
 struct FakeBackend {
     clusters: Arc<RecordingClusterManager>,
     installed: Arc<Mutex<Vec<(String, String)>>>,
@@ -358,6 +386,10 @@ impl LabBackend for FakeBackend {
     type Clusters = RecordingClusterManager;
     type Installer = RecordingInstaller;
     type Capture = FakeCapture;
+    // `admissionlab reproduce` reproduces whatever the recorded run did,
+    // Gateway suite included; none of these tests configures one, so
+    // this is the never-constructed half of the seam.
+    type Gateway = NoGatewaySuite;
 
     async fn doctor_report(&self) -> DoctorReport {
         DoctorReport {
@@ -383,6 +415,14 @@ impl LabBackend for FakeBackend {
         RecordingInstaller {
             installed: Arc::clone(&self.installed),
         }
+    }
+
+    fn gateway_suite(
+        &self,
+        _suite: admissionlab_spec::GatewaySuiteSpec,
+        _store: ArtifactStore,
+    ) -> Self::Gateway {
+        NoGatewaySuite
     }
 
     fn fixture_capture(

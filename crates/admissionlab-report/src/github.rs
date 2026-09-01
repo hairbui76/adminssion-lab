@@ -371,7 +371,12 @@ fn render_findings(
         return;
     }
 
-    let _ = writeln!(out, "| Fixture | Subject | Change | First divergence |");
+    // "Evidence" rather than "First divergence": the column carries a
+    // webhook-chain attribution for an admission finding and the two
+    // sides' own condition/probe values for a Gateway one, and a header
+    // naming only the first would mislabel half the rows in a lab that
+    // runs both.
+    let _ = writeln!(out, "| Fixture | Subject | Change | Evidence |");
     let _ = writeln!(out, "| --- | --- | --- | --- |");
     for classified in matching.iter().take(MAX_LISTED_FINDINGS) {
         render_finding_row(out, classified, fixtures);
@@ -425,6 +430,19 @@ fn divergence_cell(
     fixtures: &BTreeMap<&str, &FixtureComparison>,
 ) -> String {
     let change = &classified.change;
+    // A Gateway finding has no webhook chain to have diverged in, so it
+    // gets the evidence it does have: what each side published. Same
+    // rule, same reason, as `terminal.rs`'s own Gateway arm.
+    if fixtures
+        .get(change.fixture_id.as_str())
+        .is_some_and(|fixture| fixture.gateway.is_some())
+    {
+        return cell(&format!(
+            "baseline {} -> candidate {}",
+            gateway_side_text(change.baseline.as_ref()),
+            gateway_side_text(change.candidate.as_ref()),
+        ));
+    }
     let divergence = change.origin.as_ref().or_else(|| {
         fixtures
             .get(change.fixture_id.as_str())
@@ -444,6 +462,33 @@ fn divergence_cell(
         rendered.push_str(&webhooks);
     }
     rendered
+}
+
+/// One side of a Gateway change's payload, in the same words
+/// `terminal.rs` renders it in: a condition state with its reason, a
+/// probe status with its backend, or the plain statement that this side
+/// answered nothing.
+fn gateway_side_text(payload: Option<&serde_json::Value>) -> String {
+    let Some(payload) = payload else {
+        return "answered nothing".to_owned();
+    };
+    if let Some(condition) = payload.get("condition").and_then(serde_json::Value::as_str) {
+        let state = payload
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        return match payload.get("reason").and_then(serde_json::Value::as_str) {
+            Some(reason) => format!("{condition}={state} ({reason})"),
+            None => format!("{condition}={state}"),
+        };
+    }
+    if let Some(status) = payload.get("status").and_then(serde_json::Value::as_u64) {
+        return match payload.get("backend").and_then(serde_json::Value::as_str) {
+            Some(backend) => format!("HTTP {status} from {backend}"),
+            None => format!("HTTP {status}"),
+        };
+    }
+    "present".to_owned()
 }
 
 /// How a [`DivergenceConfidence`] is spelled out.

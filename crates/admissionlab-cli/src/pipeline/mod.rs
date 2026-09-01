@@ -165,6 +165,7 @@
 
 pub mod capture;
 pub mod compare;
+pub mod gateway;
 pub mod install;
 pub mod provenance;
 pub mod report;
@@ -178,19 +179,22 @@ use admissionlab_admission::AdmissionOutcome;
 use admissionlab_core::{
     ArtifactStore, ClusterManager, Diagnostic, DoctorReport, InstalledLab, LabRunner, PreparedLab,
     RedactedValue, ReproductionPin, ResolvedNodeImages, RunDisposition, RunError,
-    RunManifestWriter, RunOptions, RunPaths, RunStage, StackInstaller, TimedClusterManager,
-    TimedFixtureCapture, TimedStackInstaller, TimedStage, TimingRecorder, preserved_cluster_report,
+    RunManifestWriter, RunOptions, RunPaths, RunStage, Side, StackInstaller, TimedClusterManager,
+    TimedFixtureCapture, TimedSideStage, TimedStackInstaller, TimedStage, TimingRecorder,
+    preserved_cluster_report,
 };
 use admissionlab_fixtures::{FixtureSource, discover_fixtures};
+use admissionlab_gateway::GatewayCaseResult;
 use admissionlab_policy::{
     ResolvedExpectations, ResolvedPolicy, evaluate_with_expectations, load_expectations,
     resolve_policy, validate_policy_spec,
 };
 use admissionlab_report::TerminalOptions;
-use admissionlab_spec::{ResolvedLab, load_lab, resolve_lab};
+use admissionlab_spec::{GatewaySuiteSpec, ResolvedLab, load_lab, resolve_lab};
 use async_trait::async_trait;
 
 pub use capture::OutcomeCapture;
+pub use gateway::{GatewaySuiteError, GatewaySuiteRunner, SideGatewayOutcome};
 
 /// How long each component gets to install *and* become ready before its
 /// side's stack is failed.
@@ -308,6 +312,10 @@ pub trait LabBackend: Send + Sync {
     type Installer: StackInstaller;
     /// The fixture capture both sides are replayed through.
     type Capture: OutcomeCapture;
+    /// The Gateway suite runner both sides' route contracts are observed
+    /// through. Never constructed at all for a lab with no `gateway:`
+    /// section.
+    type Gateway: GatewaySuiteRunner;
 
     /// Probes host prerequisites, as `admissionlab doctor` does.
     async fn doctor_report(&self) -> DoctorReport;
@@ -323,6 +331,20 @@ pub trait LabBackend: Send + Sync {
     /// through `store`. The same capture is used for both sides — which
     /// is what makes their results comparable at all.
     fn fixture_capture(&self, fixtures: Vec<FixtureSource>, store: ArtifactStore) -> Self::Capture;
+
+    /// Builds the Gateway suite runner for `suite`, writing evidence
+    /// bundles through `store`.
+    ///
+    /// Called only when the resolved configuration declares a `gateway:`
+    /// section, and — like [`Self::fixture_capture`] — the one value it
+    /// returns runs *both* sides, which is what makes their results
+    /// comparable at all.
+    ///
+    /// It takes the suite rather than reading it off a `ResolvedLab`
+    /// for the same reason the capture takes its fixtures: what a
+    /// backend needs to construct an implementation is not available
+    /// when the backend itself is constructed.
+    fn gateway_suite(&self, suite: GatewaySuiteSpec, store: ArtifactStore) -> Self::Gateway;
 
     /// How long each component gets to install and become ready.
     /// Defaults to [`DEFAULT_COMPONENT_TIMEOUT`]; a test overrides it so
@@ -879,6 +901,7 @@ fn prepare_inputs(
         ));
         return Err(RunDisposition::InvalidInput);
     }
+    validate_gateway_ids(&lab, &fixtures, console)?;
     console.say(&format!(
         "loaded {}; {} fixture(s), {} expectation(s).",
         request.config.display(),
@@ -906,6 +929,61 @@ fn prepare_inputs(
         fixtures,
         digests,
     })
+}
+
+/// Refuses a configuration whose Gateway route contract ids cannot be
+/// used as report identities.
+///
+/// A route contract is reported as a [`FixtureComparison`] like every
+/// admission fixture, under the id the user wrote (see
+/// [`compare::gateway_fixture_id`] for why the id is used verbatim
+/// rather than derived). Two properties are needed for that, and neither
+/// can be checked by `admissionlab-spec`, which is a leaf crate and
+/// cannot name `admissionlab_core::FixtureId`:
+///
+/// - the id must parse as a `FixtureId` — lowercase ASCII, digits, `-`;
+/// - it must not collide with a discovered fixture's id, since two
+///   entries under one identifier would make a per-fixture drill-down
+///   ambiguous and would attribute one's changes to the other.
+///
+/// Both are checked here, at exit 2, before any cluster is created —
+/// the same placement, and for the same reason, as every other input
+/// check in [`prepare_inputs`].
+///
+/// [`FixtureComparison`]: admissionlab_report::FixtureComparison
+fn validate_gateway_ids(
+    lab: &ResolvedLab,
+    fixtures: &[FixtureSource],
+    console: &mut Console<'_>,
+) -> Result<(), RunDisposition> {
+    let Some(suite) = &lab.gateway else {
+        return Ok(());
+    };
+    for contract in &suite.routes {
+        if compare::gateway_fixture_id(&contract.id).is_none() {
+            console.problem(&format!(
+                "invalid lab configuration: gateway route contract id {:?} cannot be reported: a \
+                 contract is reported under its own id, which must contain only lowercase \
+                 letters, digits, and `-`",
+                contract.id
+            ));
+            return Err(RunDisposition::InvalidInput);
+        }
+        if let Some(clash) = fixtures
+            .iter()
+            .find(|fixture| fixture.id.as_str() == contract.id)
+        {
+            console.problem(&format!(
+                "invalid lab configuration: gateway route contract id {:?} is also the fixture id \
+                 of {}; a run reports both under one identifier, so the two would be \
+                 indistinguishable",
+                contract.id,
+                clash.path.display(),
+            ));
+            return Err(RunDisposition::InvalidInput);
+        }
+    }
+    Ok(())
 }
 
 /// Refuses to start a lab on a host that cannot run one.
@@ -1062,16 +1140,194 @@ async fn run_with_clusters<B: LabBackend, C: ClusterManager>(
     ));
     record_stage(outputs.manifest, RunStage::FixtureCapture, |_| {}, console).await;
 
+    let gateway =
+        match run_gateway_suite(backend, run, console, inputs, prepared, &mut outputs).await {
+            Ok(gateway) => gateway,
+            Err(disposition) => return disposition,
+        };
+    diagnostics.extend(gateway.diagnostics.iter().cloned());
+
     compare_and_report(
         console,
         inputs,
         prepared,
         &stacks,
-        &capture.captured_outcomes(),
+        Observations {
+            outcomes: &capture.captured_outcomes(),
+            gateway: &gateway,
+        },
         &mut outputs,
         diagnostics,
     )
     .await
+}
+
+/// Everything the two clusters produced, ready to be compared.
+///
+/// The two halves travel together because they are one subject -- what
+/// this run observed -- and because passing them separately pushed
+/// [`compare_and_report`] past the argument count that keeps a signature
+/// readable. Borrowed: the comparison stage only reads them, and both
+/// are still owned by the stage that produced them.
+struct Observations<'a> {
+    /// Every admission fixture outcome, both sides interleaved.
+    outcomes: &'a [AdmissionOutcome],
+    /// Both sides' Gateway case results, empty for an admission-only
+    /// lab.
+    gateway: &'a GatewayRun,
+}
+
+/// Both sides' Gateway case results, and the run-level diagnostics the
+/// suite produced.
+///
+/// Empty on every axis for a lab with no `gateway:` section, which is
+/// what makes "suite absent ⇒ zero Gateway output" structural rather
+/// than a rule each renderer has to remember: nothing downstream can
+/// fabricate a section out of two empty slices.
+#[derive(Debug, Default)]
+struct GatewayRun {
+    /// What the baseline side produced, in suite order.
+    baseline: Vec<GatewayCaseResult>,
+    /// What the candidate side produced, in suite order.
+    candidate: Vec<GatewayCaseResult>,
+    /// Every skipped-probe diagnostic, already tagged with its side and
+    /// contract.
+    diagnostics: Vec<Diagnostic>,
+}
+
+/// Runs the configured Gateway suite on both sides, or reports the
+/// failure, records it, and ends the run.
+///
+/// # Why after fixture capture rather than before
+///
+/// ROADMAP Task 6.11 step 1 requires the Gateway apply to run separately
+/// from the admission dry-run fixtures, and after the stacks are
+/// installed. Both orders satisfy that; this one is chosen because
+/// Gateway fixtures are **persisted** (Phase 6's own execution
+/// distinction), so running them first would mean every admission
+/// fixture is replayed against a cluster that now contains a
+/// `GatewayClass`, a `Gateway`, an `HTTPRoute`, two namespaces and a
+/// backend `Deployment` that the admission corpus never asked for. That
+/// would be equal on both sides and so would not *manufacture* a
+/// difference — but it would silently change what the admission half of
+/// every lab observes the moment a `gateway:` section is added, which is
+/// a coupling between two independent halves of the product that nothing
+/// requires.
+///
+/// Running it after also means an admission-only failure never pays for
+/// a Gateway suite, and a Gateway failure leaves the admission evidence
+/// already written.
+///
+/// # Both sides at once
+///
+/// `tokio::join!`, never `try_join!` — the same discipline, and the same
+/// argument, as `LabRunner::install_stacks` and
+/// `LabRunner::capture_fixtures`: abandoning the other side's in-flight
+/// future the instant one fails would drop a suite midway through
+/// writing its evidence, and — uniquely here — could drop it while a
+/// `kubectl port-forward` child is still running. Both sides always
+/// reach their own natural conclusion.
+async fn run_gateway_suite<B: LabBackend>(
+    backend: &B,
+    run: &Run<'_>,
+    console: &mut Console<'_>,
+    inputs: &Inputs,
+    prepared: &PreparedLab,
+    outputs: &mut Outputs<'_>,
+) -> Result<GatewayRun, RunDisposition> {
+    let Some(suite) = inputs.lab.gateway.clone() else {
+        return Ok(GatewayRun::default());
+    };
+    let routes = suite.routes.len();
+    let runner = backend.gateway_suite(suite, ArtifactStore::new(&run.request.run_root));
+
+    let (baseline, candidate) = {
+        let _stage = run.timings.stage(TimedStage::GatewaySuite);
+        tokio::join!(
+            timed_gateway_side(
+                &runner,
+                &prepared.baseline,
+                Side::Baseline,
+                &prepared.paths,
+                run.timings
+            ),
+            timed_gateway_side(
+                &runner,
+                &prepared.candidate,
+                Side::Candidate,
+                &prepared.paths,
+                run.timings
+            ),
+        )
+    };
+
+    let (baseline, candidate) = match (baseline, candidate) {
+        (Ok(baseline), Ok(candidate)) => (baseline, candidate),
+        (baseline, candidate) => {
+            // Both sides' failures are reported, not just the first:
+            // a suite that broke on both sides usually broke for one
+            // reason, and seeing only half of it costs a rerun.
+            let failure = [
+                baseline.err().map(|error| format!("baseline: {error}")),
+                candidate.err().map(|error| format!("candidate: {error}")),
+            ]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>()
+            .join("; ");
+            console.problem(&format!("the Gateway suite failed: {failure}"));
+            record_stage_failure(outputs.manifest, RunStage::GatewaySuite, console).await;
+            write_failure(
+                &*outputs,
+                prepared,
+                "gateway",
+                &failure,
+                Vec::new(),
+                console,
+            )
+            .await;
+            return Err(crate::exit::disposition_for_gateway_failure());
+        }
+    };
+
+    console.say(&format!(
+        "observed {routes} Gateway route contract(s) per side; raw evidence in {}.",
+        prepared.paths.raw().display()
+    ));
+    let mut diagnostics = baseline.diagnostics.clone();
+    diagnostics.extend(candidate.diagnostics.iter().cloned());
+    for diagnostic in &diagnostics {
+        // A skipped probe is evidence a reader must see while the run is
+        // still on screen, not only in `result.json` (ROADMAP Task 6.11
+        // step 3).
+        console.problem(&diagnostic.message);
+    }
+    record_stage(outputs.manifest, RunStage::GatewaySuite, |_| {}, console).await;
+
+    Ok(GatewayRun {
+        baseline: baseline.cases,
+        candidate: candidate.cases,
+        diagnostics,
+    })
+}
+
+/// One side's Gateway suite run, measured.
+///
+/// The per-side timer lives here rather than in a decorator: the three
+/// `admissionlab_core` timing decorators exist because `LabRunner` drives
+/// those traits and the pipeline never sees a single side's call, while
+/// this port is driven from this module directly — so the boundary that
+/// names a side is already in hand and a fourth decorator would add a
+/// type to wrap it in and nothing else.
+async fn timed_gateway_side<G: GatewaySuiteRunner + ?Sized>(
+    runner: &G,
+    cluster: &admissionlab_core::ClusterHandle,
+    side: Side,
+    paths: &RunPaths,
+    timings: &TimingRecorder,
+) -> Result<SideGatewayOutcome, GatewaySuiteError> {
+    let _stage = timings.side(TimedSideStage::GatewaySuite, side);
+    runner.run_side(cluster, side, paths).await
 }
 
 /// Installs both sides' component stacks, or reports the failure,
@@ -1160,7 +1416,7 @@ async fn compare_and_report(
     inputs: &Inputs,
     prepared: &PreparedLab,
     stacks: &InstalledLab,
-    outcomes: &[AdmissionOutcome],
+    observed: Observations<'_>,
     outputs: &mut Outputs<'_>,
     mut diagnostics: Vec<Diagnostic>,
 ) -> RunDisposition {
@@ -1172,7 +1428,16 @@ async fn compare_and_report(
     // assembled, so the snapshot that goes *into* the result already
     // contains this stage's own number.
     let comparison_stage = timings.stage(TimedStage::Comparison);
-    let comparison = match compare::compare(&inputs.lab, &inputs.fixtures, outcomes) {
+    let gateway_results = compare::GatewayResults {
+        baseline: &observed.gateway.baseline,
+        candidate: &observed.gateway.candidate,
+    };
+    let comparison = match compare::compare(
+        &inputs.lab,
+        &inputs.fixtures,
+        observed.outcomes,
+        Some(&gateway_results),
+    ) {
         Ok(comparison) => comparison,
         Err(error) => {
             console.problem(&format!("failed to normalize captured objects: {error}"));

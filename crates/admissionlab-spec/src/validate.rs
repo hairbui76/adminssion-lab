@@ -43,6 +43,43 @@ pub(crate) fn kubernetes_version(
     Ok(trimmed.to_owned())
 }
 
+/// Rejects an empty (or all-whitespace) image reference and returns the
+/// list trimmed.
+///
+/// The check is deliberately shallow — non-empty, and nothing else. A
+/// container image reference's grammar is the registry's business, not
+/// this crate's, and the one failure mode worth catching here is the one
+/// that would otherwise reach a cluster backend as an empty argv element:
+/// a side-load command handed `""` either errors obscurely or, worse,
+/// succeeds having loaded nothing. Duplicates are *not* rejected: loading
+/// the same image twice is a no-op the backend absorbs, and there is no
+/// reading under which a repeated entry is a mistake worth failing a run
+/// for.
+///
+/// `field` is the dotted locator of the enclosing environment (`baseline`
+/// or `candidate`).
+pub(crate) fn environment_images(
+    field: &str,
+    images: &[String],
+    path: &Path,
+) -> Result<Vec<String>, SpecError> {
+    images
+        .iter()
+        .enumerate()
+        .map(|(index, image)| {
+            let trimmed = image.trim();
+            if trimmed.is_empty() {
+                return Err(SpecError::validation(
+                    path,
+                    format_args!("{field}.images[{index}]"),
+                    "must not be empty",
+                ));
+            }
+            Ok(trimmed.to_owned())
+        })
+        .collect()
+}
+
 /// Requires a component to have a non-empty resolved name, returning it.
 ///
 /// A component's `name` field is optional in YAML (a later task's recipe
@@ -348,6 +385,21 @@ pub(crate) fn gateway_suite(
             "gateway.routes",
             "must not be empty",
         ));
+    }
+
+    if let Some(endpoint) = &gateway.gateway_endpoint {
+        // Delegated rather than re-checked: `resolve_gateway_endpoint`
+        // is the one validator for this vocabulary, shared with the
+        // recipe loader, and it proves each substitutable field's
+        // placeholders by running the real substitution. See that
+        // function's "Why this lives here" section.
+        crate::component::resolve_gateway_endpoint(endpoint).map_err(|(locator, message)| {
+            SpecError::validation(
+                path,
+                format_args!("gateway.gatewayEndpoint.{locator}"),
+                message,
+            )
+        })?;
     }
 
     let mut seen_ids = std::collections::BTreeSet::new();

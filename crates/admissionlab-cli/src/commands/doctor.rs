@@ -283,6 +283,9 @@ async fn run_deep_probe(
         name,
         kubernetes_version: resolved.version,
         node_image: resolved.pinned_image,
+        // Nothing to side-load: this cluster runs no workload at all,
+        // it only proves one can be created and reached.
+        images: Vec::new(),
     };
 
     let handle = manager

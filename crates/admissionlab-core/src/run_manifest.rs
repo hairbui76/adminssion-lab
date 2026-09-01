@@ -341,6 +341,12 @@ pub enum RunStage {
     /// written.
     #[serde(rename = "fixture_capture")]
     FixtureCapture,
+    /// The configured Gateway suite was applied to both sides, every
+    /// route's reconciliation was observed, and every traffic probe was
+    /// sent or explicitly skipped. Absent from a run whose configuration
+    /// has no `gateway:` section, which never enters this stage at all.
+    #[serde(rename = "gateway_suite")]
+    GatewaySuite,
     /// Both sides' evidence was normalized, compared, and graded.
     #[serde(rename = "comparison")]
     Comparison,
@@ -365,6 +371,7 @@ impl RunStage {
             Self::ClusterCreation => "cluster_creation",
             Self::Installation => "installation",
             Self::FixtureCapture => "fixture_capture",
+            Self::GatewaySuite => "gateway_suite",
             Self::Comparison => "comparison",
             Self::Reporting => "reporting",
             Self::Completed => "completed",

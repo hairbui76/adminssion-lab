@@ -262,6 +262,23 @@ pub const fn disposition_for_capture_failure() -> RunDisposition {
     RunDisposition::FixtureFailed
 }
 
+/// A Gateway route contract whose behavior could not be observed, or a
+/// Gateway suite whose manifests would not apply. Always `5`, the same
+/// answer [`disposition_for_capture_failure`] gives, and for the same
+/// reason: §0.4's category is "fixture execution/capture failure", and
+/// ROADMAP Phase 6's own execution note calls a persisted Gateway
+/// manifest set a fixture. What the two have in common is the thing the
+/// exit code names -- the run could not obtain the evidence it exists to
+/// compare.
+///
+/// A route that reconciled to a `False` condition, or a probe that was
+/// skipped because it did, never reaches here: both are ordinary
+/// observations, and they are what this phase exists to see.
+#[must_use]
+pub const fn disposition_for_gateway_failure() -> RunDisposition {
+    RunDisposition::FixtureFailed
+}
+
 /// A normalization rule that cannot be applied to any document.
 ///
 /// See this module's documentation: a broken *built-in* rule is

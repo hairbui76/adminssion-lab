@@ -89,14 +89,21 @@ use admissionlab_diff::{
     diff_admission_trace, diff_workload_objects, first_divergence_with_objects,
 };
 use admissionlab_fixtures::FixtureSource;
+use admissionlab_gateway::{GatewayCaseComparison, GatewayCaseResult};
 use admissionlab_normalize::{
     NormalizationProfile, NormalizeError, NormalizeRule, NormalizedObject, NormalizedTrace,
     normalize_object, normalize_trace,
 };
 use admissionlab_report::AdmissionComparison;
-use admissionlab_spec::{RecipeNormalizeRule, ResolvedComponent, ResolvedLab};
+use admissionlab_spec::{GatewaySuiteSpec, RecipeNormalizeRule, ResolvedComponent, ResolvedLab};
 
-/// One fixture's comparison, before policy has graded anything.
+/// One compared unit's comparison, before policy has graded anything.
+///
+/// A run has two kinds — an admission fixture and a Gateway route
+/// contract — and exactly one of [`Self::admission`]/[`Self::gateway`]
+/// is `Some` for each; see
+/// `admissionlab_report::FixtureComparison::gateway` for why they share
+/// one identifier namespace and one shape.
 #[derive(Debug, Clone)]
 pub struct ComparedFixture {
     /// Which fixture this is.
@@ -106,6 +113,12 @@ pub struct ComparedFixture {
     /// at all, which `admissionlab_report::FixtureComparison::bucket`
     /// counts as inconclusive rather than identical.
     pub admission: Option<AdmissionComparison>,
+    /// Both sides' Gateway evidence for one route contract (ROADMAP Task
+    /// 6.11). `None` for every admission fixture, and for a route
+    /// contract one side produced no result for at all — which is
+    /// counted inconclusive for exactly the reason a missing admission
+    /// outcome is.
+    pub gateway: Option<GatewayCaseComparison>,
     /// Every change claimed for this fixture, already attributed to it.
     pub changes: Vec<SemanticChange>,
 }
@@ -209,6 +222,7 @@ pub fn compare(
     lab: &ResolvedLab,
     fixtures: &[FixtureSource],
     outcomes: &[AdmissionOutcome],
+    gateway: Option<&GatewayResults<'_>>,
 ) -> Result<Comparison, NormalizeError> {
     let profile = normalization_profile(lab);
     let index: HashMap<(&str, Side), &AdmissionOutcome> = outcomes
@@ -233,6 +247,7 @@ pub fn compare(
             compared.push(ComparedFixture {
                 fixture_id: fixture.id.clone(),
                 admission: None,
+                gateway: None,
                 changes: Vec::new(),
             });
             continue;
@@ -242,6 +257,10 @@ pub fn compare(
         compared.push(pair);
     }
 
+    if let (Some(suite), Some(results)) = (lab.gateway.as_ref(), gateway) {
+        compare_gateway(suite, results, &mut compared, &mut diagnostics);
+    }
+
     diagnostics.extend(normalization_diagnostics(&warnings));
     diagnostics.extend(capture_diagnostics(outcomes));
 
@@ -249,6 +268,149 @@ pub fn compare(
         fixtures: compared,
         diagnostics,
     })
+}
+
+/// Both sides' Gateway case results, as the run observed them.
+///
+/// Borrowed rather than owned because the caller already holds them and
+/// this stage only reads; a `Copy`-cheap pair of slices also keeps
+/// [`compare`]'s fourth parameter from reading as a second, heavier
+/// input than the outcomes beside it.
+#[derive(Debug, Clone, Copy)]
+pub struct GatewayResults<'a> {
+    /// What the baseline side's Gateway suite produced.
+    pub baseline: &'a [GatewayCaseResult],
+    /// What the candidate side's produced.
+    pub candidate: &'a [GatewayCaseResult],
+}
+
+/// Appends one [`ComparedFixture`] per route contract the suite
+/// declares, in the suite's own order.
+///
+/// Pairing is by [`GatewayCaseResult::contract_id`], never by position:
+/// `admissionlab_gateway::case`'s own documentation gives the reason
+/// (two sides need not have produced their cases in the same order, and
+/// pairing by index would silently compare unrelated routes), and it is
+/// the same rule `compare` already applies to admission outcomes.
+///
+/// The changes are stamped here. `diff_gateway` marks every change it
+/// produces with `admissionlab_diff::unattributed_fixture_id`, because a
+/// `GatewayCaseResult` carries a `contract_id` and not a `FixtureId`;
+/// this is the caller that knows which contract it paired, so this is
+/// where [`SemanticChange::attributed_to`] runs — the identical seam,
+/// for the identical reason, as the object and trace comparisons above.
+fn compare_gateway(
+    suite: &GatewaySuiteSpec,
+    results: &GatewayResults<'_>,
+    compared: &mut Vec<ComparedFixture>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let index = |cases: &[GatewayCaseResult], id: &str| {
+        cases.iter().find(|case| case.contract_id == id).cloned()
+    };
+    for contract in &suite.routes {
+        let Some(fixture_id) = gateway_fixture_id(&contract.id) else {
+            // Unreachable in a real run: `run_lab` refuses a
+            // configuration whose contract ids are not valid fixture
+            // identifiers, before any cluster is created. Handled rather
+            // than unwrapped so this module encodes no assumption about
+            // a check that lives in another file.
+            diagnostics.push(unusable_contract_id_diagnostic(&contract.id));
+            continue;
+        };
+        let baseline = index(results.baseline, &contract.id);
+        let candidate = index(results.candidate, &contract.id);
+        let (Some(baseline), Some(candidate)) = (baseline, candidate) else {
+            diagnostics.push(missing_gateway_case_diagnostic(&contract.id));
+            compared.push(ComparedFixture {
+                fixture_id,
+                admission: None,
+                gateway: None,
+                changes: Vec::new(),
+            });
+            continue;
+        };
+
+        let comparison = GatewayCaseComparison {
+            baseline,
+            candidate,
+        };
+        let changes = comparison
+            .changes()
+            .into_iter()
+            .map(|change| change.attributed_to(&fixture_id))
+            .collect();
+        compared.push(ComparedFixture {
+            fixture_id,
+            admission: None,
+            gateway: Some(comparison),
+            changes,
+        });
+    }
+}
+
+/// The [`FixtureId`] a Gateway route contract is reported under, or
+/// [`None`] when its id cannot be one.
+///
+/// A route contract and an admission fixture share one identifier
+/// namespace because they share one report entry type: a Gateway change
+/// travels through the same generic `SemanticChange` channel every
+/// admission change does, and that channel is keyed by `FixtureId`.
+/// Deriving the identifier (prefixing `gateway-`, hashing) was rejected
+/// for the reason `admissionlab_gateway::case` gives for pairing on the
+/// contract id at all — the id the user wrote is the name they will look
+/// for in the report, and a second, generated one would be a name only
+/// this tool knows.
+///
+/// The constraint that falls out of that is real and is checked before
+/// any cluster is created (see `crate::pipeline::validate_gateway_ids`):
+/// a contract id must be lowercase ASCII, digits and `-`, and must not
+/// collide with a discovered fixture's id.
+#[must_use]
+pub fn gateway_fixture_id(contract_id: &str) -> Option<FixtureId> {
+    FixtureId::parse(contract_id).ok()
+}
+
+/// The diagnostic for a route contract whose id cannot be a fixture
+/// identifier. See [`gateway_fixture_id`].
+fn unusable_contract_id_diagnostic(contract_id: &str) -> Diagnostic {
+    let mut context = BTreeMap::new();
+    context.insert(
+        "contract".to_owned(),
+        RedactedValue::Public(contract_id.to_owned()),
+    );
+    Diagnostic {
+        code: "compare.unusable_contract_id".to_owned(),
+        message: format!(
+            "Gateway route contract {contract_id:?} cannot be reported: its id is not a valid \
+             fixture identifier"
+        ),
+        context,
+    }
+}
+
+/// The diagnostic for a route contract that produced no result on one or
+/// both sides.
+///
+/// Reachable only if a Gateway suite runner returned fewer cases than
+/// the contracts it was given, which the production one never does on a
+/// successful run. Either way the honest answer is that this contract
+/// cannot be compared, not that its two sides agreed.
+fn missing_gateway_case_diagnostic(contract_id: &str) -> Diagnostic {
+    let mut context = BTreeMap::new();
+    context.insert(
+        "contract".to_owned(),
+        RedactedValue::Public(contract_id.to_owned()),
+    );
+    Diagnostic {
+        code: "compare.missing_gateway_case".to_owned(),
+        message: format!(
+            "Gateway route contract {contract_id:?} produced no result on at least one side, so \
+             its two sides could not be compared; it is counted as inconclusive rather than \
+             identical"
+        ),
+        context,
+    }
 }
 
 /// Compares one fixture's two outcomes.
@@ -289,6 +451,7 @@ fn compare_pair(
 
     Ok(ComparedFixture {
         fixture_id,
+        gateway: None,
         admission: Some(AdmissionComparison {
             baseline: baseline.clone(),
             candidate: candidate.clone(),
@@ -598,7 +761,8 @@ mod tests {
             accepted("pod-0", Side::Candidate, pod("nginx:1")),
         ];
 
-        let comparison = compare(&lab, &fixtures, &outcomes).expect("comparison must succeed");
+        let comparison =
+            compare(&lab, &fixtures, &outcomes, None).expect("comparison must succeed");
         assert_eq!(comparison.fixtures.len(), 1);
         assert!(comparison.fixtures[0].changes.is_empty());
         assert!(comparison.fixtures[0].admission.is_some());
@@ -614,7 +778,8 @@ mod tests {
             accepted("pod-0", Side::Candidate, pod("nginx:2")),
         ];
 
-        let comparison = compare(&lab, &fixtures, &outcomes).expect("comparison must succeed");
+        let comparison =
+            compare(&lab, &fixtures, &outcomes, None).expect("comparison must succeed");
         let changes = comparison.changes();
         assert_eq!(
             changes.len(),
@@ -645,7 +810,8 @@ mod tests {
         candidate.final_object = None;
         let outcomes = vec![accepted("pod-0", Side::Baseline, pod("nginx:1")), candidate];
 
-        let comparison = compare(&lab, &fixtures, &outcomes).expect("comparison must succeed");
+        let comparison =
+            compare(&lab, &fixtures, &outcomes, None).expect("comparison must succeed");
         let changes = comparison.changes();
         assert_eq!(
             changes.iter().map(|change| change.kind).collect::<Vec<_>>(),
@@ -660,7 +826,8 @@ mod tests {
         let fixtures = vec![fixture("pod-0")];
         let outcomes = vec![accepted("pod-0", Side::Baseline, pod("nginx:1"))];
 
-        let comparison = compare(&lab, &fixtures, &outcomes).expect("comparison must succeed");
+        let comparison =
+            compare(&lab, &fixtures, &outcomes, None).expect("comparison must succeed");
         assert!(
             comparison.fixtures[0].admission.is_none(),
             "no admission evidence means inconclusive, never identical"
@@ -686,7 +853,8 @@ mod tests {
         }];
         let outcomes = vec![baseline, accepted("pod-0", Side::Candidate, pod("nginx:1"))];
 
-        let comparison = compare(&lab, &fixtures, &outcomes).expect("comparison must succeed");
+        let comparison =
+            compare(&lab, &fixtures, &outcomes, None).expect("comparison must succeed");
         assert!(
             comparison
                 .diagnostics

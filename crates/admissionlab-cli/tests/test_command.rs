@@ -25,13 +25,16 @@
 //! outcomes from the fixtures it is handed rather than from hardcoded
 //! identifiers.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use admissionlab_admission::{AdmissionDecision, AdmissionOutcome, AdmissionTrace, TraceEvidence};
-use admissionlab_cli::pipeline::{Console, LabBackend, OutcomeCapture, RunRequest, run_lab};
+use admissionlab_cli::pipeline::{
+    Console, GatewaySuiteError, GatewaySuiteRunner, LabBackend, OutcomeCapture, RunRequest,
+    SideGatewayOutcome, run_lab,
+};
 use admissionlab_core::{
     ArtifactStore, CapturedFixture, ClusterDiagnostics, ClusterError, ClusterHandle,
     ClusterManager, ClusterSpec, Diagnostic, DoctorReport, FixtureCapture, FixtureCaptureError,
@@ -39,8 +42,13 @@ use admissionlab_core::{
     StackInstallError, StackInstaller, ToolName, ToolStatus,
 };
 use admissionlab_fixtures::FixtureSource;
+use admissionlab_gateway::{
+    CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionState,
+    GatewayCaseResult, GatewayClassEvidence, GatewayEvidence, GatewayIdentity, HttpProbeResult,
+    ObservedCondition, ParentIdentity, ReconciliationEvidence, RouteEvidence, RouteParentStatus,
+};
 use admissionlab_report::TerminalOptions;
-use admissionlab_spec::ResolvedComponent;
+use admissionlab_spec::{GatewaySuiteSpec, ResolvedComponent};
 use async_trait::async_trait;
 
 // ---------------------------------------------------------------------
@@ -297,7 +305,7 @@ impl FakeCapture {
                     code: "admission.webhook_rejection_metric".to_owned(),
                     message: "kube-apiserver's rejection counter for webhook w rose by 1"
                         .to_owned(),
-                    context: std::collections::BTreeMap::new(),
+                    context: BTreeMap::new(),
                 }]
             } else {
                 Vec::new()
@@ -380,11 +388,197 @@ impl OutcomeCapture for FakeCapture {
     }
 }
 
+// ---------------------------------------------------------------------
+// The Gateway fake (ROADMAP Task 6.11)
+// ---------------------------------------------------------------------
+
+/// What a [`FakeGatewaySuite`] pretends both implementations did with
+/// the lab's one route contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayBehavior {
+    /// Both sides reconcile identically and both probes answer 200 from
+    /// the same backend: no Gateway behavior difference at all.
+    Identical,
+    /// The candidate's route converges with `ResolvedRefs: False` --
+    /// exactly what removing a `ReferenceGrant` produces -- so its probe
+    /// is skipped, and the baseline's answered probe has no counterpart.
+    CandidateLosesResolvedRefs,
+    /// The candidate never converges. Its evidence is current but
+    /// unsettled, which is `GatewayComparability::Partial`: the pair is
+    /// counted inconclusive rather than compared.
+    CandidateNeverConverges,
+    /// The suite itself fails on the candidate side.
+    CandidateFails,
+}
+
+/// The lab configuration every Gateway test below writes.
+const GATEWAY_CONTRACT: &str = "echo-route";
+const GATEWAY_NAMESPACE: &str = "lab";
+const GATEWAY_NAME: &str = "lab-gateway";
+const GATEWAY_LISTENER: &str = "http";
+const GATEWAY_BACKEND: &str = "echo-a";
+
+/// A `GatewaySuiteRunner` that applies nothing and observes nothing,
+/// producing scripted evidence for the suite it was handed.
+struct FakeGatewaySuite {
+    suite: GatewaySuiteSpec,
+    behavior: GatewayBehavior,
+    /// Which sides were actually run, so a test can prove both were.
+    /// Shared with the backend that built this, because `run_lab` builds
+    /// the runner itself and a test never holds the value directly.
+    ran: Arc<Mutex<Vec<Side>>>,
+}
+
+impl FakeGatewaySuite {
+    /// One condition, as a controller would publish it.
+    fn condition(type_name: &str, state: ConditionState, reason: &str) -> ObservedCondition {
+        ObservedCondition {
+            type_name: type_name.to_owned(),
+            state,
+            reason: Some(reason.to_owned()),
+            // Current for the object's own generation below: a stale one
+            // would make every absence stop being evidence, which is a
+            // different case than any of these behaviors is about.
+            observed_generation: Some(1),
+        }
+    }
+
+    /// The scripted case for one side.
+    fn case(&self, side: Side) -> GatewayCaseResult {
+        let candidate = side == Side::Candidate;
+        let loses_refs = candidate && self.behavior == GatewayBehavior::CandidateLosesResolvedRefs;
+        let unconverged = candidate && self.behavior == GatewayBehavior::CandidateNeverConverges;
+
+        let (resolved_state, resolved_reason) = if loses_refs {
+            (ConditionState::False, "RefNotPermitted")
+        } else {
+            (ConditionState::True, "ResolvedRefs")
+        };
+        let parent = RouteParentStatus {
+            parent: ParentIdentity {
+                namespace: Some(GATEWAY_NAMESPACE.to_owned()),
+                name: GATEWAY_NAME.to_owned(),
+                section_name: Some(GATEWAY_LISTENER.to_owned()),
+            },
+            controller_name: Some("istio.io/gateway-controller".to_owned()),
+            conditions: [
+                (
+                    CONDITION_ACCEPTED.to_owned(),
+                    Self::condition(CONDITION_ACCEPTED, ConditionState::True, "Accepted"),
+                ),
+                (
+                    CONDITION_RESOLVED_REFS.to_owned(),
+                    Self::condition(CONDITION_RESOLVED_REFS, resolved_state, resolved_reason),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        };
+        let reconciliation = ReconciliationEvidence {
+            gateway_class: Some(GatewayClassEvidence {
+                name: "istio".to_owned(),
+                accepted: Self::condition(CONDITION_ACCEPTED, ConditionState::True, "Accepted"),
+            }),
+            gateway: GatewayEvidence {
+                identity: GatewayIdentity {
+                    namespace: GATEWAY_NAMESPACE.to_owned(),
+                    name: GATEWAY_NAME.to_owned(),
+                },
+                conditions: [CONDITION_ACCEPTED, CONDITION_PROGRAMMED]
+                    .into_iter()
+                    .map(|type_name| {
+                        (
+                            type_name.to_owned(),
+                            Self::condition(type_name, ConditionState::True, "Programmed"),
+                        )
+                    })
+                    .collect(),
+                generation: 1,
+                gateway_class_name: Some("istio".to_owned()),
+            },
+            route: RouteEvidence {
+                namespace: GATEWAY_NAMESPACE.to_owned(),
+                name: GATEWAY_CONTRACT.to_owned(),
+                generation: 1,
+                parents: vec![parent],
+            },
+            elapsed: Duration::from_millis(300),
+            converged: !unconverged,
+            diagnostics: Vec::new(),
+        };
+
+        // The production runner's own rule, reproduced by construction:
+        // a probe is sent only for a route that is actually carrying
+        // traffic. A side that lost `ResolvedRefs`, and a side that
+        // never converged, answer none.
+        let probes = if loses_refs || unconverged {
+            Vec::new()
+        } else {
+            vec![HttpProbeResult {
+                status: 200,
+                backend: Some(GATEWAY_BACKEND.to_owned()),
+                response_headers: BTreeMap::new(),
+                response_body_sha256: "0".repeat(64),
+                elapsed: Duration::from_millis(12),
+                attempts: 1,
+            }]
+        };
+
+        GatewayCaseResult {
+            contract_id: self.suite.routes[0].id.clone(),
+            reconciliation,
+            probes,
+        }
+    }
+}
+
+#[async_trait]
+impl GatewaySuiteRunner for FakeGatewaySuite {
+    async fn run_side(
+        &self,
+        _cluster: &ClusterHandle,
+        side: Side,
+        _paths: &RunPaths,
+    ) -> Result<SideGatewayOutcome, GatewaySuiteError> {
+        self.ran.lock().expect("poisoned").push(side);
+        if self.behavior == GatewayBehavior::CandidateFails && side == Side::Candidate {
+            return Err(GatewaySuiteError {
+                contract: Some(self.suite.routes[0].id.clone()),
+                message: "fake gateway suite failure".to_owned(),
+            });
+        }
+        let case = self.case(side);
+        // The skip diagnostic the production runner raises, reproduced
+        // in the same shape so the assertions below exercise the real
+        // rendering path rather than a test-only one.
+        let diagnostics = if case.probes.is_empty() && !self.suite.routes[0].probes.is_empty() {
+            vec![Diagnostic {
+                code: "gateway.probe_skipped".to_owned(),
+                message: format!(
+                    "no traffic probe was sent for route contract {:?} on the {side} side: \
+                     HTTPRoute lab/echo-route published ResolvedRefs=False (RefNotPermitted)",
+                    self.suite.routes[0].id,
+                ),
+                context: BTreeMap::new(),
+            }]
+        } else {
+            Vec::new()
+        };
+        Ok(SideGatewayOutcome {
+            side,
+            cases: vec![case],
+            diagnostics,
+        })
+    }
+}
+
 /// The whole fake world one run is driven against.
 struct FakeBackend {
     clusters: Arc<FakeClusterManager>,
     install_failure: Option<String>,
     capture_behavior: CaptureBehavior,
+    gateway_behavior: GatewayBehavior,
+    gateway_runs: Arc<Mutex<Vec<Side>>>,
     prerequisites_met: bool,
 }
 
@@ -394,8 +588,20 @@ impl FakeBackend {
             clusters: Arc::new(FakeClusterManager::new()),
             install_failure: None,
             capture_behavior: behavior,
+            gateway_behavior: GatewayBehavior::Identical,
+            gateway_runs: Arc::new(Mutex::new(Vec::new())),
             prerequisites_met: true,
         }
+    }
+
+    fn with_gateway(mut self, behavior: GatewayBehavior) -> Self {
+        self.gateway_behavior = behavior;
+        self
+    }
+
+    /// Which sides the Gateway suite was actually run against.
+    fn gateway_sides(&self) -> Vec<Side> {
+        self.gateway_runs.lock().expect("poisoned").clone()
     }
 
     fn with_clusters(mut self, clusters: FakeClusterManager) -> Self {
@@ -419,6 +625,7 @@ impl LabBackend for FakeBackend {
     type Clusters = FakeClusterManager;
     type Installer = FakeStackInstaller;
     type Capture = FakeCapture;
+    type Gateway = FakeGatewaySuite;
 
     async fn doctor_report(&self) -> DoctorReport {
         DoctorReport {
@@ -443,6 +650,14 @@ impl LabBackend for FakeBackend {
     fn stack_installer(&self, _paths: &RunPaths) -> Self::Installer {
         FakeStackInstaller {
             failure: self.install_failure.clone(),
+        }
+    }
+
+    fn gateway_suite(&self, suite: GatewaySuiteSpec, _store: ArtifactStore) -> Self::Gateway {
+        FakeGatewaySuite {
+            suite,
+            behavior: self.gateway_behavior,
+            ran: Arc::clone(&self.gateway_runs),
         }
     }
 
@@ -1256,6 +1471,282 @@ fn a_cleanup_failure_never_masks_a_policy_failure() {
          reported loudly on stderr either way"
     );
     assert!(output.stderr.contains("kind delete cluster --name"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------------------------------------------------------------------
+// The Gateway suite (ROADMAP Task 6.11)
+// ---------------------------------------------------------------------
+
+/// Writes a lab configuration carrying a `gateway:` section with one
+/// route contract and one probe, plus the same admission fixture
+/// [`write_lab`] writes.
+///
+/// The manifest path need not exist: the fake suite runner applies
+/// nothing, and `resolve_lab` validates the *shape* of a suite rather
+/// than the presence of its files (the real applier is what reports a
+/// missing manifest, and it does so against a real cluster).
+fn write_gateway_lab(dir: &Path) -> PathBuf {
+    let config = write_lab(dir, "");
+    let text = std::fs::read_to_string(&config).expect("the lab must have been written");
+    let gateway = format!(
+        r#"gateway:
+  manifests:
+    - gateway/suite.yaml
+  gatewayEndpoint:
+    type: serviceByName
+    namespace: "{{gatewayNamespace}}"
+    name: "{{gatewayName}}-istio"
+    portName: http
+  routes:
+    - id: {GATEWAY_CONTRACT}
+      gatewayNamespace: {GATEWAY_NAMESPACE}
+      gatewayName: {GATEWAY_NAME}
+      routeNamespace: {GATEWAY_NAMESPACE}
+      routeName: {GATEWAY_CONTRACT}
+      listenerName: {GATEWAY_LISTENER}
+      probes:
+        - host: echo.admissionlab.test
+          path: /
+          method: GET
+          expectedStatus: 200
+          expectedBackend: {GATEWAY_BACKEND}
+"#
+    );
+    std::fs::write(&config, format!("{text}{gateway}"))
+        .expect("failed to write the gateway lab configuration");
+    config
+}
+
+/// One run against the gateway fake, with the report written where the
+/// caller can read it.
+fn run_gateway(dir: &Path, backend: &FakeBackend) -> (RunOutput, serde_json::Value) {
+    let config = write_gateway_lab(dir);
+    let reports = dir.join("reports");
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+    let output = run(backend, &request);
+    let result = read_result(&reports.join("result.json"));
+    (output, result)
+}
+
+/// The `fixtures` entry for the one route contract, or `None`.
+fn gateway_entry(result: &serde_json::Value) -> Option<&serde_json::Value> {
+    result["fixtures"]
+        .as_array()
+        .expect("fixtures must be an array")
+        .iter()
+        .find(|entry| entry["fixtureId"] == GATEWAY_CONTRACT)
+}
+
+#[test]
+fn a_configured_gateway_suite_runs_on_both_sides_and_reaches_the_report() {
+    let dir = unique_dir("gateway-both-sides");
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let (output, result) = run_gateway(&dir, &backend);
+
+    assert_eq!(
+        backend.gateway_sides(),
+        vec![Side::Baseline, Side::Candidate],
+        "a configured suite must be run against both sides, or the two are not comparable"
+    );
+    assert_eq!(output.disposition, RunDisposition::Passed, "{output:?}");
+
+    let entry = gateway_entry(&result).expect("the route contract must be reported");
+    assert!(
+        entry["admission"].is_null(),
+        "a route contract carries Gateway evidence and no admission evidence"
+    );
+    let gateway = &entry["gateway"];
+    assert_eq!(gateway["baseline"]["contractId"], GATEWAY_CONTRACT);
+    assert_eq!(gateway["candidate"]["contractId"], GATEWAY_CONTRACT);
+    assert_eq!(
+        gateway["baseline"]["probes"][0]["backend"], GATEWAY_BACKEND,
+        "the probe evidence must reach the report verbatim"
+    );
+    assert!(
+        entry["changes"]
+            .as_array()
+            .expect("changes must be an array")
+            .is_empty(),
+        "two identical sides produce no Gateway change"
+    );
+
+    // The run's own counting: one admission fixture plus one route
+    // contract, both identical.
+    assert_eq!(result["summary"]["fixturesTotal"], 2);
+    assert_eq!(result["summary"]["identical"], 2);
+    assert_eq!(result["summary"]["inconclusive"], 0);
+    assert!(
+        output.stdout.contains("Gateway  1 route contract(s)"),
+        "the terminal report must carry a Gateway section: {output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_candidate_that_loses_resolved_refs_fails_the_run_and_reports_its_skipped_probe() {
+    let dir = unique_dir("gateway-resolved-refs");
+    let backend = FakeBackend::new(CaptureBehavior::Identical)
+        .with_gateway(GatewayBehavior::CandidateLosesResolvedRefs);
+    let (output, result) = run_gateway(&dir, &backend);
+
+    assert_eq!(
+        output.disposition,
+        RunDisposition::PolicyFailed,
+        "a backend that stopped resolving is critical in the default table: {output:?}"
+    );
+
+    let entry = gateway_entry(&result).expect("the route contract must be reported");
+    let kinds: Vec<&str> = entry["changes"]
+        .as_array()
+        .expect("changes must be an array")
+        .iter()
+        .map(|classified| classified["change"]["kind"].as_str().expect("a kind"))
+        .collect();
+    assert!(
+        kinds.contains(&"backend_resolution_changed"),
+        "the product-level claim must be made: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"resolved_refs_condition_changed"),
+        "the condition evidence must be claimed beside it: {kinds:?}"
+    );
+    assert!(
+        kinds.contains(&"traffic_status_changed"),
+        "the baseline answered a probe the candidate did not; that is a traffic claim, not          silence: {kinds:?}"
+    );
+
+    // The reason travels as evidence and is rendered, but nothing
+    // *depends* on its wording: the assertion above is on the condition
+    // kind, this one only proves the reason reached a reader.
+    let resolved = entry["changes"]
+        .as_array()
+        .expect("changes must be an array")
+        .iter()
+        .find(|classified| classified["change"]["kind"] == "resolved_refs_condition_changed")
+        .expect("the condition change must exist");
+    assert_eq!(
+        resolved["change"]["candidate"]["reason"], "RefNotPermitted",
+        "the controller's own reason is carried in the payload"
+    );
+    assert_eq!(resolved["severity"], "critical");
+
+    assert!(
+        result["diagnostics"]
+            .as_array()
+            .expect("diagnostics must be an array")
+            .iter()
+            .any(|diagnostic| diagnostic["code"] == "gateway.probe_skipped"),
+        "a skipped probe is evidence, and must be recorded as such"
+    );
+    assert!(
+        output.stdout.contains("traffic: no probe was sent"),
+        "the terminal report must say a probe was skipped rather than showing nothing: {output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_candidate_that_never_converges_is_counted_inconclusive_rather_than_identical() {
+    let dir = unique_dir("gateway-unconverged");
+    let backend = FakeBackend::new(CaptureBehavior::Identical)
+        .with_gateway(GatewayBehavior::CandidateNeverConverges);
+    let (output, result) = run_gateway(&dir, &backend);
+
+    assert_eq!(
+        result["summary"]["inconclusive"], 1,
+        "only one side converged, so an empty change list would not mean the sides agreed:          {output:?}"
+    );
+    assert_eq!(result["summary"]["identical"], 1, "the admission fixture");
+    assert!(
+        output
+            .stdout
+            .contains("only one side converged (baseline converged, candidate unconverged"),
+        "the comparability answer must be surfaced at report altitude: {output:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_gateway_suite_failure_ends_the_run_as_a_fixture_failure() {
+    let dir = unique_dir("gateway-suite-fails");
+    let config = write_gateway_lab(&dir);
+    let reports = dir.join("reports");
+    let backend =
+        FakeBackend::new(CaptureBehavior::Identical).with_gateway(GatewayBehavior::CandidateFails);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+
+    assert_eq!(
+        output.disposition,
+        RunDisposition::FixtureFailed,
+        "{output:?}"
+    );
+    assert!(
+        !reports.join("result.json").exists(),
+        "a run that never compared both sides has earned no verdict to write"
+    );
+    assert!(
+        reports.join("diagnostics.json").exists(),
+        "what it did observe is still written"
+    );
+    assert_eq!(
+        backend.gateway_sides().len(),
+        2,
+        "one side failing must never abandon the other's in-flight suite"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_lab_with_no_gateway_section_produces_no_gateway_output_at_all() {
+    let dir = unique_dir("gateway-absent");
+    let config = write_lab(&dir, "");
+    let reports = dir.join("reports");
+    let backend = FakeBackend::new(CaptureBehavior::Identical);
+    let request = RunRequest {
+        config: &config,
+        keep_clusters: false,
+        report_dir: Some(&reports),
+        github_summary: None,
+        run_root: dir.join("runs"),
+    };
+
+    let output = run(&backend, &request);
+    let result = read_result(&reports.join("result.json"));
+
+    assert!(
+        backend.gateway_sides().is_empty(),
+        "no `gateway:` section means the suite is never constructed, let alone run"
+    );
+    assert_eq!(result["summary"]["fixturesTotal"], 1);
+    for entry in result["fixtures"].as_array().expect("an array") {
+        assert!(
+            entry["gateway"].is_null(),
+            "nothing may fabricate a Gateway section: {entry}"
+        );
+    }
+    assert!(
+        !output.stdout.contains("Gateway"),
+        "an admission-only run must print no Gateway heading at all: {output:?}"
+    );
+    assert!(
+        result["timings"].get("gatewaySuite").is_none(),
+        "a stage that never ran is absent, never zero"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

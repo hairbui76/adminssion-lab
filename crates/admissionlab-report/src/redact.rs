@@ -118,13 +118,17 @@ use admissionlab_core::{
     ComponentTiming, Diagnostic, InstallStage, RedactedValue, SideInstallTiming, StageTimings,
 };
 use admissionlab_diff::{DivergenceEvidence, SemanticChange};
+use admissionlab_gateway::{
+    GatewayCaseResult, GatewayClassEvidence, GatewayEvidence, HttpProbeResult, ObservedCondition,
+    ReconciliationEvidence, RouteEvidence, RouteParentStatus,
+};
 use admissionlab_policy::{ClassifiedChange, PolicyResult, StaleExpectation};
 use json_patch::{AddOperation, PatchOperation, ReplaceOperation, TestOperation};
 use serde_json::{Map, Value};
 
 use crate::model::{
     AdmissionComparison, ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureComparison,
-    LabResult,
+    GatewayCaseComparison, LabResult,
 };
 
 /// The text every redacted value is replaced with.
@@ -362,6 +366,7 @@ fn redact_timings(timings: &StageTimings) -> StageTimings {
             candidate: install.candidate.as_ref().map(redact_side_install),
         }),
         fixture_capture: timings.fixture_capture.clone(),
+        gateway_suite: timings.gateway_suite.clone(),
         comparison: timings.comparison,
         reporting: timings.reporting,
         cleanup: timings.cleanup.clone(),
@@ -385,15 +390,10 @@ fn redact_side_install(install: &SideInstallTiming) -> SideInstallTiming {
     }
 }
 
-/// Redacts one fixture's whole comparison.
+/// Redacts one compared unit's whole comparison.
 ///
 /// `fixture_id` is carried verbatim for the same reason as
-/// [`LabResult::run_id`]: its grammar cannot hold a secret. `gateway` is
-/// carried verbatim because Alpha's
-/// [`crate::model::GatewayCaseComparison`] is an empty reservation with
-/// no fields to redact -- when Phase 6 gives it fields, it gets a
-/// redaction arm here, and the empty-struct clone is what makes that
-/// omission a visible edit rather than a silent pass-through.
+/// [`LabResult::run_id`]: its grammar cannot hold a secret.
 fn redact_fixture(fixture: &FixtureComparison, context: &Context<'_>) -> FixtureComparison {
     FixtureComparison {
         fixture_id: fixture.fixture_id.clone(),
@@ -401,12 +401,155 @@ fn redact_fixture(fixture: &FixtureComparison, context: &Context<'_>) -> Fixture
             .admission
             .as_ref()
             .map(|admission| redact_admission(admission, context)),
-        gateway: fixture.gateway.clone(),
+        gateway: fixture.gateway.as_ref().map(redact_gateway),
         changes: fixture
             .changes
             .iter()
             .map(|change| redact_classified_change(change, context))
             .collect(),
+    }
+}
+
+/// Redacts both sides' Gateway evidence for one route contract (ROADMAP
+/// Task 6.11).
+///
+/// Every value below is rebuilt field by field rather than cloned, for
+/// the reason [`redact_timings`] gives for doing the same: a field added
+/// later to any of `admissionlab-gateway`'s evidence types becomes a
+/// compile error here instead of a silently unredacted payload. That
+/// matters more here than almost anywhere else in this pass, because two
+/// of these fields carry text this project does not author -- a
+/// controller's own `reason` string and a data plane's own response
+/// headers.
+fn redact_gateway(comparison: &GatewayCaseComparison) -> GatewayCaseComparison {
+    GatewayCaseComparison {
+        baseline: redact_gateway_case(&comparison.baseline),
+        candidate: redact_gateway_case(&comparison.candidate),
+    }
+}
+
+/// One side's Gateway case result.
+///
+/// `contract_id` is carried verbatim: it is the identifier the run
+/// correlates the two sides by, and rewriting it would break the pairing
+/// the document is built on -- the same reasoning `fixture_id` gets.
+fn redact_gateway_case(case: &GatewayCaseResult) -> GatewayCaseResult {
+    GatewayCaseResult {
+        contract_id: case.contract_id.clone(),
+        reconciliation: redact_reconciliation(&case.reconciliation),
+        probes: case.probes.iter().map(redact_probe).collect(),
+    }
+}
+
+/// One route's reconciliation evidence.
+///
+/// Object names, namespaces, generations and the `converged` flag are
+/// Kubernetes identifiers and numbers, which none of these rules can
+/// match. What genuinely needs the pass is every controller-authored
+/// `reason` (rule 2 -- an implementation is free to put anything in one)
+/// and every [`Diagnostic`] message, which is already handled by the
+/// same [`redact_diagnostic`] the run-level list uses. There is no
+/// [`Context`] parameter for the same reason [`redact_diagnostic`] has
+/// none: no embedded [`Value`] payload lives here for rules 1, 3 or 4 to
+/// walk -- a Gateway change's payloads travel as
+/// [`SemanticChange`]s, which [`redact_semantic_change`] already covers.
+fn redact_reconciliation(evidence: &ReconciliationEvidence) -> ReconciliationEvidence {
+    ReconciliationEvidence {
+        gateway_class: evidence
+            .gateway_class
+            .as_ref()
+            .map(|class| GatewayClassEvidence {
+                name: redact_string(&class.name),
+                accepted: redact_condition(&class.accepted),
+            }),
+        gateway: GatewayEvidence {
+            identity: evidence.gateway.identity.clone(),
+            conditions: redact_conditions(&evidence.gateway.conditions),
+            generation: evidence.gateway.generation,
+            gateway_class_name: evidence
+                .gateway
+                .gateway_class_name
+                .as_deref()
+                .map(redact_string),
+        },
+        route: RouteEvidence {
+            namespace: redact_string(&evidence.route.namespace),
+            name: redact_string(&evidence.route.name),
+            generation: evidence.route.generation,
+            parents: evidence
+                .route
+                .parents
+                .iter()
+                .map(|parent| RouteParentStatus {
+                    parent: parent.parent.clone(),
+                    controller_name: parent.controller_name.as_deref().map(redact_string),
+                    conditions: redact_conditions(&parent.conditions),
+                })
+                .collect(),
+        },
+        elapsed: evidence.elapsed,
+        converged: evidence.converged,
+        diagnostics: evidence.diagnostics.iter().map(redact_diagnostic).collect(),
+    }
+}
+
+/// A condition map, keyed by condition type.
+///
+/// Keys are Gateway API's own condition types (`Accepted`,
+/// `ResolvedRefs`, `Programmed`) and are carried verbatim; only the
+/// values go through [`redact_condition`].
+fn redact_conditions(
+    conditions: &std::collections::BTreeMap<String, ObservedCondition>,
+) -> std::collections::BTreeMap<String, ObservedCondition> {
+    conditions
+        .iter()
+        .map(|(type_name, condition)| (type_name.clone(), redact_condition(condition)))
+        .collect()
+}
+
+/// One observed condition. Its `reason` is controller-authored text, so
+/// it goes through the string rules like every other such string in this
+/// document.
+fn redact_condition(condition: &ObservedCondition) -> ObservedCondition {
+    ObservedCondition {
+        type_name: condition.type_name.clone(),
+        state: condition.state,
+        reason: condition.reason.as_deref().map(redact_string),
+        observed_generation: condition.observed_generation,
+    }
+}
+
+/// One HTTP probe result.
+///
+/// `response_headers` is the one place in this whole document where a
+/// *live HTTP response's* headers are carried verbatim as structure, and
+/// `admissionlab_gateway::probe` deliberately filters nothing out of it
+/// -- it is evidence, and the crate that captured it is not the one that
+/// decides what a report may show. This is where that decision is made,
+/// and it is made the same way it is made for a captured webhook's
+/// headers: rule 2's object-key form replaces the *value* of any
+/// sensitive header name (`Set-Cookie` being the realistic one for a
+/// data-plane response) while keeping the name, so that a header
+/// appearing on one side and not the other stays a visible difference.
+fn redact_probe(probe: &HttpProbeResult) -> HttpProbeResult {
+    HttpProbeResult {
+        status: probe.status,
+        backend: probe.backend.as_deref().map(redact_string),
+        response_headers: probe
+            .response_headers
+            .iter()
+            .map(|(name, value)| {
+                let redacted = if is_sensitive_header_name(name) {
+                    REDACTED.to_owned()
+                } else {
+                    redact_string(value)
+                };
+                (name.clone(), redacted)
+            })
+            .collect(),
+        response_body_sha256: probe.response_body_sha256.clone(),
+        elapsed: probe.elapsed,
+        attempts: probe.attempts,
     }
 }
 
