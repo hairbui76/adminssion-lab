@@ -203,7 +203,7 @@ pub const REDACTED_REQUEST_HEADERS: [&str; 3] = ["authorization", "cookie", "pro
 ///
 /// Carries no copy of the request — see this module's "Redaction"
 /// section.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct HttpProbeResult {
     /// The HTTP status code the data plane returned.
@@ -227,6 +227,7 @@ pub struct HttpProbeResult {
     /// monotonic. Includes every retried attempt: this is how long the
     /// probe took, not how long the successful attempt took.
     #[serde(serialize_with = "serialize_duration_millis")]
+    #[schemars(with = "u64")]
     pub elapsed: Duration,
     /// How many connection attempts were made, including the one that
     /// produced this response. `1` for a probe that connected first

@@ -68,6 +68,13 @@
 //! the full argument, including why the sentinel is a loud one.
 
 use admissionlab_core::FixtureId;
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines is embedded verbatim in that
+// document, so the schema generated from the result model has to
+// describe it. Derives and `#[schemars(with = ...)]` restatements of
+// what the existing `serialize_with` helpers already emit -- no field,
+// name, or semantic change.
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -89,7 +96,7 @@ use serde_json::Value;
 /// [`Deserialize`] is derived (unlike [`SemanticChange`] itself, which is
 /// emit-only) because Task 4.9's `ExpectedChange::kind` is read back out
 /// of a user-authored `expectations.yaml`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum SemanticChangeKind {
     /// The baseline admitted the object and the candidate rejected it.
     #[serde(rename = "newly_denied")]
@@ -270,7 +277,7 @@ impl SemanticChangeKind {
 ///
 /// Derives no `Default`: a direction exists only because a comparison
 /// determined one.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum ChangeDirection {
     /// The candidate moved toward the good state -- for a Gateway
     /// condition, to `True` from something that was not `True`.
@@ -337,7 +344,7 @@ pub const DIRECTION_KEY: &str = "direction";
 /// Each variant's wire tag is pinned explicitly -- this type serializes
 /// into the same reports [`SemanticChangeKind`] does, so its names are
 /// Alpha-stable too.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
 pub enum DivergenceConfidence {
     /// The divergence itself was directly observed in the captured
     /// evidence on both sides.
@@ -378,7 +385,7 @@ pub enum DivergenceConfidence {
 ///
 /// Derives no `Default`: like the confidence it carries, evidence exists
 /// only because something concluded it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct DivergenceEvidence {
     /// How well supported this attribution is.
     pub confidence: DivergenceConfidence,
@@ -409,13 +416,14 @@ pub struct DivergenceEvidence {
 /// report. Nothing reads one back in. (Its `kind` *is* readable, because
 /// user-authored expectation files name kinds; see
 /// [`SemanticChangeKind`].)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SemanticChange {
     /// What kind of difference this is.
     pub kind: SemanticChangeKind,
     /// Which fixture the difference was observed for. Both compared
     /// sides always describe the same fixture; the caller pairs them.
     #[serde(serialize_with = "serialize_fixture_id")]
+    #[schemars(with = "String")]
     pub fixture_id: FixtureId,
     /// An RFC 6901 JSON pointer into the compared object, when the
     /// difference has one specific location (for example

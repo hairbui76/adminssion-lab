@@ -181,6 +181,13 @@ use std::collections::{BTreeMap, BTreeSet};
 use admissionlab_diff::{
     ChangeDirection, DIRECTION_KEY, SemanticChange, SemanticChangeKind, unattributed_fixture_id,
 };
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines that reaches a run's result
+// document is embedded verbatim in it, so the schema generated from the
+// result model has to describe it. Derives and `#[schemars(with = ...)]`
+// restatements of what the existing `serialize_with` helpers already
+// emit -- no field, name, or semantic change.
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -210,7 +217,7 @@ const OBJECT_ROUTE: &str = "HTTPRoute";
 /// Derives no `Default`. [`GatewayEvidenceLevel::Converged`] is the
 /// convenient answer, and defaulting to it would silently upgrade "the
 /// wait timed out" into "the route settled".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 pub enum GatewayEvidenceLevel {
     /// The route reached a stable, current status within the
     /// reconciliation deadline. Its conditions and probes are a
@@ -249,7 +256,7 @@ pub enum GatewayEvidenceLevel {
 /// `admissionlab_diff::TraceComparability` gives: `Comparable` is the
 /// flattering answer, and defaulting to it would turn "we could not
 /// tell" into "we looked and it was fine".
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 pub enum GatewayComparability {
     /// Both sides converged. Differences *and* absences are evidence,
     /// and an empty change list means the two sides genuinely behaved

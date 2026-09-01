@@ -75,6 +75,13 @@
 //! set cannot be complete-but-misordered either.
 
 use admissionlab_diff::{ChangeDirection, SemanticChange, SemanticChangeKind};
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines is embedded verbatim in that
+// document, so the schema generated from the result model has to
+// describe it. Derives and `#[schemars(with = ...)]` restatements of
+// what the existing `serialize_with` helpers already emit -- no field,
+// name, or semantic change.
+use schemars::JsonSchema;
 use serde::Serialize;
 
 /// How bad one behavior change is.
@@ -102,7 +109,7 @@ use serde::Serialize;
 /// [`SemanticChangeKind`]'s own discipline: these strings appear in JSON
 /// reports and in hand-written `policy.overrides` entries, so renaming a
 /// Rust variant must never silently change them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 pub enum Severity {
     /// A real difference that is not, on its own, evidence of a problem.
     #[serde(rename = "info")]

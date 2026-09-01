@@ -471,12 +471,12 @@ fn assert_reports_the_expected_image_change(run: &LabRun) {
     // one -- and an expectations file quietly accumulating entries that
     // stopped applying is exactly the drift the field exists to expose.
     assert_eq!(
-        run.result["policy"]["stale_expectations"]
+        run.result["policy"]["staleExpectations"]
             .as_array()
             .map(Vec::len),
         Some(0),
         "no expectation in the canonical example may be stale: {:#?}",
-        run.result["policy"]["stale_expectations"]
+        run.result["policy"]["staleExpectations"]
     );
 }
 

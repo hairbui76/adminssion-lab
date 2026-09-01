@@ -21,6 +21,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): a `Diagnostic` reaches that document both at run level and
+// inside every captured `AdmissionOutcome`, so the generated schema has
+// to describe it. Derive only -- no field, name, or semantic change.
+use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
 
 /// The exact text every [`RedactedValue::Sensitive`] renders as, in every
@@ -113,7 +118,7 @@ impl Serialize for RedactedValue {
 /// reports and diffable snapshots — and its values are [`RedactedValue`]
 /// rather than `String` so that every context entry has been explicitly
 /// marked public or sensitive before it can be attached at all.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct Diagnostic {
     /// A short, stable machine-readable identifier, for example
     /// `"install.failed"`.
@@ -124,5 +129,12 @@ pub struct Diagnostic {
     /// secret material (tokens, credentials, webhook CA bundles, and
     /// similar) must be [`RedactedValue::Sensitive`], never
     /// [`RedactedValue::Public`].
+    ///
+    /// Described to `schemars` as a plain `string` map because that is
+    /// exactly what [`RedactedValue`]'s hand-written [`Serialize`] emits
+    /// -- `Public`'s value verbatim, or the fixed [`REDACTED`] literal.
+    /// Deriving `JsonSchema` on the enum instead would describe the Rust
+    /// variants, which never appear on the wire.
+    #[schemars(with = "BTreeMap<String, String>")]
     pub context: BTreeMap<String, RedactedValue>,
 }

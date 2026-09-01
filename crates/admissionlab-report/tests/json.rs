@@ -1,6 +1,14 @@
-//! Golden and behavioral tests for the Alpha JSON result artifact.
+//! Golden and behavioral tests for the frozen v1beta1 JSON result
+//! artifact.
 //!
-//! The golden lives in `testdata/golden/result-alpha.json` rather than
+//! This file owns the golden document; `tests/result_schema.rs` owns the
+//! published schema, validates this golden against it, and asserts the
+//! freeze's own three requirements. There was never a checked-in Alpha
+//! *schema*, and the Alpha golden retired with the version it recorded:
+//! this crate emits exactly one result version, so one golden is the
+//! complete record of what it writes.
+//!
+//! The golden lives in `testdata/golden/result-v1beta1.json` rather than
 //! inline, because unlike the terminal report this document is a
 //! contract other tools read: a reviewer changing the model should have
 //! to look at a real, complete, pretty-printed example of what consumers
@@ -20,8 +28,8 @@ use admissionlab_report::{ReportError, SCHEMA_VERSION, render_json, write_json_r
 use serde_json::Value;
 use support::canonical_result;
 
-/// The committed Alpha example, embedded at compile time.
-const GOLDEN: &str = include_str!("../../../testdata/golden/result-alpha.json");
+/// The committed Beta example, embedded at compile time.
+const GOLDEN: &str = include_str!("../../../testdata/golden/result-v1beta1.json");
 
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// following the same convention as the other crates' filesystem tests.
@@ -48,8 +56,10 @@ fn the_canonical_result_matches_the_golden_byte_for_byte() {
 
     assert_eq!(
         rendered, GOLDEN,
-        "the Alpha result shape changed; review `testdata/golden/result-alpha.json` \
-         and regenerate it deliberately"
+        "the frozen v1beta1 result shape changed; review \
+         `testdata/golden/result-v1beta1.json` and regenerate it deliberately with \
+         `cargo test -p admissionlab-report --test result_schema -- --ignored \
+         regenerate_golden_file`"
     );
 }
 
@@ -83,8 +93,8 @@ fn serialization_is_deterministic() {
 }
 
 #[test]
-fn the_schema_version_is_the_pinned_alpha_identifier() {
-    assert_eq!(SCHEMA_VERSION, "admissionlab.io/result/v1alpha1");
+fn the_schema_version_is_the_pinned_beta_identifier() {
+    assert_eq!(SCHEMA_VERSION, "admissionlab.io/result/v1beta1");
     assert_eq!(
         golden_value()["schemaVersion"],
         Value::String(SCHEMA_VERSION.to_owned()),
@@ -111,12 +121,25 @@ fn report_owned_fields_are_camel_case() {
         );
     }
     assert!(golden["summary"].get("fixturesTotal").is_some());
-    assert!(golden["fixtures"][0].get("fixtureId").is_some());
+    for key in [
+        "fixtureId",
+        "bucket",
+        "admission",
+        "gatewayReconciliation",
+        "traffic",
+        "changes",
+    ] {
+        assert!(
+            golden["fixtures"][0].get(key).is_some(),
+            "fixture key `{key}` is missing from the golden"
+        );
+    }
     assert!(
         golden["fixtures"][0]["admission"]
             .get("firstDivergence")
             .is_some()
     );
+    assert!(golden["policy"].get("staleExpectations").is_some());
 }
 
 #[test]
@@ -133,7 +156,6 @@ fn foreign_types_keep_their_own_pinned_wire_names() {
     assert!(outcome.get("fixture_id").is_some());
     assert!(outcome.get("total_latency").is_some());
     assert!(outcome.get("final_object").is_some());
-    assert!(golden["policy"].get("stale_expectations").is_some());
     assert!(
         golden["policy"]["changes"][0]["change"]
             .get("object_path")
@@ -215,7 +237,7 @@ fn the_golden_carries_a_stale_expectation_and_diagnostics() {
     let golden = golden_value();
 
     assert_eq!(
-        golden["policy"]["stale_expectations"][0]["id"],
+        golden["policy"]["staleExpectations"][0]["id"],
         Value::String("sidecar-injection-rollout".to_owned())
     );
     assert_eq!(golden["diagnostics"].as_array().map(Vec::len), Some(2));
@@ -251,8 +273,11 @@ fn the_timings_block_pins_its_wire_names() {
     assert_eq!(
         timings["fixtureCapture"]["fixtures"],
         serde_json::json!(4),
-        "the fixture count is per side, and this run replayed four fixtures"
+        "the fixture count is per side, and this run replayed four admission fixtures -- the \
+         Gateway route contract is a compared unit but not a replayed fixture, and its own \
+         stage is `gatewaySuite`"
     );
+    assert_eq!(timings["gatewaySuite"]["wallMs"], serde_json::json!(9_744));
     assert_eq!(timings["comparisonMs"], serde_json::json!(212));
     assert_eq!(timings["elapsedMs"], serde_json::json!(149_006));
 }
@@ -278,17 +303,39 @@ fn an_unmeasured_stage_is_an_absent_key_and_never_a_zero() {
 }
 
 #[test]
-fn the_reserved_gateway_field_is_present_as_null() {
+fn every_evidence_section_is_written_even_when_it_is_null() {
+    // The key is always present, so "no Gateway evidence" is
+    // distinguishable from "this producer predates the field", and a
+    // consumer never reads an absence as a claim (Global Constraint 15).
     let golden = golden_value();
 
     for fixture in golden["fixtures"].as_array().expect("fixtures is an array") {
-        assert_eq!(
-            fixture["gateway"],
-            Value::Null,
-            "the key is always present, so `no Gateway evidence` is distinguishable \
-             from `this producer predates the field`"
+        let sections = ["admission", "gatewayReconciliation", "traffic"];
+        let written = sections
+            .iter()
+            .filter(|section| !fixture[**section].is_null())
+            .count();
+        for section in sections {
+            assert!(
+                fixture.get(section).is_some(),
+                "fixture {} omits the `{section}` key",
+                fixture["fixtureId"]
+            );
+        }
+        assert!(
+            written > 0,
+            "fixture {} carries no evidence of any kind",
+            fixture["fixtureId"]
         );
     }
+
+    // An admission fixture and a Gateway route contract are different
+    // kinds of compared unit, and no entry is both.
+    assert!(!golden["fixtures"][0]["admission"].is_null());
+    assert!(golden["fixtures"][0]["gatewayReconciliation"].is_null());
+    assert!(golden["fixtures"][4]["admission"].is_null());
+    assert!(!golden["fixtures"][4]["gatewayReconciliation"].is_null());
+    assert!(!golden["fixtures"][4]["traffic"].is_null());
 }
 
 #[test]

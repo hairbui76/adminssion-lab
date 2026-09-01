@@ -22,39 +22,26 @@
 //!
 //! # Serialization boundary
 //!
-//! Every field this crate *owns* is pinned with an explicit
-//! `#[serde(rename)]` in `camelCase`, so renaming a Rust field can never
-//! silently change the report contract.
+//! This module holds the *in-memory* model. It is not the wire format.
+//! ROADMAP Task 7.2 froze the serialized document as
+//! `admissionlab.io/result/v1beta1`, and [`crate::wire`] defines that
+//! document as its own borrowed projection of a [`LabResult`]; read
+//! that module for the frozen shape, the three evidence sections, the
+//! explicit availability fields, and the change-identifier scheme.
 //!
-//! Types owned by **other** crates keep their own already-pinned wire
-//! shape and are not re-pinned here. That covers
-//! [`admissionlab_policy::PolicyResult`] (and the
-//! [`ClassifiedChange`]/[`admissionlab_policy::Severity`]/
-//! [`admissionlab_policy::StaleExpectation`] values inside it),
-//! [`admissionlab_diff::SemanticChange`] and
-//! [`admissionlab_diff::DivergenceEvidence`],
-//! [`admissionlab_admission::AdmissionOutcome`] (with its
-//! `AdmissionDecision`, `AdmissionTrace`, and `WebhookInvocation`),
-//! [`admissionlab_core::Diagnostic`], and
-//! [`admissionlab_core::StageTimings`] -- which happens to pin
-//! `camelCase` names of its own, so the timings block reads like this
-//! crate's own fields without this crate having re-pinned anything.
-//! Those crates pinned their tags
-//! deliberately -- often `snake_case` enum tags and plain Rust field
-//! names -- and a second `#[serde(rename_all)]` layer here would either
-//! be ignored (it cannot reach into a foreign type) or, worse, invite
-//! someone to wrap them in local mirror structs that drift. The visible
-//! consequence is that a serialized `LabResult` mixes `camelCase` keys
-//! (this crate's) with the foreign crates' own spellings; that is the
-//! honest rendering of who owns what, and the Alpha golden file records
-//! it exactly.
+//! There is exactly one serialization of a result, and it goes through
+//! [`crate::wire`]: [`LabResult`]'s [`Serialize`] implementation is
+//! hand-written and forwards to [`crate::wire::ResultDocument`], and the
+//! two types this module owns that the document reshapes
+//! ([`FixtureComparison`] and [`AdmissionComparison`]) deliberately
+//! derive no `Serialize` at all, so no second wire shape for them can
+//! exist to drift.
 //!
-//! [`admissionlab_core::RunId`] and [`admissionlab_core::FixtureId`]
-//! implement neither `Serialize` nor `Deserialize` by design, so both are
-//! written through a `serialize_with` helper that emits their bare string
-//! form -- the same convention
-//! [`admissionlab_admission::AdmissionOutcome`] already uses for its own
-//! `fixture_id`.
+//! The types the document embeds *unchanged* ([`RunSummary`],
+//! [`EnvironmentSummary`], [`EnvironmentReport`], [`ComponentReport`])
+//! keep their own `Serialize` derive with every field pinned by an
+//! explicit `#[serde(rename)]` in `camelCase`, so renaming a Rust field
+//! can never silently change the report contract.
 //!
 //! # Emit-only
 //!
@@ -69,52 +56,54 @@ use admissionlab_admission::AdmissionOutcome;
 use admissionlab_core::{Diagnostic, FixtureId, RunId, StageTimings};
 use admissionlab_diff::{DivergenceEvidence, decision_comparability};
 use admissionlab_policy::{PolicyResult, Severity};
+use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
 
-/// The Alpha result schema identifier, written into
+/// The Beta result schema identifier, written into
 /// [`LabResult::schema_version`].
 ///
-/// **Experimental.** Alpha makes no compatibility promise about this
-/// document's shape; the schema is frozen at Beta (Global Constraint 9).
-/// The version string is nonetheless explicit from the first release so
-/// a consumer can tell an Alpha document from whatever follows it.
-pub const SCHEMA_VERSION: &str = "admissionlab.io/result/v1alpha1";
+/// **Frozen** (ROADMAP Task 7.2, Global Constraint 9). Before v1.0 a
+/// reader of this document may be given *additional* optional fields;
+/// no existing field's meaning changes silently, and removing or
+/// renaming one requires a new schema version and a migration note. The
+/// shape this identifier names is generated into
+/// `schemas/result-v1beta1.json` from [`crate::wire::ResultDocument`]
+/// and recorded byte for byte in `testdata/golden/result-v1beta1.json`.
+///
+/// This crate emits exactly one version. The preceding
+/// `admissionlab.io/result/v1alpha1` documents were explicitly
+/// experimental and are no longer produced; there was never a checked-in
+/// Alpha *schema* for them to be validated against.
+pub const SCHEMA_VERSION: &str = "admissionlab.io/result/v1beta1";
 
 /// One comparison run, ready to render.
 ///
 /// Derives no `Default`: a `LabResult` exists only because a real run
 /// produced one.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LabResult {
     /// The result schema this document conforms to. Always
     /// [`SCHEMA_VERSION`] for documents this crate produces; kept as a
     /// `String` (rather than a unit type that can only ever be one
     /// value) because §1.2 freezes it as one and because a future
     /// version must be representable without a breaking type change.
-    #[serde(rename = "schemaVersion")]
     pub schema_version: String,
     /// The run this result describes.
-    #[serde(rename = "runId", serialize_with = "serialize_run_id")]
     pub run_id: RunId,
     /// The five-bucket count over [`LabResult::fixtures`]. Build it with
     /// [`RunSummary::from_fixtures`] rather than by hand, so the counts
     /// and the per-fixture buckets can never disagree.
-    #[serde(rename = "summary")]
     pub summary: RunSummary,
     /// What each side actually was, as observed.
-    #[serde(rename = "environments")]
     pub environments: EnvironmentSummary,
     /// Every fixture replayed, in the order the run replayed them.
-    #[serde(rename = "fixtures")]
     pub fixtures: Vec<FixtureComparison>,
     /// The run's policy verdict and every graded change, in
     /// `admissionlab-policy`'s own documented deterministic order.
-    #[serde(rename = "policy")]
     pub policy: PolicyResult,
     /// Run-level diagnostics -- things that happened to the *run*, not
     /// to one fixture. Per-fixture diagnostics stay on that fixture's
     /// [`AdmissionOutcome::diagnostics`].
-    #[serde(rename = "diagnostics")]
     pub diagnostics: Vec<Diagnostic>,
     /// How long each stage of the run took (ROADMAP Task 5.7), or `None`
     /// for a result whose producer did not measure.
@@ -139,12 +128,29 @@ pub struct LabResult {
     /// of them. `admissionlab_core::timing`'s module documentation states
     /// the same thing from the recorder's side.
     ///
-    /// Placed last in declaration order deliberately: `serde` emits
-    /// fields in source order, so appending here adds one block to the
-    /// end of every existing document rather than shifting the whole file
-    /// in the golden diff.
-    #[serde(rename = "timings", skip_serializing_if = "Option::is_none")]
+    /// Placed last, and written last by [`crate::wire::ResultDocument`]
+    /// too, deliberately: appending here adds one block to the end of
+    /// every existing document rather than shifting the whole file in the
+    /// golden diff.
     pub timings: Option<StageTimings>,
+}
+
+/// Serializes a result as the frozen
+/// `admissionlab.io/result/v1beta1` document, and never as this
+/// struct's own field list.
+///
+/// Hand-written rather than derived so that there is exactly one wire
+/// shape for a result and no way to reach a second one: every
+/// `serde_json::to_*` call on a `LabResult` anywhere -- this crate's
+/// [`crate::json::render_json`], a test, a future caller -- goes through
+/// [`crate::wire::ResultDocument`] and therefore through the frozen
+/// schema. Deriving `Serialize` here as well would publish this
+/// module's declaration order as a competing, unversioned document that
+/// nothing validates.
+impl Serialize for LabResult {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        crate::wire::ResultDocument::from(self).serialize(serializer)
+    }
 }
 
 /// How many fixtures landed in each of the five buckets.
@@ -156,7 +162,7 @@ pub struct LabResult {
 /// Derives no `Default`: a summary of nothing is not a meaningful value,
 /// and [`RunSummary::from_fixtures`] on an empty slice already spells
 /// "an empty run" honestly.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct RunSummary {
     /// How many fixtures the run replayed. Equals the sum of the other
     /// five fields.
@@ -261,7 +267,7 @@ impl FixtureBucket {
 }
 
 /// What both sides of the comparison actually were.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct EnvironmentSummary {
     /// The baseline side.
     #[serde(rename = "baseline")]
@@ -272,7 +278,7 @@ pub struct EnvironmentSummary {
 }
 
 /// One side's observed environment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct EnvironmentReport {
     /// The Kubernetes version this side ran, as reported by the cluster.
     #[serde(rename = "kubernetes")]
@@ -284,7 +290,7 @@ pub struct EnvironmentReport {
 }
 
 /// One installed component's identity, for provenance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ComponentReport {
     /// The component's name, as the lab configuration named it.
     #[serde(rename = "name")]
@@ -297,17 +303,15 @@ pub struct ComponentReport {
 /// Everything the run observed about one fixture, on both sides.
 ///
 /// Derives no `Default`: it holds evidence about a real fixture.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct FixtureComparison {
     /// Which fixture this is.
-    #[serde(rename = "fixtureId", serialize_with = "serialize_fixture_id")]
     pub fixture_id: FixtureId,
     /// The admission comparison, when the fixture was replayed through
     /// both sides' API servers. `None` means no admission evidence
     /// exists for this fixture at all -- which is why such a fixture is
     /// [`FixtureBucket::Inconclusive`] rather than
     /// [`FixtureBucket::Identical`].
-    #[serde(rename = "admission")]
     pub admission: Option<AdmissionComparison>,
     /// The Gateway comparison, when this entry is a Gateway route
     /// contract rather than an admission fixture (ROADMAP Task 6.11).
@@ -330,7 +334,18 @@ pub struct FixtureComparison {
     /// The two are never mixed on one entry, and [`Self::bucket`] is
     /// where that shows: an entry with neither is inconclusive because
     /// nothing was observed at all.
-    #[serde(rename = "gateway")]
+    ///
+    /// # One field here, two sections on the wire
+    ///
+    /// The frozen v1beta1 document presents this one value as the two
+    /// separate sections the roadmap froze -- `gatewayReconciliation`
+    /// and `traffic` -- through
+    /// [`crate::wire::ReconciliationSection`] and
+    /// [`crate::wire::TrafficSection`]. It stays one field *here*
+    /// because the pair is the unit `admissionlab_gateway::diff`
+    /// produced and the receiver of the `comparability()` call
+    /// [`Self::bucket`] makes; see `crate::wire`'s "Projection, not a
+    /// second model".
     pub gateway: Option<GatewayCaseComparison>,
     /// Every graded change attributed to this fixture, in
     /// `admissionlab-policy`'s deterministic order.
@@ -342,7 +357,6 @@ pub struct FixtureComparison {
     /// by `fixture_id` (and re-implementing the grouping three times).
     ///
     /// [`ClassifiedChange`]: admissionlab_policy::ClassifiedChange
-    #[serde(rename = "changes")]
     pub changes: Vec<admissionlab_policy::ClassifiedChange>,
 }
 
@@ -472,13 +486,11 @@ impl FixtureComparison {
 /// own module documentation.
 ///
 /// Derives no `Default`: it holds evidence about a real replay.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdmissionComparison {
     /// What the baseline side did.
-    #[serde(rename = "baseline")]
     pub baseline: AdmissionOutcome,
     /// What the candidate side did.
-    #[serde(rename = "candidate")]
     pub candidate: AdmissionOutcome,
     /// Where in the webhook chain the two sides first diverged, when
     /// that could be attributed. `None` means attribution was not
@@ -489,7 +501,6 @@ pub struct AdmissionComparison {
     ///
     /// [`DivergenceConfidence::Inferred`]: admissionlab_diff::DivergenceConfidence::Inferred
     /// [`Unknown`]: admissionlab_diff::DivergenceConfidence::Unknown
-    #[serde(rename = "firstDivergence")]
     pub first_divergence: Option<DivergenceEvidence>,
 }
 
@@ -511,25 +522,3 @@ pub struct AdmissionComparison {
 /// registry name it always did, so no consumer of this crate's public
 /// surface had to change.
 pub use admissionlab_gateway::GatewayCaseComparison;
-
-/// Serializes a [`RunId`] as its bare string form ([`RunId::as_str`]).
-///
-/// `admissionlab-core` deliberately implements neither `Serialize` nor
-/// `Deserialize` for its identifier types, so every consumer states the
-/// representation it wants explicitly. This one matches every other
-/// place a run identifier's string form already appears (artifact
-/// directory names, `kind` cluster name suffixes).
-fn serialize_run_id<S: Serializer>(value: &RunId, serializer: S) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(value.as_str())
-}
-
-/// Serializes a [`FixtureId`] as its bare string form
-/// ([`FixtureId::as_str`]) -- the same convention
-/// [`AdmissionOutcome`]'s own `fixture_id` uses, so the identifier reads
-/// identically wherever it appears in one document.
-fn serialize_fixture_id<S: Serializer>(
-    value: &FixtureId,
-    serializer: S,
-) -> Result<S::Ok, S::Error> {
-    serializer.serialize_str(value.as_str())
-}

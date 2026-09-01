@@ -100,6 +100,13 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): `StageTimings` is embedded in that document, so the generated
+// schema has to describe it and its four nested stage types. Derives and
+// `#[schemars(with = ...)]` restatements of what the existing
+// `serialize_with` helpers already emit -- no field, name, or semantic
+// change.
+use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
 
 use crate::artifact::RunPaths;
@@ -131,7 +138,7 @@ use admissionlab_spec::ResolvedComponent;
 /// comparison) is budgeted in hundreds of milliseconds, and the slowest
 /// (cluster creation) in tens of seconds, so sub-millisecond precision
 /// would be noise printed to four extra digits.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct StageTimings {
     /// Creating both ephemeral clusters.
     #[serde(rename = "clusterCreation", skip_serializing_if = "Option::is_none")]
@@ -163,6 +170,7 @@ pub struct StageTimings {
         serialize_with = "serialize_optional_millis",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "Option<u64>")]
     pub comparison: Option<Duration>,
     /// Redacting the result once and rendering and writing every view of
     /// it.
@@ -174,6 +182,7 @@ pub struct StageTimings {
         serialize_with = "serialize_optional_millis",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "Option<u64>")]
     pub reporting: Option<Duration>,
     /// Deleting both clusters. Absent for a `--keep-clusters` run, which
     /// deletes nothing, and absent from a `result.json` for the same
@@ -189,6 +198,7 @@ pub struct StageTimings {
     /// difference between this and the stages' sum is itself the useful
     /// number when it grows.
     #[serde(rename = "elapsedMs", serialize_with = "serialize_millis")]
+    #[schemars(with = "u64")]
     pub elapsed: Duration,
 }
 
@@ -199,10 +209,11 @@ pub struct StageTimings {
 /// it is what a caller waiting on both actually waited. It is usually a
 /// little above the slower side (the join's own overhead) and is the
 /// number that belongs in "the run spent this long here".
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SideStage {
     /// How long the caller waited for both sides together.
     #[serde(rename = "wallMs", serialize_with = "serialize_millis")]
+    #[schemars(with = "u64")]
     pub wall: Duration,
     /// The baseline side's own duration, when that side ran.
     #[serde(
@@ -210,6 +221,7 @@ pub struct SideStage {
         serialize_with = "serialize_optional_millis",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "Option<u64>")]
     pub baseline: Option<Duration>,
     /// The candidate side's own duration, when that side ran.
     #[serde(
@@ -217,15 +229,17 @@ pub struct SideStage {
         serialize_with = "serialize_optional_millis",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "Option<u64>")]
     pub candidate: Option<Duration>,
 }
 
 /// The installation stage: both sides' wall-clock, and each side's own
 /// per-component breakdown.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct InstallStage {
     /// How long the caller waited for both sides' stacks together.
     #[serde(rename = "wallMs", serialize_with = "serialize_millis")]
+    #[schemars(with = "u64")]
     pub wall: Duration,
     /// The baseline side's stack, when that side installed one.
     #[serde(rename = "baseline", skip_serializing_if = "Option::is_none")]
@@ -236,11 +250,12 @@ pub struct InstallStage {
 }
 
 /// One side's stack installation.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct SideInstallTiming {
     /// How long this side's whole stack took to install and become
     /// ready.
     #[serde(rename = "elapsedMs", serialize_with = "serialize_millis")]
+    #[schemars(with = "u64")]
     pub elapsed: Duration,
     /// One entry per component, in install order.
     ///
@@ -260,13 +275,14 @@ pub struct SideInstallTiming {
 /// [`crate::run::InstalledComponent::elapsed`] verbatim, the installer's
 /// own measurement around its own work. See this module's documentation
 /// ("Two ways a duration gets here").
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct ComponentTiming {
     /// The component's name, as the lab configuration named it.
     #[serde(rename = "name")]
     pub name: String,
     /// How long it took to install and become ready.
     #[serde(rename = "elapsedMs", serialize_with = "serialize_millis")]
+    #[schemars(with = "u64")]
     pub elapsed: Duration,
 }
 
@@ -281,10 +297,11 @@ impl From<&InstalledComponent> for ComponentTiming {
 
 /// The fixture-capture stage: both sides' wall-clock, each side's own,
 /// and how many fixtures each side replayed.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct CaptureStage {
     /// How long the caller waited for both sides' capture together.
     #[serde(rename = "wallMs", serialize_with = "serialize_millis")]
+    #[schemars(with = "u64")]
     pub wall: Duration,
     /// The baseline side's own capture duration, when that side ran.
     #[serde(
@@ -292,6 +309,7 @@ pub struct CaptureStage {
         serialize_with = "serialize_optional_millis",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "Option<u64>")]
     pub baseline: Option<Duration>,
     /// The candidate side's own capture duration, when that side ran.
     #[serde(
@@ -299,6 +317,7 @@ pub struct CaptureStage {
         serialize_with = "serialize_optional_millis",
         skip_serializing_if = "Option::is_none"
     )]
+    #[schemars(with = "Option<u64>")]
     pub candidate: Option<Duration>,
     /// How many fixtures each side replayed.
     ///

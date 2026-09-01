@@ -67,11 +67,25 @@ admissionlab-policy = { workspace = true }
 # unredacted payload. Same crate/library name mismatch (`json-patch` on
 # the registry, `json_patch` in Rust) the root `Cargo.toml` documents.
 json-patch = { workspace = true }
+# ROADMAP Task 7.2: `schema.rs` generates `schemas/result-v1beta1.json`
+# from the same `wire` types that serialize a run's `result.json`, so the
+# published schema cannot drift from the document it describes. Same
+# version `admissionlab-spec` and `admissionlab-core` already resolve for
+# their own generated schemas.
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # The report model's own payload fields are `serde_json::Value` trees
 # (through the foreign types it carries), and `redact.rs` walks them
 # directly rather than serde-generically.
 serde_json = { workspace = true }
+# ROADMAP Task 7.2: `wire::semantic_change_id` derives each change's
+# stable identifier from a canonical encoding of the claim itself, so the
+# same change carries the same identifier in the per-fixture list and in
+# the run-wide policy list without either side counting. Same crate and
+# same construction (`Sha256`, lowercase hex) every other digest in this
+# workspace already uses -- `admissionlab_fixtures::hash` and
+# `admissionlab_core::run_manifest`.
+sha2 = { workspace = true }
 # `error.rs` follows the same `thiserror` derive convention every other
 # error vocabulary in this workspace uses, so a report failure formats
 # and chains like a spec, policy, or artifact failure.

@@ -1,11 +1,11 @@
 {
-  "schemaVersion": "admissionlab.io/result/v1alpha1",
-  "runId": "alpha-demo-run",
+  "schemaVersion": "admissionlab.io/result/v1beta1",
+  "runId": "beta-demo-run",
   "summary": {
-    "fixturesTotal": 4,
+    "fixturesTotal": 5,
     "identical": 1,
     "expected": 1,
-    "warnings": 0,
+    "warnings": 1,
     "critical": 1,
     "inconclusive": 1
   },
@@ -32,7 +32,9 @@
   "fixtures": [
     {
       "fixtureId": "deployment-sidecar",
+      "bucket": "critical",
       "admission": {
+        "comparability": "comparable",
         "baseline": {
           "fixture_id": "deployment-sidecar",
           "side": "baseline",
@@ -104,6 +106,11 @@
           },
           "diagnostics": []
         },
+        "traceEvidence": {
+          "baseline": "observed",
+          "candidate": "observed"
+        },
+        "divergenceConfidence": "observed",
         "firstDivergence": {
           "confidence": "observed",
           "baseline_position": [
@@ -119,9 +126,11 @@
           "explanation": "inject.example.com returned a patch adding container istio-proxy on the candidate side and no such operation on the baseline side"
         }
       },
-      "gateway": null,
+      "gatewayReconciliation": null,
+      "traffic": null,
       "changes": [
         {
+          "id": "sc-8a1cfe3c120c38a8",
           "change": {
             "kind": "container_added",
             "fixture_id": "deployment-sidecar",
@@ -151,7 +160,9 @@
     },
     {
       "fixtureId": "deployment-image-bump",
+      "bucket": "expected",
       "admission": {
+        "comparability": "comparable",
         "baseline": {
           "fixture_id": "deployment-image-bump",
           "side": "baseline",
@@ -196,6 +207,11 @@
           },
           "diagnostics": []
         },
+        "traceEvidence": {
+          "baseline": "partial",
+          "candidate": "partial"
+        },
+        "divergenceConfidence": "unknown",
         "firstDivergence": {
           "confidence": "unknown",
           "baseline_position": null,
@@ -205,9 +221,11 @@
           "explanation": "both traces are identical, so the captured evidence does not locate where the final objects diverged"
         }
       },
-      "gateway": null,
+      "gatewayReconciliation": null,
+      "traffic": null,
       "changes": [
         {
+          "id": "sc-ed6499403b4b9994",
           "change": {
             "kind": "image_changed",
             "fixture_id": "deployment-image-bump",
@@ -224,7 +242,14 @@
     },
     {
       "fixtureId": "crd-custom-resource",
+      "bucket": "inconclusive",
       "admission": {
+        "comparability": {
+          "incomparable": {
+            "baseline": null,
+            "candidate": "the candidate cluster's CRD does not accept server-side dry-run"
+          }
+        },
         "baseline": {
           "fixture_id": "crd-custom-resource",
           "side": "baseline",
@@ -255,14 +280,22 @@
           },
           "diagnostics": []
         },
+        "traceEvidence": {
+          "baseline": "unavailable",
+          "candidate": "unavailable"
+        },
+        "divergenceConfidence": "unattributed",
         "firstDivergence": null
       },
-      "gateway": null,
+      "gatewayReconciliation": null,
+      "traffic": null,
       "changes": []
     },
     {
       "fixtureId": "pod-baseline",
+      "bucket": "identical",
       "admission": {
+        "comparability": "comparable",
         "baseline": {
           "fixture_id": "pod-baseline",
           "side": "baseline",
@@ -321,16 +354,253 @@
           },
           "diagnostics": []
         },
+        "traceEvidence": {
+          "baseline": "observed",
+          "candidate": "observed"
+        },
+        "divergenceConfidence": "unattributed",
         "firstDivergence": null
       },
-      "gateway": null,
+      "gatewayReconciliation": null,
+      "traffic": null,
       "changes": []
+    },
+    {
+      "fixtureId": "echo-route-contract",
+      "bucket": "warnings",
+      "admission": null,
+      "gatewayReconciliation": {
+        "contractId": "echo-route-contract",
+        "comparability": "comparable",
+        "evidenceLevel": {
+          "baseline": "converged",
+          "candidate": "converged"
+        },
+        "baseline": {
+          "gatewayClass": {
+            "name": "lab-gateway-class",
+            "accepted": {
+              "typeName": "Accepted",
+              "state": "True",
+              "reason": "Accepted",
+              "observedGeneration": null
+            }
+          },
+          "gateway": {
+            "identity": {
+              "namespace": "default",
+              "name": "lab-gateway"
+            },
+            "conditions": {
+              "Accepted": {
+                "typeName": "Accepted",
+                "state": "True",
+                "reason": "Accepted",
+                "observedGeneration": 3
+              },
+              "Programmed": {
+                "typeName": "Programmed",
+                "state": "True",
+                "reason": "Accepted",
+                "observedGeneration": 3
+              }
+            },
+            "generation": 3,
+            "gatewayClassName": "lab-gateway-class"
+          },
+          "route": {
+            "namespace": "default",
+            "name": "echo-route",
+            "generation": 5,
+            "parents": [
+              {
+                "parent": {
+                  "namespace": "default",
+                  "name": "lab-gateway",
+                  "sectionName": "http"
+                },
+                "controllerName": "example.com/gateway-controller",
+                "conditions": {
+                  "Accepted": {
+                    "typeName": "Accepted",
+                    "state": "True",
+                    "reason": "Accepted",
+                    "observedGeneration": 5
+                  },
+                  "ResolvedRefs": {
+                    "typeName": "ResolvedRefs",
+                    "state": "True",
+                    "reason": "Accepted",
+                    "observedGeneration": 5
+                  }
+                }
+              }
+            ]
+          },
+          "elapsed": 4180,
+          "converged": true,
+          "diagnostics": []
+        },
+        "candidate": {
+          "gatewayClass": {
+            "name": "lab-gateway-class",
+            "accepted": {
+              "typeName": "Accepted",
+              "state": "True",
+              "reason": "Accepted",
+              "observedGeneration": null
+            }
+          },
+          "gateway": {
+            "identity": {
+              "namespace": "default",
+              "name": "lab-gateway"
+            },
+            "conditions": {
+              "Accepted": {
+                "typeName": "Accepted",
+                "state": "True",
+                "reason": "Accepted",
+                "observedGeneration": 3
+              },
+              "Programmed": {
+                "typeName": "Programmed",
+                "state": "True",
+                "reason": "Accepted",
+                "observedGeneration": 3
+              }
+            },
+            "generation": 3,
+            "gatewayClassName": "lab-gateway-class"
+          },
+          "route": {
+            "namespace": "default",
+            "name": "echo-route",
+            "generation": 5,
+            "parents": [
+              {
+                "parent": {
+                  "namespace": "default",
+                  "name": "lab-gateway",
+                  "sectionName": "http"
+                },
+                "controllerName": "example.com/gateway-controller",
+                "conditions": {
+                  "Accepted": {
+                    "typeName": "Accepted",
+                    "state": "True",
+                    "reason": "Accepted",
+                    "observedGeneration": 5
+                  },
+                  "ResolvedRefs": {
+                    "typeName": "ResolvedRefs",
+                    "state": "True",
+                    "reason": "Accepted",
+                    "observedGeneration": 5
+                  }
+                }
+              }
+            ]
+          },
+          "elapsed": 4180,
+          "converged": true,
+          "diagnostics": []
+        }
+      },
+      "traffic": {
+        "contractId": "echo-route-contract",
+        "evidence": "observed",
+        "pairs": [
+          {
+            "index": 0,
+            "baseline": {
+              "status": 200,
+              "backend": "echo-v1",
+              "responseHeaders": {
+                "content-type": "application/json",
+                "server": "echo"
+              },
+              "responseBodySha256": "0000000000000000000000000000000000000000000000000000000000000001",
+              "elapsed": 11,
+              "attempts": 1
+            },
+            "candidate": {
+              "status": 503,
+              "backend": "echo-v1",
+              "responseHeaders": {
+                "content-type": "application/json",
+                "server": "echo"
+              },
+              "responseBodySha256": "0000000000000000000000000000000000000000000000000000000000000001",
+              "elapsed": 11,
+              "attempts": 1
+            }
+          }
+        ],
+        "unpairedBaseline": [
+          {
+            "status": 204,
+            "backend": "echo-v1",
+            "responseHeaders": {
+              "content-type": "application/json",
+              "server": "echo"
+            },
+            "responseBodySha256": "0000000000000000000000000000000000000000000000000000000000000002",
+            "elapsed": 12,
+            "attempts": 1
+          }
+        ],
+        "unpairedCandidate": []
+      },
+      "changes": [
+        {
+          "id": "sc-895382c8434cfe0c",
+          "change": {
+            "kind": "traffic_status_changed",
+            "fixture_id": "echo-route-contract",
+            "object_path": null,
+            "subject": "echo-route",
+            "baseline": {
+              "backend": "echo-v1",
+              "probeIndex": 0,
+              "status": 200
+            },
+            "candidate": {
+              "backend": "echo-v1",
+              "probeIndex": 0,
+              "status": 503
+            },
+            "origin": null
+          },
+          "severity": "warning",
+          "expected": false
+        },
+        {
+          "id": "sc-b980e74c5ba19873",
+          "change": {
+            "kind": "traffic_status_changed",
+            "fixture_id": "echo-route-contract",
+            "object_path": null,
+            "subject": "echo-route",
+            "baseline": {
+              "backend": "echo-v1",
+              "probeIndex": 1,
+              "status": 204
+            },
+            "candidate": null,
+            "origin": null
+          },
+          "severity": "warning",
+          "expected": false
+        }
+      ]
     }
   ],
   "policy": {
     "disposition": "fail",
     "changes": [
       {
+        "id": "sc-8a1cfe3c120c38a8",
         "change": {
           "kind": "container_added",
           "fixture_id": "deployment-sidecar",
@@ -357,6 +627,7 @@
         "expected": false
       },
       {
+        "id": "sc-ed6499403b4b9994",
         "change": {
           "kind": "image_changed",
           "fixture_id": "deployment-image-bump",
@@ -368,9 +639,49 @@
         },
         "severity": "critical",
         "expected": true
+      },
+      {
+        "id": "sc-895382c8434cfe0c",
+        "change": {
+          "kind": "traffic_status_changed",
+          "fixture_id": "echo-route-contract",
+          "object_path": null,
+          "subject": "echo-route",
+          "baseline": {
+            "backend": "echo-v1",
+            "probeIndex": 0,
+            "status": 200
+          },
+          "candidate": {
+            "backend": "echo-v1",
+            "probeIndex": 0,
+            "status": 503
+          },
+          "origin": null
+        },
+        "severity": "warning",
+        "expected": false
+      },
+      {
+        "id": "sc-b980e74c5ba19873",
+        "change": {
+          "kind": "traffic_status_changed",
+          "fixture_id": "echo-route-contract",
+          "object_path": null,
+          "subject": "echo-route",
+          "baseline": {
+            "backend": "echo-v1",
+            "probeIndex": 1,
+            "status": 204
+          },
+          "candidate": null,
+          "origin": null
+        },
+        "severity": "warning",
+        "expected": false
       }
     ],
-    "stale_expectations": [
+    "staleExpectations": [
       {
         "id": "sidecar-injection-rollout",
         "reason": "no matching change was observed in this run"
@@ -426,6 +737,11 @@
       "baselineMs": 5942,
       "candidateMs": 6114,
       "fixtures": 4
+    },
+    "gatewaySuite": {
+      "wallMs": 9744,
+      "baselineMs": 9402,
+      "candidateMs": 9731
     },
     "comparisonMs": 212,
     "elapsedMs": 149006

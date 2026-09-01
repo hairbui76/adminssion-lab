@@ -54,6 +54,16 @@ admissionlab-spec = { workspace = true }
 # for the determinism argument that rests on `serde_json`'s
 # `preserve_order` feature staying off in this graph.
 json-patch = { workspace = true }
+# ROADMAP Task 7.2 freezes the `admissionlab.io/result/v1beta1` result
+# schema and generates it from the Rust result model with `schemars`.
+# This crate's evidence types are embedded verbatim in that document, so
+# they carry `#[derive(schemars::JsonSchema)]` alongside their existing
+# `Serialize` derive. Derive-only: the wire names, the field lists, and
+# the semantics are untouched, and no code path constructs or reads a
+# schema here -- `admissionlab-report` does that. Same version the
+# workspace already resolves for `admissionlab-spec` and
+# `admissionlab-core`, so nothing new enters `Cargo.lock`.
+schemars = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 # `SemanticChange::baseline`/`candidate` and `RawChange::value` are
 # `serde_json::Value` directly, not merely serde-generic.

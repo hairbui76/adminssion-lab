@@ -44,6 +44,14 @@
 //!   structurally rather than by review.
 //! - [`error`] holds [`ReportError`], the one failure vocabulary shared
 //!   by every renderer that touches the filesystem.
+//! - [`wire`] holds [`ResultDocument`], the **frozen**
+//!   `admissionlab.io/result/v1beta1` document a [`LabResult`]
+//!   serializes as. Read its module documentation before changing
+//!   anything a consumer can see: it carries the three evidence
+//!   sections, the explicit availability fields Global Constraint 15
+//!   requires, the casing rule, and the change-identifier scheme.
+//! - [`schema`] holds [`result_v1beta1_json_schema`], which generates
+//!   `schemas/result-v1beta1.json` from those same types.
 //!
 //! # Redact once, render many
 //!
@@ -64,9 +72,14 @@
 //!
 //! # Schema stability
 //!
-//! [`model::SCHEMA_VERSION`] is **experimental**. Alpha makes no
-//! compatibility promise about the serialized result; the schema is
-//! frozen at Beta (Global Constraint 9).
+//! [`model::SCHEMA_VERSION`] is `admissionlab.io/result/v1beta1` and is
+//! **frozen** (ROADMAP Task 7.2, Global Constraint 9). Before v1.0 a
+//! reader may be given additional optional fields; no existing field's
+//! meaning changes silently, and removing or renaming one requires a new
+//! schema version and a migration note. The published schema lives at
+//! `schemas/result-v1beta1.json` and a full example at
+//! `testdata/golden/result-v1beta1.json`; both are regenerated and
+//! compared by `tests/result_schema.rs`.
 //!
 //! [`LabResult`]: model::LabResult
 //! [`RunSummary`]: model::RunSummary
@@ -75,6 +88,7 @@
 //! [`AdmissionComparison`]: model::AdmissionComparison
 //! [`GatewayCaseComparison`]: model::GatewayCaseComparison
 //! [`FixtureComparison::bucket`]: model::FixtureComparison::bucket
+//! [`ResultDocument`]: wire::ResultDocument
 
 pub mod error;
 pub mod github;
@@ -82,7 +96,9 @@ pub mod html;
 pub mod json;
 pub mod model;
 pub mod redact;
+pub mod schema;
 pub mod terminal;
+pub mod wire;
 
 pub use error::ReportError;
 pub use github::{
@@ -99,4 +115,10 @@ pub use redact::{
     DEFAULT_ENV_NAME_PATTERNS, REDACTED, REDACTED_PRIVATE_KEY, RedactionRules,
     SENSITIVE_HEADER_NAMES, redact_result,
 };
+pub use schema::result_v1beta1_json_schema;
 pub use terminal::{TerminalOptions, render_terminal};
+pub use wire::{
+    AdmissionSection, ChangeDocument, DivergenceAttribution, FixtureDocument, PolicyDocument,
+    ProbeExchange, ReconciliationSection, ResultDocument, SideEvidenceLevel, SideTraceEvidence,
+    TrafficEvidence, TrafficSection, semantic_change_id,
+};

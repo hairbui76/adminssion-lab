@@ -29,6 +29,16 @@
 //! - run-level **diagnostics**, including a `Sensitive` context entry;
 //! - a webhook trace with a JSON Patch, a `None` latency, and a
 //!   `partial` evidence level;
+//! - a **Gateway route contract** whose two sides both converged, with
+//!   reconciliation evidence (a `GatewayClass`, a `Gateway` and an
+//!   `HTTPRoute` parent, all with current conditions) and traffic
+//!   evidence: one probe both sides answered *differently* and one probe
+//!   only the baseline answered, so the frozen document's `traffic`
+//!   section exercises a pair, an unpaired side, and the changes
+//!   `admissionlab_gateway::diff` derives from both. Its changes come
+//!   from calling that comparator rather than from hand-written payloads,
+//!   so the example can never describe a shape the Gateway engine does
+//!   not actually produce;
 //! - a **stage timings** block shaped exactly as a real `result.json`'s
 //!   is: both sides of cluster creation, a per-component install
 //!   breakdown, a fixture count, a comparison duration -- and *no*
@@ -56,6 +66,12 @@ use admissionlab_core::{
 };
 use admissionlab_diff::{
     DivergenceConfidence, DivergenceEvidence, SemanticChange, SemanticChangeKind,
+};
+use admissionlab_gateway::{
+    CONDITION_ACCEPTED, CONDITION_PROGRAMMED, CONDITION_RESOLVED_REFS, ConditionState,
+    GatewayCaseComparison, GatewayCaseResult, GatewayClassEvidence, GatewayEvidence,
+    GatewayIdentity, HttpProbeResult, ObservedCondition, ParentIdentity, ReconciliationEvidence,
+    RouteEvidence, RouteParentStatus,
 };
 use admissionlab_policy::{
     ClassifiedChange, PolicyDisposition, PolicyResult, Severity, StaleExpectation,
@@ -115,9 +131,9 @@ pub const POINTER_SENTINEL: &str = "sentinel-pointer-target-7777bbbb";
 /// against.
 pub const SENTINEL_POINTER: &str = "/items/1/spec/licence";
 
-/// The full Alpha example: four fixtures, one per bucket, plus a policy
-/// section and run diagnostics. See this module's documentation for what
-/// it covers.
+/// The full Beta example: four admission fixtures, one per bucket, a
+/// Gateway route contract, plus a policy section and run diagnostics.
+/// See this module's documentation for what it covers.
 #[must_use]
 pub fn canonical_result() -> LabResult {
     let fixtures = vec![
@@ -125,6 +141,10 @@ pub fn canonical_result() -> LabResult {
         expected_fixture(),
         inconclusive_fixture(),
         identical_fixture(),
+        // Appended last so every existing index into `fixtures` -- and
+        // `sentinel_result`'s `fixtures[0]` in particular -- keeps
+        // meaning what it meant.
+        gateway_fixture(),
     ];
     let changes: Vec<ClassifiedChange> = fixtures
         .iter()
@@ -133,7 +153,7 @@ pub fn canonical_result() -> LabResult {
 
     LabResult {
         schema_version: SCHEMA_VERSION.to_owned(),
-        run_id: run_id("alpha-demo-run"),
+        run_id: run_id("beta-demo-run"),
         summary: RunSummary::from_fixtures(&fixtures),
         environments: environments(),
         fixtures,
@@ -169,10 +189,14 @@ pub fn canonical_result() -> LabResult {
 ///
 /// Plausible numbers for the run the rest of this module describes: two
 /// clusters created concurrently, one component installed per side, four
-/// fixtures replayed through both, and a comparison well inside
-/// PRODUCT.md §33's sub-second budget. `reporting` and `cleanup` are
-/// `None` for the structural reason this module's own documentation
-/// gives.
+/// fixtures replayed through both, one Gateway suite applied and
+/// observed on both, and a comparison well inside PRODUCT.md §33's
+/// sub-second budget. `reporting` and `cleanup` are `None` for the
+/// structural reason this module's own documentation gives.
+///
+/// `fixtures` counts the *admission* corpus, which is four: the Gateway
+/// route contract is a compared unit but not a replayed fixture, and its
+/// stage is `gatewaySuite`.
 fn timings() -> StageTimings {
     StageTimings {
         cluster_creation: Some(SideStage {
@@ -185,7 +209,11 @@ fn timings() -> StageTimings {
             baseline: Some(side_install(92_310)),
             candidate: Some(side_install(96_377)),
         }),
-        gateway_suite: None,
+        gateway_suite: Some(SideStage {
+            wall: Duration::from_millis(9_744),
+            baseline: Some(Duration::from_millis(9_402)),
+            candidate: Some(Duration::from_millis(9_731)),
+        }),
         fixture_capture: Some(CaptureStage {
             wall: Duration::from_millis(6_120),
             baseline: Some(Duration::from_millis(5_942)),
@@ -570,6 +598,139 @@ fn identical_fixture() -> FixtureComparison {
         }),
         gateway: None,
         changes: Vec::new(),
+    }
+}
+
+/// A Gateway route contract observed on both sides -- the entry that
+/// fills the frozen document's `gatewayReconciliation` and `traffic`
+/// sections.
+///
+/// Both sides converged, so the comparison is `comparable` and every
+/// difference between them is real evidence. They differ in two ways,
+/// each chosen to exercise one part of the `traffic` section: the first
+/// probe was answered by both sides with different statuses (a pair),
+/// and a second probe was answered only by the baseline (an unpaired
+/// result, which `admissionlab_gateway::diff` reports as a change
+/// precisely because the baseline converged).
+///
+/// The changes are whatever `admissionlab_gateway::diff` actually
+/// derives from those two case results, graded here rather than
+/// invented: this module builds *evidence*, and letting the Gateway
+/// comparator produce the claims keeps the example honest about what
+/// that comparator emits.
+fn gateway_fixture() -> FixtureComparison {
+    let id = fixture_id("echo-route-contract");
+    let comparison = GatewayCaseComparison {
+        baseline: gateway_case(200, 2),
+        candidate: gateway_case(503, 1),
+    };
+    let changes = comparison
+        .changes()
+        .into_iter()
+        .map(|change| ClassifiedChange {
+            change: change.attributed_to(&id),
+            severity: Severity::Warning,
+            expected: false,
+        })
+        .collect();
+
+    FixtureComparison {
+        fixture_id: id,
+        admission: None,
+        gateway: Some(comparison),
+        changes,
+    }
+}
+
+/// One side of [`gateway_fixture`]: a converged route contract that
+/// answered `probes` probes, the first of them with `status`.
+fn gateway_case(status: u16, probes: usize) -> GatewayCaseResult {
+    GatewayCaseResult {
+        contract_id: "echo-route-contract".to_owned(),
+        reconciliation: ReconciliationEvidence {
+            gateway_class: Some(GatewayClassEvidence {
+                name: "lab-gateway-class".to_owned(),
+                accepted: condition(CONDITION_ACCEPTED, None),
+            }),
+            gateway: GatewayEvidence {
+                identity: GatewayIdentity {
+                    namespace: "default".to_owned(),
+                    name: "lab-gateway".to_owned(),
+                },
+                conditions: [
+                    (
+                        CONDITION_ACCEPTED.to_owned(),
+                        condition(CONDITION_ACCEPTED, Some(3)),
+                    ),
+                    (
+                        CONDITION_PROGRAMMED.to_owned(),
+                        condition(CONDITION_PROGRAMMED, Some(3)),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+                generation: 3,
+                gateway_class_name: Some("lab-gateway-class".to_owned()),
+            },
+            route: RouteEvidence {
+                namespace: "default".to_owned(),
+                name: "echo-route".to_owned(),
+                generation: 5,
+                parents: vec![RouteParentStatus {
+                    parent: ParentIdentity {
+                        namespace: Some("default".to_owned()),
+                        name: "lab-gateway".to_owned(),
+                        section_name: Some("http".to_owned()),
+                    },
+                    controller_name: Some("example.com/gateway-controller".to_owned()),
+                    conditions: [
+                        (
+                            CONDITION_ACCEPTED.to_owned(),
+                            condition(CONDITION_ACCEPTED, Some(5)),
+                        ),
+                        (
+                            CONDITION_RESOLVED_REFS.to_owned(),
+                            condition(CONDITION_RESOLVED_REFS, Some(5)),
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                }],
+            },
+            elapsed: Duration::from_millis(4_180),
+            converged: true,
+            diagnostics: Vec::new(),
+        },
+        probes: (0..probes)
+            .map(|index| HttpProbeResult {
+                status: if index == 0 { status } else { 204 },
+                backend: Some("echo-v1".to_owned()),
+                response_headers: [
+                    ("content-type".to_owned(), "application/json".to_owned()),
+                    ("server".to_owned(), "echo".to_owned()),
+                ]
+                .into_iter()
+                .collect(),
+                response_body_sha256: format!("{:064x}", index + 1),
+                elapsed: Duration::from_millis(11 + index as u64),
+                attempts: 1,
+            })
+            .collect(),
+    }
+}
+
+/// A settled, current condition of `type_name`.
+///
+/// `observed_generation` is passed rather than defaulted so a caller
+/// decides whether the condition is *current* -- `None` is what
+/// `GatewayClassEvidence` legitimately has (§1.2 gives it no generation
+/// to measure against).
+fn condition(type_name: &str, observed_generation: Option<i64>) -> ObservedCondition {
+    ObservedCondition {
+        type_name: type_name.to_owned(),
+        state: ConditionState::True,
+        reason: Some("Accepted".to_owned()),
+        observed_generation,
     }
 }
 

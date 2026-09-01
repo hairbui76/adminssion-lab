@@ -56,6 +56,13 @@
 //! semantic claim just because it is non-empty.
 
 use admissionlab_admission::{AdmissionDecision, AdmissionOutcome};
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines is embedded verbatim in that
+// document, so the schema generated from the result model has to
+// describe it. Derives and `#[schemars(with = ...)]` restatements of
+// what the existing `serialize_with` helpers already emit -- no field,
+// name, or semantic change.
+use schemars::JsonSchema;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -75,7 +82,7 @@ use crate::types::{SemanticChange, SemanticChangeKind};
 /// [`SemanticChange`] does. Derives no `Default`: `Comparable` is the
 /// convenient answer, and defaulting to it would silently upgrade "we
 /// could not look" into "we looked and it was fine".
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub enum DecisionComparability {
     /// Both sides produced a real admit/deny verdict from a real API
     /// server, so their decisions mean the same thing and can be

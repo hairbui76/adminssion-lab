@@ -75,6 +75,13 @@ use std::collections::BTreeSet;
 
 use admissionlab_diff::{SemanticChange, SemanticChangeKind};
 use admissionlab_spec::PolicySpec;
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines is embedded verbatim in that
+// document, so the schema generated from the result model has to
+// describe it. Derives and `#[schemars(with = ...)]` restatements of
+// what the existing `serialize_with` helpers already emit -- no field,
+// name, or semantic change.
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::error::{PolicySpecErrors, PolicyValidationError};
@@ -96,7 +103,7 @@ use crate::severity::{Severity, default_change_severity, kind_from_name, kind_na
 /// here and serialized outward into a report; nothing reads one back.
 ///
 /// Derives no `Default`: it holds evidence about a real run.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, JsonSchema)]
 pub struct ClassifiedChange {
     /// The change exactly as `admissionlab-diff` claimed it.
     pub change: SemanticChange,
@@ -132,7 +139,7 @@ pub struct ClassifiedChange {
 /// Derives no `Default`, and its `reason` is required: a stale
 /// expectation with no account of what did not happen is not usable
 /// evidence.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct StaleExpectation {
     /// The `id` of the expectation that matched nothing.
     pub id: String,
@@ -183,7 +190,7 @@ pub struct PolicyResult {
 /// Each wire tag is pinned with an explicit `#[serde(rename)]`: these
 /// strings go into JSON reports and are what CI jobs will branch on.
 /// [`Serialize`] only, for the same reason as [`ClassifiedChange`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 pub enum PolicyDisposition {
     /// Nothing unexpected worth acting on.
     #[serde(rename = "pass")]

@@ -9,6 +9,13 @@
 use std::time::Duration;
 
 use admissionlab_core::{Diagnostic, FixtureId, Side};
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines is embedded verbatim in that
+// document, so the schema generated from the result model has to
+// describe it. Derives and `#[schemars(with = ...)]` restatements of
+// what the existing `serialize_with` helpers already emit -- no field,
+// name, or semantic change.
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::Value;
 
@@ -26,7 +33,7 @@ use crate::trace::AdmissionTrace;
 /// rather than left to derive from the Rust identifier, so renaming a
 /// variant in Rust can never silently change the JSON report contract
 /// (controller supplement §5, Task 3.3).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum AdmissionDecision {
     /// The object was admitted.
     #[serde(rename = "accepted")]
@@ -69,13 +76,15 @@ pub enum AdmissionDecision {
 /// live cluster and only ever serialized *outward* into the run's JSON
 /// report; nothing in this project reads one back in from JSON, so the
 /// asymmetry costs this crate nothing.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 pub struct AdmissionOutcome {
     /// Which fixture this outcome observed.
     #[serde(serialize_with = "serialize_fixture_id")]
+    #[schemars(with = "String")]
     pub fixture_id: FixtureId,
     /// Which side (baseline or candidate) produced this outcome.
     #[serde(serialize_with = "serialize_side")]
+    #[schemars(with = "String")]
     pub side: Side,
     /// The API server's final verdict.
     pub decision: AdmissionDecision,
@@ -88,6 +97,7 @@ pub struct AdmissionOutcome {
     /// measured directly by the code that issues the request, so it is a
     /// bare [`Duration`], never an [`Option`].
     #[serde(serialize_with = "serialize_duration_millis")]
+    #[schemars(with = "u64")]
     pub total_latency: Duration,
     /// The object as the API server persisted it, if the decision
     /// admitted it and the persisted form was observed. `None` covers

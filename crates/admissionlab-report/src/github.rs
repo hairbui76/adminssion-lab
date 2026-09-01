@@ -305,7 +305,7 @@ fn render_verdict(out: &mut String, result: &LabResult) {
     let _ = writeln!(out, "{meaning}\n");
     let _ = writeln!(
         out,
-        "Run {run} — result schema {schema} (experimental; stable at Beta).\n",
+        "Run {run} — result schema {schema} (frozen; additive changes only).\n",
         run = cell(result.run_id.as_str()),
         schema = cell(&result.schema_version),
     );

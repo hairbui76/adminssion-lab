@@ -15,6 +15,13 @@
 
 use std::time::Duration;
 
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines is embedded verbatim in that
+// document, so the schema generated from the result model has to
+// describe it. Derives and `#[schemars(with = ...)]` restatements of
+// what the existing `serialize_with` helpers already emit -- no field,
+// name, or semantic change.
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 /// How completely [`AdmissionTrace::invocations`] reflects what actually
@@ -39,7 +46,7 @@ use serde::{Deserialize, Serialize};
 /// rather than left to derive from the Rust identifier (controller
 /// supplement §5): Phase 4 and the JSON report contract depend on these
 /// exact strings never drifting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum TraceEvidence {
     /// The full webhook chain was watched; `invocations` is believed
     /// complete.
@@ -77,7 +84,7 @@ pub enum TraceEvidence {
 /// us" case Global Constraint 15 requires: it is a fourth, distinct
 /// value, never a fallback encoded by omission or by collapsing onto one
 /// of the other three.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub enum WebhookOutcome {
     /// The webhook ran, responded, and allowed the request to proceed
     /// (`response.allowed: true`).
@@ -99,7 +106,7 @@ pub enum WebhookOutcome {
 }
 
 /// One webhook's observed participation in one admission round.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct WebhookInvocation {
     /// The name of the `ValidatingWebhookConfiguration` or
     /// `MutatingWebhookConfiguration` this webhook belongs to.
@@ -126,6 +133,7 @@ pub struct WebhookInvocation {
     /// "whether it mutated is unknown" -- a caller must consult
     /// `mutated` to tell those apart; `patch` alone never distinguishes
     /// them.
+    #[schemars(with = "Option<Vec<serde_json::Value>>")]
     pub patch: Option<Vec<json_patch::PatchOperation>>,
     /// How long this webhook call took to respond, when it was measured.
     /// `None` -- never a fabricated `0` -- means the duration was not
@@ -134,6 +142,7 @@ pub struct WebhookInvocation {
     /// latency comparison would then treat as a real (and false)
     /// improvement (controller supplement §1, Task 3.3).
     #[serde(with = "duration_millis_option")]
+    #[schemars(with = "Option<u64>")]
     pub latency: Option<Duration>,
     /// What this webhook was observed to do with the request.
     pub outcome: WebhookOutcome,
@@ -141,7 +150,7 @@ pub struct WebhookInvocation {
 
 /// What was observed about the full webhook chain for one fixture, on
 /// one side.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct AdmissionTrace {
     /// How complete `invocations` is believed to be. Required: no
     /// default, so a document that omits it fails to deserialize rather

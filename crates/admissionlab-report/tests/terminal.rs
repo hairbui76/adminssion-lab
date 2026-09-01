@@ -19,26 +19,28 @@ use support::canonical_result;
 ///
 /// Covers all five bucket counts, a critical finding with its object,
 /// its semantic-change kind, its object path and its first divergence,
-/// an empty warnings section, an inconclusive fixture with the
-/// candidate's own verbatim reason, a stale expectation, diagnostics,
-/// the one-line stage timings block, and the verdict.
+/// two Gateway traffic findings in the warnings section (one of them a
+/// probe only the baseline answered), the Gateway route-contract section
+/// with both sides' conditions and probes, an inconclusive fixture with
+/// the candidate's own verbatim reason, a stale expectation,
+/// diagnostics, the one-line stage timings block, and the verdict.
 ///
 /// The timings line omits `report` and `cleanup`, and that is the point
 /// of having it in the golden: a `result.json` is written *during* the
 /// reporting stage and *before* cleanup, so neither stage can be inside
 /// the value this renders (see `admissionlab_core::timing`). They are
 /// absent, not zero.
-const GOLDEN: &str = r"Admission Lab result  run alpha-demo-run
-schema admissionlab.io/result/v1alpha1 (experimental; stable at Beta)
+const GOLDEN: &str = r"Admission Lab result  run beta-demo-run
+schema admissionlab.io/result/v1beta1 (frozen; additive changes only)
 
 Environments
   baseline   Kubernetes v1.34.1  (sidecar-injector 1.26.3)
   candidate  Kubernetes v1.34.1  (sidecar-injector 1.27.0)
 
-Summary  4 fixtures
+Summary  5 fixtures
   identical    1
   expected     1
-  warnings     0
+  warnings     1
   critical     1
   inconclusive 1
 
@@ -48,8 +50,27 @@ Critical  1
     first divergence [observed]: the container appears in inject.example.com's candidate patch
       baseline none -> candidate inject.example.com (round 0, index 0)
 
-Warnings  0
-  none
+Warnings  2
+  echo-route-contract [echo-route]
+    traffic_status_changed
+    baseline HTTP 200 from echo-v1 -> candidate HTTP 503 from echo-v1
+  echo-route-contract [echo-route]
+    traffic_status_changed
+    baseline HTTP 204 from echo-v1 -> candidate answered nothing
+
+Gateway  1 route contract(s)
+  echo-route-contract  both sides converged; differences and absences are evidence
+    baseline: converged in 4180ms
+      GatewayClass lab-gateway-class  Accepted=True (Accepted)
+      Gateway default/lab-gateway  Accepted=True (Accepted) Programmed=True (Accepted)
+      HTTPRoute default/echo-route via default/lab-gateway#http  Accepted=True (Accepted) ResolvedRefs=True (Accepted)
+      traffic: probe #0 -> HTTP 200 from echo-v1
+      traffic: probe #1 -> HTTP 204 from echo-v1
+    candidate: converged in 4180ms
+      GatewayClass lab-gateway-class  Accepted=True (Accepted)
+      Gateway default/lab-gateway  Accepted=True (Accepted) Programmed=True (Accepted)
+      HTTPRoute default/echo-route via default/lab-gateway#http  Accepted=True (Accepted) ResolvedRefs=True (Accepted)
+      traffic: probe #0 -> HTTP 503 from echo-v1
 
 Inconclusive  1
   crd-custom-resource
@@ -63,7 +84,7 @@ Diagnostics  2
   kubeconfig.loaded: loaded isolated kubeconfigs for both sides
 
 Stage timings
-  clusters 43.51s (baseline 41.20s, candidate 43.12s), install 96.40s, capture 6.12s (baseline 5.94s, candidate 6.11s) [4 fixture(s)/side], compare 0.21s, elapsed 149.01s
+  clusters 43.51s (baseline 41.20s, candidate 43.12s), install 96.40s, capture 6.12s (baseline 5.94s, candidate 6.11s) [4 fixture(s)/side], gateway 9.74s (baseline 9.40s, candidate 9.73s), compare 0.21s, elapsed 149.01s
 
 Result: fail
 ";

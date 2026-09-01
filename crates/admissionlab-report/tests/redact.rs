@@ -392,12 +392,14 @@ fn bucket_counting_partitions_the_run() {
     let result = canonical_result();
     let summary = RunSummary::from_fixtures(&result.fixtures);
 
-    assert_eq!(summary.fixtures_total, 4);
+    assert_eq!(summary.fixtures_total, 5);
     assert_eq!(summary.critical, 1);
     assert_eq!(summary.expected, 1);
     assert_eq!(summary.inconclusive, 1);
     assert_eq!(summary.identical, 1);
-    assert_eq!(summary.warnings, 0);
+    // The Gateway route contract: two unexpected `warning` changes and
+    // no unexpected `critical` one.
+    assert_eq!(summary.warnings, 1);
     assert_eq!(
         summary.identical
             + summary.expected
@@ -425,6 +427,7 @@ fn each_canonical_fixture_lands_in_its_own_bucket() {
             FixtureBucket::Expected,
             FixtureBucket::Inconclusive,
             FixtureBucket::Identical,
+            FixtureBucket::Warnings,
         ]
     );
 }

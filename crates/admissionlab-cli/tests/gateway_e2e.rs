@@ -152,10 +152,13 @@ fn two_identical_istio_gateway_stacks_route_real_traffic_and_report_no_regressio
     let result = read_result(&reports.join("result.json"));
     let entry = gateway_entry(&result);
 
-    // 1. The Gateway section exists at all, on both sides.
-    let gateway = &entry["gateway"];
+    // 1. The Gateway sections exist at all, on both sides. The frozen
+    // v1beta1 document keeps reconciliation and traffic apart (ROADMAP
+    // Task 7.2).
+    let gateway = &entry["gatewayReconciliation"];
+    let traffic = &entry["traffic"];
     assert!(
-        gateway.is_object(),
+        gateway.is_object() && traffic.is_object(),
         "the route contract must carry Gateway evidence: {entry}"
     );
     assert!(
@@ -167,20 +170,14 @@ fn two_identical_istio_gateway_stacks_route_real_traffic_and_report_no_regressio
     for side in ["baseline", "candidate"] {
         let case = &gateway[side];
         assert!(
-            case["reconciliation"]["converged"].as_bool() == Some(true),
+            case["converged"].as_bool() == Some(true),
             "the {side} route must have converged: {case}"
         );
-        assert_condition(
-            &case["reconciliation"]["gatewayClass"]["accepted"],
-            "Accepted",
-        );
+        assert_condition(&case["gatewayClass"]["accepted"], "Accepted");
         for type_name in ["Accepted", "Programmed"] {
-            assert_condition(
-                &case["reconciliation"]["gateway"]["conditions"][type_name],
-                type_name,
-            );
+            assert_condition(&case["gateway"]["conditions"][type_name], type_name);
         }
-        let parents = case["reconciliation"]["route"]["parents"]
+        let parents = case["route"]["parents"]
             .as_array()
             .unwrap_or_else(|| panic!("the {side} route must publish parent status: {case}"));
         assert_eq!(
@@ -192,19 +189,22 @@ fn two_identical_istio_gateway_stacks_route_real_traffic_and_report_no_regressio
             assert_condition(&parents[0]["conditions"][type_name], type_name);
         }
         assert_eq!(
-            case["reconciliation"]["route"]["generation"],
-            parents[0]["conditions"]["Accepted"]["observedGeneration"],
+            case["route"]["generation"], parents[0]["conditions"]["Accepted"]["observedGeneration"],
             "a condition observed at an earlier generation describes a spec that is not the one \
              under test: {case}"
         );
+    }
 
-        // 3. A real request reached the expected backend through Envoy.
-        let probes = case["probes"]
-            .as_array()
-            .unwrap_or_else(|| panic!("the {side} case must carry probe results: {case}"));
-        assert_eq!(probes.len(), 1, "the contract declares one probe: {case}");
-        assert_eq!(probes[0]["status"], 200, "{case}");
-        assert_eq!(probes[0]["backend"], BACKEND, "{case}");
+    // 3. A real request reached the expected backend through Envoy, on
+    // both sides -- which is what makes the probe a *pair*.
+    assert_eq!(traffic["evidence"], "observed", "{traffic}");
+    let pairs = traffic["pairs"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the case must carry probe results: {traffic}"));
+    assert_eq!(pairs.len(), 1, "the contract declares one probe: {traffic}");
+    for side in ["baseline", "candidate"] {
+        assert_eq!(pairs[0][side]["status"], 200, "{traffic}");
+        assert_eq!(pairs[0][side]["backend"], BACKEND, "{traffic}");
     }
 
     // 4. Two identical stacks produced no Gateway claim of any kind.

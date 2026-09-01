@@ -110,6 +110,13 @@
 
 use std::collections::BTreeMap;
 
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines that reaches a run's result
+// document is embedded verbatim in it, so the schema generated from the
+// result model has to describe it. Derives and `#[schemars(with = ...)]`
+// restatements of what the existing `serialize_with` helpers already
+// emit -- no field, name, or semantic change.
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::error::GatewayError;
@@ -158,7 +165,7 @@ pub const CONDITION_RESOLVED_REFS: &str = "ResolvedRefs";
 /// No `Default`: there is no defensible default observation, and a
 /// derived one would make "we did not look" indistinguishable from a
 /// real answer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, JsonSchema)]
 pub enum ConditionState {
     /// The controller published this condition with `status: "True"`.
     #[serde(rename = "True")]
@@ -267,7 +274,7 @@ impl ConditionFreshness {
 /// means. This mirrors `admissionlab_admission::trace::TraceEvidence`'s
 /// own rule: an evidence type with a `Default` is an evidence type that
 /// can be fabricated by accident.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ObservedCondition {
     /// The condition's `type`, verbatim (for example `"Accepted"`).
@@ -348,7 +355,7 @@ impl ObservedCondition {
 /// §1.2 fixes this type's three fields, and a
 /// [`crate::model::RouteContract`] identifies its parent as a `Gateway`
 /// by construction, so there is nothing for them to disambiguate here.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ParentIdentity {
     /// The parent's namespace as written in `parentRef`, or `None` if
@@ -364,7 +371,7 @@ pub struct ParentIdentity {
 
 /// One entry of a route's `status.parents`: what one controller said
 /// about this route's attachment to one parent.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteParentStatus {
     /// Which parent (and which of its listeners) this entry is about.
@@ -405,7 +412,7 @@ impl RouteParentStatus {
 /// Only `Accepted` is carried, because that is the only condition
 /// Gateway API's standard channel defines for a `GatewayClass` and the
 /// only one §1.2's registry names.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayClassEvidence {
     /// The `GatewayClass`'s name (it is cluster-scoped, so a name is a
@@ -417,7 +424,7 @@ pub struct GatewayClassEvidence {
 }
 
 /// What was observed about one `Gateway`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayEvidence {
     /// Which `Gateway` this is about.
@@ -456,7 +463,7 @@ impl GatewayEvidence {
 }
 
 /// What was observed about one `HTTPRoute`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteEvidence {
     /// The route's namespace.

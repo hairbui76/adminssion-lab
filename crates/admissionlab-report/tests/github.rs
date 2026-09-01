@@ -27,12 +27,13 @@ use support::canonical_result;
 /// Covers the verdict with its exit-code meaning, the run identity line,
 /// all five bucket counts plus the total, a critical finding with its
 /// subject, kind, object path and `observed` divergence including both
-/// webhook sides, an empty warnings section, and the artifact pointers.
+/// webhook sides, the Gateway traffic findings in the warnings section,
+/// and the artifact pointers.
 const GOLDEN: &str = r"## Admission Lab: FAIL
 
 At least one unexpected critical difference. `admissionlab test` exits 1.
 
-Run alpha-demo-run — result schema admissionlab.io/result/v1alpha1 (experimental; stable at Beta).
+Run beta-demo-run — result schema admissionlab.io/result/v1beta1 (frozen; additive changes only).
 
 ### Fixtures
 
@@ -40,10 +41,10 @@ Run alpha-demo-run — result schema admissionlab.io/result/v1alpha1 (experiment
 | --- | ---: |
 | identical | 1 |
 | expected | 1 |
-| warnings | 0 |
+| warnings | 1 |
 | critical | 1 |
 | inconclusive | 1 |
-| **total** | **4** |
+| **total** | **5** |
 
 ### Critical findings (1)
 
@@ -51,9 +52,12 @@ Run alpha-demo-run — result schema admissionlab.io/result/v1alpha1 (experiment
 | --- | --- | --- | --- |
 | deployment-sidecar | istio-proxy | container\_added at /spec/template/spec/containers/1 | observed: the container appears in inject.example.com's candidate patch (baseline none -> candidate inject.example.com) |
 
-### Warnings (0)
+### Warnings (2)
 
-None.
+| Fixture | Subject | Change | Evidence |
+| --- | --- | --- | --- |
+| echo-route-contract | echo-route | traffic\_status\_changed | baseline HTTP 200 from echo-v1 -&gt; candidate HTTP 503 from echo-v1 |
+| echo-route-contract | echo-route | traffic\_status\_changed | baseline HTTP 204 from echo-v1 -&gt; candidate answered nothing |
 
 ### Full evidence
 

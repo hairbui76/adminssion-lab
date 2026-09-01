@@ -1562,11 +1562,15 @@ fn a_configured_gateway_suite_runs_on_both_sides_and_reaches_the_report() {
         entry["admission"].is_null(),
         "a route contract carries Gateway evidence and no admission evidence"
     );
-    let gateway = &entry["gateway"];
-    assert_eq!(gateway["baseline"]["contractId"], GATEWAY_CONTRACT);
-    assert_eq!(gateway["candidate"]["contractId"], GATEWAY_CONTRACT);
+    // The frozen v1beta1 document splits a route contract's evidence
+    // into its two sections (ROADMAP Task 7.2).
     assert_eq!(
-        gateway["baseline"]["probes"][0]["backend"], GATEWAY_BACKEND,
+        entry["gatewayReconciliation"]["contractId"],
+        GATEWAY_CONTRACT
+    );
+    assert_eq!(entry["traffic"]["contractId"], GATEWAY_CONTRACT);
+    assert_eq!(
+        entry["traffic"]["pairs"][0]["baseline"]["backend"], GATEWAY_BACKEND,
         "the probe evidence must reach the report verbatim"
     );
     assert!(
@@ -1735,7 +1739,7 @@ fn a_lab_with_no_gateway_section_produces_no_gateway_output_at_all() {
     assert_eq!(result["summary"]["fixturesTotal"], 1);
     for entry in result["fixtures"].as_array().expect("an array") {
         assert!(
-            entry["gateway"].is_null(),
+            entry["gatewayReconciliation"].is_null(),
             "nothing may fabricate a Gateway section: {entry}"
         );
     }
@@ -1750,10 +1754,6 @@ fn a_lab_with_no_gateway_section_produces_no_gateway_output_at_all() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-impl std::fmt::Debug for RunOutput {
-    /// Prints both streams, because every failing assertion in this file
-    /// is easier to diagnose with the run's own output attached than
-    /// with the disposition alone.
 // ---------------------------------------------------------------------
 // Certified compatibility matrix (Task 7.4 step 3)
 //
@@ -1951,6 +1951,10 @@ fn a_user_defined_stack_admission_lab_ships_no_recipe_for_is_silent() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+impl std::fmt::Debug for RunOutput {
+    /// Prints both streams, because every failing assertion in this file
+    /// is easier to diagnose with the run's own output attached than
+    /// with the disposition alone.
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,

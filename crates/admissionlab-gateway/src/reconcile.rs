@@ -111,6 +111,13 @@ use async_trait::async_trait;
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::{ApiResource, DynamicObject};
 use kube::{Api, Client, Config};
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// schema): every type this file defines that reaches a run's result
+// document is embedded verbatim in it, so the schema generated from the
+// result model has to describe it. Derives and `#[schemars(with = ...)]`
+// restatements of what the existing `serialize_with` helpers already
+// emit -- no field, name, or semantic change.
+use schemars::JsonSchema;
 use serde::Serialize;
 
 use crate::conditions::{
@@ -213,7 +220,7 @@ pub const DIAGNOSTIC_GATEWAY_CLASS_ABSENT: &str = "gateway.reconciliation.gatewa
 ///
 /// No `Default`: an evidence type with one can be fabricated by
 /// accident.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconciliationEvidence {
     /// The `GatewayClass` the `Gateway` named, if it named one and that
@@ -230,6 +237,7 @@ pub struct ReconciliationEvidence {
     /// Wall-clock time from the first poll to the last, measured with
     /// [`Instant`] so it is monotonic.
     #[serde(serialize_with = "serialize_duration_millis")]
+    #[schemars(with = "u64")]
     pub elapsed: Duration,
     /// Whether the convergence rule was satisfied. `false` at a timeout
     /// -- and `true` for a route the implementation settled on

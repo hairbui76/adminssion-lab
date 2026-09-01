@@ -1,19 +1,24 @@
-//! The machine-readable Alpha result artifact.
+//! The machine-readable result artifact.
 //!
 //! [`write_json_report`] serializes a [`LabResult`] to a file. This is
 //! the artifact other tools read -- a CI job deciding whether to block a
 //! merge, a script diffing two runs, a future `admissionlab` subcommand
 //! replaying an old result -- so its shape matters more than its looks.
 //!
-//! # The schema is experimental
+//! # The schema is frozen
 //!
-//! [`crate::model::SCHEMA_VERSION`] is `admissionlab.io/result/v1alpha1`
-//! and this document makes **no compatibility promise**. Fields may be
-//! added, removed, renamed, or given different meanings between Alpha
-//! releases. Global Constraint 9 puts the versioned, stable result
-//! schema at Beta; until then a consumer that pins to this shape is
-//! pinning to a moving target, and the explicit `schemaVersion` is there
-//! so it can at least tell *which* moving target it read.
+//! [`crate::model::SCHEMA_VERSION`] is `admissionlab.io/result/v1beta1`
+//! and this document is **frozen** (ROADMAP Task 7.2, Global Constraint
+//! 9). Before v1.0 a reader may be given additional optional fields; no
+//! existing field's meaning changes silently, and removing or renaming
+//! one requires a new schema version and a migration note. This writer
+//! emits that one version and no other.
+//!
+//! The shape itself is [`crate::wire::ResultDocument`]'s, not
+//! [`LabResult`]'s field list -- read that module before changing
+//! anything a consumer can see. The published schema is
+//! `schemas/result-v1beta1.json`, generated from those same types by
+//! [`crate::schema`].
 //!
 //! # Determinism
 //!
@@ -25,7 +30,7 @@
 //! 1. **Struct fields serialize in declaration order.** `serde`'s derive
 //!    emits fields in the order they are written in the Rust source, so
 //!    the key order of every object this crate owns is fixed by
-//!    `model.rs`'s own layout.
+//!    `wire.rs`'s own layout.
 //! 2. **`serde_json::Value` maps are sorted.** With `serde_json`'s
 //!    `preserve_order` feature *off* -- and it is off in this workspace,
 //!    which `admissionlab-diff`'s `raw` module already documents a

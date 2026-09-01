@@ -220,9 +220,9 @@ fn assert_traffic_finding(changes: &[Value], run: &DemoRun) {
 /// `Gateway` is unaffected on both sides and the route still attaches,
 /// which is what makes the one finding unambiguous.
 fn assert_gateway_unaffected(entry: &Value) {
-    let gateway = &entry["gateway"];
+    let gateway = &entry["gatewayReconciliation"];
     for side in ["baseline", "candidate"] {
-        let reconciliation = &gateway[side]["reconciliation"];
+        let reconciliation = &gateway[side];
         for type_name in ["Accepted", "Programmed"] {
             assert_eq!(
                 reconciliation["gateway"]["conditions"][type_name]["state"], "True",
@@ -235,15 +235,20 @@ fn assert_gateway_unaffected(entry: &Value) {
              {reconciliation}"
         );
     }
+    // The candidate's probe was skipped, so the baseline's is unpaired
+    // and the traffic section says so in a written word rather than by
+    // leaving `pairs` empty (ROADMAP Task 7.2, Global Constraint 15).
+    let traffic = &entry["traffic"];
+    assert_eq!(traffic["evidence"], "partial", "{traffic}");
     assert_eq!(
-        gateway["baseline"]["probes"][0]["status"], 200,
+        traffic["unpairedBaseline"][0]["status"], 200,
         "the baseline must actually carry traffic, or this demo compares two failures"
     );
-    assert_eq!(gateway["baseline"]["probes"][0]["backend"], BACKEND);
+    assert_eq!(traffic["unpairedBaseline"][0]["backend"], BACKEND);
     assert_eq!(
-        gateway["candidate"]["probes"]
+        traffic["unpairedCandidate"]
             .as_array()
-            .expect("probes must be an array")
+            .expect("unpaired candidate probes must be an array")
             .len(),
         0,
         "the candidate's probe was skipped"
@@ -280,7 +285,7 @@ fn raw_controller_messages_are_preserved_but_never_asserted_on() {
     // evidence survives -- and it is the only place this file looks at a
     // message at all, deliberately asserting nothing about its content
     // beyond that it exists.
-    let candidate = &entry["gateway"]["candidate"]["reconciliation"];
+    let candidate = &entry["gatewayReconciliation"]["candidate"];
     let condition = &candidate["route"]["parents"][0]["conditions"]["ResolvedRefs"];
     assert_eq!(condition["state"], "False", "{candidate}");
     assert_eq!(condition["reason"], REF_NOT_PERMITTED, "{candidate}");

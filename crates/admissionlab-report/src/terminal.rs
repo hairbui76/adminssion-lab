@@ -166,7 +166,7 @@ fn fixture_index(result: &LabResult) -> BTreeMap<&str, &FixtureComparison> {
         .collect()
 }
 
-/// The run identity line, and the experimental-schema note.
+/// The run identity line, and the frozen-schema note.
 fn render_header(out: &mut String, result: &LabResult, palette: &Palette) {
     let _ = writeln!(
         out,
@@ -177,7 +177,7 @@ fn render_header(out: &mut String, result: &LabResult, palette: &Palette) {
     );
     let _ = writeln!(
         out,
-        "{dim}schema {schema} (experimental; stable at Beta){reset}\n",
+        "{dim}schema {schema} (frozen; additive changes only){reset}\n",
         dim = palette.dim,
         reset = palette.reset,
         schema = result.schema_version,
