@@ -80,14 +80,18 @@ Once a version is tagged, the
 [Releases page](https://github.com/hairbui76/adminssion-lab/releases)
 carries prebuilt archives for **Linux x86_64, Linux aarch64, macOS Apple
 Silicon, and macOS Intel**, plus a `SHA256SUMS` file and a keyless Sigstore
-signature over it (`SHA256SUMS.sig` / `SHA256SUMS.pem`). Verify before you
-run:
+signature over it (`SHA256SUMS.sig` / `SHA256SUMS.pem`), and an SPDX
+`SBOM.spdx.json`. Verify before you run:
 
 ```bash
 sha256sum --check --ignore-missing SHA256SUMS
 ```
 
 Each release's notes carry the matching `cosign verify-blob` invocation.
+[`docs/install.md`](docs/install.md) is the full walkthrough — download,
+checksum, signature, unpack, `PATH`, the macOS quarantine attribute, what
+CI verified about each archive, the WSL2 path for Windows, and
+`scripts/verify-release.sh` for reproducing a release artifact locally.
 
 ### Windows
 

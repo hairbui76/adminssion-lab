@@ -1,9 +1,27 @@
 name: Release
 
 # Builds the `admissionlab` binary for the four platforms Admission Lab
-# supports, checksums them, signs the checksum file with a keyless
-# Sigstore certificate, and attaches everything to a **draft** GitHub
-# Release for a human to review and publish.
+# supports, smoke-tests each packaged archive on the runner that
+# produced it, generates an SPDX bill of materials, checksums all five
+# artifacts, signs the checksum file with a keyless Sigstore
+# certificate, and attaches everything to a **draft** GitHub Release for
+# a human to review and publish.
+#
+# The exact artifact set (ROADMAP Task 9.9):
+#
+#   admissionlab-<version>-x86_64-unknown-linux-gnu.tar.gz
+#   admissionlab-<version>-aarch64-unknown-linux-gnu.tar.gz
+#   admissionlab-<version>-x86_64-apple-darwin.tar.gz
+#   admissionlab-<version>-aarch64-apple-darwin.tar.gz
+#   SBOM.spdx.json
+#   SHA256SUMS            (+ SHA256SUMS.sig, SHA256SUMS.pem)
+#
+# `scripts/verify-release.sh` runs the buildable half of this workflow
+# on one host with no tag: same `--locked` build, same tarball layout,
+# same pinned SBOM generator, same checksum file, same smoke test. Run
+# it before tagging -- it is a Phase 9 exit-gate command -- and keep the
+# two in step when either changes. `docs/install.md` is the downloader's
+# side of the same contract.
 #
 # Windows is deliberately absent. `kind` on native Windows behaves
 # differently enough from Linux/macOS that Admission Lab does not commit
@@ -48,12 +66,20 @@ jobs:
           # and sysroot rather than only `rustup target add`. Matrix
           # runners keep the release path identical to the path
           # `cargo build --release` takes on a contributor's machine.
+          #
+          # `native` says whether the runner can execute what it just
+          # built; the smoke-test step below is required to *run* the
+          # binary on a native entry and allowed to fall back to
+          # inspecting it on the one entry that is not.
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-latest
+            native: true
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+            native: true
           - target: aarch64-apple-darwin
             runner: macos-14
+            native: true
           # The exception: Apple's own toolchain on an Apple Silicon
           # runner targets x86_64 macOS first-class (it is how universal
           # binaries are built), so this one target is cross-built rather
@@ -61,6 +87,7 @@ jobs:
           # has been retiring.
           - target: x86_64-apple-darwin
             runner: macos-14
+            native: false
     steps:
       - name: Check out repository
         uses: actions/checkout@v7.0.1
@@ -111,6 +138,80 @@ jobs:
           tar --create --gzip --file "${name}.tar.gz" --directory "$(dirname "${staging}")" "${name}"
           echo "archive=${name}.tar.gz" >> "${GITHUB_OUTPUT}"
 
+      # ROADMAP Task 9.9 step 4, run on the runner that produced the
+      # archive and against the archive itself -- never against
+      # `target/`, because what has to work is what someone downloads,
+      # unpacks, and puts on a PATH. `scripts/verify-release.sh` runs
+      # the same three checks locally for the host target.
+      #
+      # What each entry actually proves:
+      #
+      #   - the three `native: true` entries execute the packaged binary:
+      #     `--version` must equal the tag's version, and `doctor --help`
+      #     and `test --help` must exit 0. A failure here fails the
+      #     release.
+      #   - `x86_64-apple-darwin` is built on an arm64 runner. GitHub's
+      #     `macos-14` images have carried Rosetta 2, so the binary
+      #     usually runs and is checked exactly like the others; but
+      #     Rosetta's presence is a property of the image, not a promise,
+      #     so its absence degrades to the structural checks (the archive
+      #     unpacks, the binary is a Mach-O x86_64 executable) plus a
+      #     `::notice`, rather than silently skipping or falsely failing.
+      #     Whichever path ran is printed, so the log answers "was the
+      #     Intel artifact executed?" for any given release.
+      #
+      # None of this touches Docker, `kind`, or the network: `--help`
+      # exercises argument parsing, not a lab.
+      - name: Smoke-test the packaged binary
+        shell: bash
+        env:
+          ARCHIVE: ${{ steps.package.outputs.archive }}
+          NAME: admissionlab-${{ steps.version.outputs.version }}-${{ matrix.target }}
+          VERSION: ${{ steps.version.outputs.version }}
+          NATIVE: ${{ matrix.native }}
+        run: |
+          set -euo pipefail
+          unpacked="$(mktemp -d)"
+          tar --extract --gzip --file "${ARCHIVE}" --directory "${unpacked}"
+
+          for expected in admissionlab LICENSE README.md; do
+            if [ ! -f "${unpacked}/${NAME}/${expected}" ]; then
+              echo "::error::${ARCHIVE} is missing ${NAME}/${expected}"
+              exit 1
+            fi
+          done
+          binary="${unpacked}/${NAME}/admissionlab"
+          if [ ! -x "${binary}" ]; then
+            echo "::error::${ARCHIVE} does not preserve the executable bit on admissionlab"
+            exit 1
+          fi
+          file "${binary}"
+
+          # One probe decides whether execution is possible at all, so a
+          # missing Rosetta is distinguished from a broken binary: a
+          # cross-built artifact that cannot start reports "cannot
+          # execute", while one that starts and then misbehaves fails
+          # below like any other.
+          status=0
+          "${binary}" --version >/dev/null 2>&1 || status=$?
+          if [ "${status}" -ne 0 ]; then
+            if [ "${NATIVE}" != "true" ]; then
+              echo "::notice::${NAME} was cross-built and this arm64 runner cannot execute it (no Rosetta 2); verified structurally only -- archive layout, executable bit, and the Mach-O architecture printed above"
+              exit 0
+            fi
+            echo "::error::the packaged ${NAME} binary would not run on its own native runner (exit ${status})"
+            exit 1
+          fi
+
+          reported="$("${binary}" --version)"
+          if [ "${reported}" != "admissionlab ${VERSION}" ]; then
+            echo "::error::the packaged binary reports '${reported}', expected 'admissionlab ${VERSION}'"
+            exit 1
+          fi
+          "${binary}" doctor --help >/dev/null
+          "${binary}" test --help >/dev/null
+          echo "executed ${NAME}: ${reported}, doctor --help and test --help exited 0"
+
       - name: Upload the artifact
         uses: actions/upload-artifact@v4.6.2
         with:
@@ -133,25 +234,89 @@ jobs:
       # and GitHub issues it, so there is no private key to leak, rotate,
       # or name here.
       id-token: write
+    env:
+      # The SBOM generator, pinned exactly (ROADMAP Task 9.9 step 2).
+      # `scripts/verify-release.sh` pins the same version and *fails* if
+      # this line and its own constant disagree, so the SBOM a release
+      # publishes is produced by the generator the Phase 9 gate ran.
+      #
+      # Why `cargo-sbom` rather than a binary scanner: it reads the Cargo
+      # dependency graph, so the packages it lists are exactly the crates
+      # `Cargo.lock` pins -- the same source of truth `--locked` builds
+      # from -- with their versions, licences, and `pkg:cargo/...` purls.
+      # A scanner reading the compiled executable would have to infer
+      # that graph back out of it. It emits SPDX 2.3 JSON, which is what
+      # `SBOM.spdx.json` promises to be.
+      CARGO_SBOM_VERSION: "0.10.0"
     steps:
+      # Before the download, not after: `actions/checkout` cleans the
+      # workspace, and a checkout that ran second would delete the
+      # `artifacts/` directory the whole job is about.
+      #
+      # The SBOM is generated from this checkout -- the same commit the
+      # binaries were built from, because the tag is what triggered the
+      # workflow -- and it describes a dependency graph rather than a
+      # machine, so it is produced once here instead of four times in the
+      # build matrix.
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Install the pinned SBOM generator
+        run: cargo install cargo-sbom --version "${CARGO_SBOM_VERSION}" --locked
+
       - name: Download every built artifact
         uses: actions/download-artifact@v4.3.0
         with:
           path: artifacts
           merge-multiple: true
 
-      # One `SHA256SUMS` covering every archive, generated on a single
-      # Linux runner so the checksum tool and its output format are the
-      # same for all four targets (macOS ships `shasum`, not
-      # `sha256sum`). Sorted so the file's contents depend only on the
-      # set of archives, not on download order.
+      # Scoped to `admissionlab-cli`: the SBOM has to describe what
+      # ships, and the workspace's test-only crates
+      # (`admissionlab-echo`, `admissionlab-test-webhook`) do not.
+      - name: Generate SBOM.spdx.json
+        run: |
+          set -euo pipefail
+          cargo sbom --cargo-package admissionlab-cli --output-format spdx_json_2_3 > artifacts/SBOM.spdx.json
+          test -s artifacts/SBOM.spdx.json
+          grep -qF '"spdxVersion": "SPDX-2.3"' artifacts/SBOM.spdx.json
+          grep -qF "Tool: cargo-sbom-v${CARGO_SBOM_VERSION}" artifacts/SBOM.spdx.json
+          grep -qF '"SPDXID": "SPDXRef-Package-admissionlab-cli-' artifacts/SBOM.spdx.json
+          echo "SBOM packages: $(grep -c '"SPDXID": "SPDXRef-Package-' artifacts/SBOM.spdx.json)"
+
+          # `cargo-sbom` resolves the graph through `cargo metadata`,
+          # which has no `--locked`. If that resolution rewrote
+          # `Cargo.lock`, the SBOM is describing dependency versions the
+          # `--locked` builds above did not use, and the document would
+          # be wrong about the very thing it exists to record.
+          git diff --exit-code -- Cargo.lock \
+            || { echo "::error::generating the SBOM modified Cargo.lock; it does not describe the --locked build"; exit 1; }
+
+      # One `SHA256SUMS` covering every archive **and the SBOM**,
+      # generated on a single Linux runner so the checksum tool and its
+      # output format are the same for all four targets (macOS ships
+      # `shasum`, not `sha256sum`). Sorted so the file's contents depend
+      # only on the set of artifacts, not on download order.
+      #
+      # The SBOM is in here for the same reason the archives are: this
+      # file is the only thing `cosign` signs, so an artifact missing
+      # from it is published unsigned and a downloader has no way to tell
+      # a tampered SBOM from the real one.
       - name: Generate SHA-256 checksums
         working-directory: artifacts
         run: |
           set -euo pipefail
-          find . -maxdepth 1 -type f -name '*.tar.gz' -printf '%f\n' \
+          find . -maxdepth 1 -type f \( -name '*.tar.gz' -o -name 'SBOM.spdx.json' \) -printf '%f\n' \
             | LC_ALL=C sort \
             | xargs sha256sum > SHA256SUMS
+          # Five lines: four archives and the SBOM. A missing matrix
+          # artifact would otherwise be discovered by whoever downloaded
+          # the release rather than here.
+          lines="$(wc -l < SHA256SUMS)"
+          if [ "${lines}" -ne 5 ]; then
+            echo "::error::SHA256SUMS covers ${lines} artifact(s), expected 5 (four archives and SBOM.spdx.json)"
+            exit 1
+          fi
+          sha256sum --check --strict SHA256SUMS
           cat SHA256SUMS
 
       - name: Install cosign
@@ -203,8 +368,15 @@ jobs:
             echo "| macOS Apple Silicon | \`admissionlab-*-aarch64-apple-darwin.tar.gz\` |"
             echo "| macOS Intel | \`admissionlab-*-x86_64-apple-darwin.tar.gz\` |"
             echo
+            echo "Every archive holds \`admissionlab\`, \`LICENSE\`, and \`README.md\`"
+            echo "in a single directory named after the archive. \`SBOM.spdx.json\`"
+            echo "is an SPDX 2.3 bill of materials for the released binary's"
+            echo "dependency graph, generated from \`Cargo.lock\` by"
+            echo "\`cargo-sbom v${CARGO_SBOM_VERSION}\`. \`SHA256SUMS\` covers all"
+            echo "five files, and is the only file signed."
+            echo
             echo "There is no native Windows build. Run Admission Lab under WSL2"
-            echo "with the Linux x86_64 archive."
+            echo "with the Linux x86_64 archive. See \`docs/install.md\`."
             echo
             echo "### Verifying a download"
             echo
@@ -218,6 +390,9 @@ jobs:
             echo "  --certificate-oidc-issuer https://token.actions.githubusercontent.com \\"
             echo "  SHA256SUMS"
             echo '```'
+            echo
+            echo "\`docs/install.md\` has the full download, verify, unpack, and PATH"
+            echo "walkthrough, and the pinned-\`sha256\` recipe for the GitHub Action."
           } > notes.md
 
           # `--draft`: a maintainer reviews the assets and publishes.
@@ -228,4 +403,4 @@ jobs:
             --verify-tag \
             --title "Admission Lab ${TAG}" \
             --notes-file notes.md \
-            ./*.tar.gz SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem
+            ./*.tar.gz SBOM.spdx.json SHA256SUMS SHA256SUMS.sig SHA256SUMS.pem
