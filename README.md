@@ -16,17 +16,21 @@ production cluster.
 > regression *and* Gateway API behavior — reconciliation and real HTTP traffic,
 > compared as separate evidence.
 >
-> The document contracts are frozen at `v1beta1` and grow only by **addition**
+> The document contracts are **frozen at v1** and grow only by **addition**
 > from here: a new optional field, never a rename or a removal. Configuration is
-> [`admissionlab.io/v1beta1`](schemas/admissionlab-v1beta1.json), the result is
-> [`admissionlab.io/result/v1beta1`](schemas/result-v1beta1.json), the run
-> manifest is
-> [`admissionlab.io/run-manifest/v1beta1`](schemas/run-manifest-v1beta1.json).
-> `admissionlab.io/v1alpha1` configurations still load unchanged —
-> [`docs/schema-migrations.md`](docs/schema-migrations.md) is the record.
+> [`admissionlab.io/v1`](schemas/admissionlab-v1.json), the result is
+> [`admissionlab.io/result/v1`](schemas/result-v1.json), the run manifest is
+> [`admissionlab.io/run/v1`](schemas/run-manifest-v1.json).
+> `admissionlab.io/v1beta1` and `admissionlab.io/v1alpha1` configurations still
+> load unchanged — [`docs/schema-migrations.md`](docs/schema-migrations.md) is
+> the record.
 >
-> **Frozen is not stable.** Until v1.0, a new `apiVersion` with a migration
-> remains possible; what is ruled out is a silent change under an existing one.
+> **What "stable" now rules out.** Within `v1.x`: no field meaning changes, no
+> required field is removed, no semantic-change wire string is renamed, and no
+> exit code is reassigned. A break needs a `v2`, a migration note, and a reader
+> that keeps accepting `v1`. Each clause is pinned by a test — see
+> [`docs/schema-migrations.md`](docs/schema-migrations.md).
+>
 > Which Kubernetes × stack combinations this project has actually *proven* is a
 > shorter list than the ones it will happily run —
 > [`docs/compatibility.md`](docs/compatibility.md) draws that line.
@@ -142,7 +146,7 @@ Save this as `admissionlab.yaml`. It compares two Kyverno chart versions on the
 same Kubernetes version — the shape of almost every real upgrade question.
 
 ```yaml
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 
 baseline:
@@ -207,7 +211,7 @@ the full reference and all five check types.
 The smallest configuration that loads at all is just five keys:
 
 ```yaml
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 baseline:
   kubernetes: "1.36.4"
@@ -277,7 +281,7 @@ shows both engines at once:
 
 ```text
 Admission Lab result  run beta-demo-run
-schema admissionlab.io/result/v1beta1 (frozen; additive changes only)
+schema admissionlab.io/result/v1 (frozen; additive changes only)
 
 Environments
   baseline   Kubernetes v1.34.1  (sidecar-injector 1.26.3)
@@ -529,15 +533,22 @@ resolution, the port-forward, and the probe contract.
 
 ## Schemas
 
-Three versioned document families, all frozen at `v1beta1` and all checked in:
+Three versioned document families, all frozen at `v1` and all checked in:
 
 | Document | `apiVersion` | Schema |
 | --- | --- | --- |
-| Lab configuration | `admissionlab.io/v1beta1` | [`schemas/admissionlab-v1beta1.json`](schemas/admissionlab-v1beta1.json) |
-| Lab configuration (previous, still readable) | `admissionlab.io/v1alpha1` | [`schemas/admissionlab-v1alpha1.json`](schemas/admissionlab-v1alpha1.json) |
-| Result (`result.json`) | `admissionlab.io/result/v1beta1` | [`schemas/result-v1beta1.json`](schemas/result-v1beta1.json) |
-| Run manifest (`run.json`) | `admissionlab.io/run-manifest/v1beta1` | [`schemas/run-manifest-v1beta1.json`](schemas/run-manifest-v1beta1.json) |
-| Run manifest (previous, still readable) | `admissionlab.io/run-manifest/v1alpha1` | [`schemas/run-manifest-v1alpha1.json`](schemas/run-manifest-v1alpha1.json) |
+| Lab configuration | `admissionlab.io/v1` | [`schemas/admissionlab-v1.json`](schemas/admissionlab-v1.json) |
+| Lab configuration (Public Beta, still readable) | `admissionlab.io/v1beta1` | [`schemas/admissionlab-v1beta1.json`](schemas/admissionlab-v1beta1.json) |
+| Lab configuration (Public Alpha, still readable) | `admissionlab.io/v1alpha1` | [`schemas/admissionlab-v1alpha1.json`](schemas/admissionlab-v1alpha1.json) |
+| Result (`result.json`) | `admissionlab.io/result/v1` | [`schemas/result-v1.json`](schemas/result-v1.json) |
+| Result (previous published contract) | `admissionlab.io/result/v1beta1` | [`schemas/result-v1beta1.json`](schemas/result-v1beta1.json) |
+| Run manifest (`run.json`) | `admissionlab.io/run/v1` | [`schemas/run-manifest-v1.json`](schemas/run-manifest-v1.json) |
+| Run manifest (Public Beta, still readable) | `admissionlab.io/run-manifest/v1beta1` | [`schemas/run-manifest-v1beta1.json`](schemas/run-manifest-v1beta1.json) |
+| Run manifest (Public Alpha, still readable) | `admissionlab.io/run-manifest/v1alpha1` | [`schemas/run-manifest-v1alpha1.json`](schemas/run-manifest-v1alpha1.json) |
+
+The run manifest's stable identifier drops the `-manifest` infix on purpose —
+`admissionlab.io/run/v1`. A version string is matched on, so it can only change
+at a version boundary, and this was the last one.
 
 Point your editor at the configuration schema and a wrong `apiVersion` or a
 misspelled key is flagged as you type.
@@ -560,7 +571,7 @@ file beside it is a configuration error.
 | --- | --- |
 | [`docs/architecture.md`](docs/architecture.md) | As-built crate map and dependency rules, the run pipeline's stages, the evidence model, audit correlation, why fixture execution is serial, and the Gateway engine end to end (§7) |
 | [`docs/compatibility.md`](docs/compatibility.md) | Certified vs supported vs merely configurable: the certified table, what a certification asserts, the CI tiers, the three-minors rule, and what happens on a combination nobody certified |
-| [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` `v1beta1` reference: every field, every default, path resolution, `gateway`, `policy`, overrides, `expectations.yaml`, and how a `v1alpha1` file still loads |
+| [`docs/config.md`](docs/config.md) | Full `admissionlab.yaml` `v1` reference: every field, every default, path resolution, `gateway`, `policy`, overrides, `expectations.yaml`, and how a `v1beta1` or `v1alpha1` file still loads |
 | [`docs/fixtures.md`](docs/fixtures.md) | Fixture format, discovery globs, identity and hashing, the setup-outside-the-glob pattern, and the dogfood webhook's annotation vocabulary |
 | [`docs/github-action.md`](docs/github-action.md) | The composite action: pinned/checksummed installation, every input, the artifacts it uploads on a failing run, exit-code behavior, and what the job summary says |
 | [`docs/recipes.md`](docs/recipes.md) | What a recipe is, the pins each built-in recipe carries, the capability model, override directories, and why recipes may never classify regressions |

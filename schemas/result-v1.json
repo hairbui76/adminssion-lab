@@ -1,0 +1,1969 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ResultDocument",
+  "description": "One comparison run, as `result.json` writes it.\n\nBorrowed from a [`LabResult`] through [`From`]; see this module's\ndocumentation for the whole contract.",
+  "type": "object",
+  "properties": {
+    "diagnostics": {
+      "description": "Run-level diagnostics. Per-fixture ones stay on the outcome that\nproduced them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Diagnostic"
+      }
+    },
+    "environments": {
+      "description": "What each side actually was, as observed.",
+      "$ref": "#/$defs/EnvironmentSummary"
+    },
+    "fixtures": {
+      "description": "Every compared unit, in the order the run compared them.",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FixtureDocument"
+      }
+    },
+    "migration": {
+      "description": "Every Ingress-to-Gateway migration case the run compared\n(ROADMAP Task 8.8), or **omitted entirely** for a lab with no\n`migration:` section.\n\n# Why this key is omitted rather than written as `null`\n\nThe three *evidence sections* inside a fixture are always\nwritten, because each one's absence would otherwise have to be\ninterpreted (see this module's Global Constraint 15 section).\nThis key is different in kind: it is an **optional addition to a\nfrozen document**, and `docs/schema-migrations.md`'s first\nobligation is that an addition must leave every document written\nbefore it existed still valid. Omitting it means a `result.json`\nfrom an admission-only or Gateway-only lab is byte-identical to\nwhat this crate wrote before Task 8.8 — which is exactly the\nproperty \"additive\" is supposed to name. The same reasoning, and\nthe same treatment, [`Self::timings`] already carries.\n\nWhere a claim *could* be misread the section states it inside\nitself instead: [`MigrationSection::comparability`] says whether\nan empty `changes` list is agreement or ignorance, and\n[`MigrationSection::comparabilityReason`](MigrationSection::comparability_reason)\nsays it in prose.",
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/MigrationSection"
+      }
+    },
+    "policy": {
+      "description": "The run's verdict and every graded change.",
+      "$ref": "#/$defs/PolicyDocument"
+    },
+    "runId": {
+      "description": "The run this result describes.",
+      "type": "string"
+    },
+    "schemaVersion": {
+      "description": "The frozen schema identifier -- always\n[`crate::model::SCHEMA_VERSION`] for a document this crate wrote.",
+      "type": "string"
+    },
+    "summary": {
+      "description": "The five-bucket count over [`Self::fixtures`].",
+      "$ref": "#/$defs/RunSummary"
+    },
+    "timings": {
+      "description": "How long each stage took, when the producer measured.\n\nThe one key in this document that is *omitted* rather than\nwritten as `null`, and deliberately: absent timings are the\nabsence of a measurement, and the block's own optional stages\nalready spell absence the same way (see\n[`LabResult::timings`] for what a written `result.json`\nstructurally cannot contain).",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/StageTimings"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "runId",
+    "summary",
+    "environments",
+    "fixtures",
+    "policy",
+    "diagnostics"
+  ],
+  "$defs": {
+    "AdmissionDecision": {
+      "description": "The API server's final verdict on one fixture, on one side.\n\nThis is the *server's* decision about whether the object was\nadmitted -- not a per-webhook opinion (see\n[`crate::trace::WebhookOutcome`] for that). Represented as an\nexternally tagged enum: `Accepted` serializes as the bare JSON string\n`\"accepted\"`; the other two variants serialize as a single-key object\n(for example `{\"rejected\":{\"code\":403,\"message\":\"...\"}}`). Each\nvariant's wire tag is pinned with an explicit `#[serde(rename)]`\nrather than left to derive from the Rust identifier, so renaming a\nvariant in Rust can never silently change the JSON report contract\n(controller supplement §5, Task 3.3).",
+      "oneOf": [
+        {
+          "description": "The object was admitted.",
+          "type": "string",
+          "const": "accepted"
+        },
+        {
+          "description": "The object was rejected. `code` is the HTTP-style status code the\nAPI server (or a rejecting webhook) reported, when one was\npresent in the observed response; `None` means the rejection was\nobserved but no code was -- this is never fabricated as a\nplausible default such as `403`, so a rejection with a known code\nstays distinguishable from one without (Global Constraint 15).",
+          "type": "object",
+          "properties": {
+            "rejected": {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "description": "The rejecting response's status code, if the audit evidence\ncarried one.",
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "format": "uint16",
+                  "maximum": 65535,
+                  "minimum": 0
+                },
+                "message": {
+                  "description": "A human-readable rejection message, taken from the observed\nresponse.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "rejected"
+          ]
+        },
+        {
+          "description": "The fixture could not be replayed as a real admission decision\nbecause the side does not support (or this run did not attempt)\nthe dry-run mechanism replay depends on. `message` explains why.",
+          "type": "object",
+          "properties": {
+            "unsupported_dry_run": {
+              "type": "object",
+              "properties": {
+                "message": {
+                  "description": "Why dry-run replay was not possible for this fixture on this\nside.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "message"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "unsupported_dry_run"
+          ]
+        }
+      ]
+    },
+    "AdmissionOutcome": {
+      "description": "Everything observed about one fixture's admission on one side.\n\nImplements [`Serialize`] only, never [`serde::Deserialize`]:\n`diagnostics` holds [`Diagnostic`], which\n`admissionlab-core` itself implements `Serialize` for but\ndeliberately not `Deserialize` (see that type's own module\ndocumentation -- it is a one-way, emit-only report vocabulary), and\nthis task must not modify `admissionlab-core` to add that impl\n(controller supplement §3). `AdmissionOutcome` is captured once from a\nlive cluster and only ever serialized *outward* into the run's JSON\nreport; nothing in this project reads one back in from JSON, so the\nasymmetry costs this crate nothing.",
+      "type": "object",
+      "properties": {
+        "decision": {
+          "description": "The API server's final verdict.",
+          "$ref": "#/$defs/AdmissionDecision"
+        },
+        "diagnostics": {
+          "description": "Diagnostics collected while capturing this outcome.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "final_object": {
+          "description": "The object as the API server persisted it, if the decision\nadmitted it and the persisted form was observed. `None` covers\nboth \"the object was rejected\" and \"it was accepted but its final\nform could not be captured\" -- this type cannot itself distinguish\nthose two; a caller needing to must consult `decision`."
+        },
+        "fixture_id": {
+          "description": "Which fixture this outcome observed.",
+          "type": "string"
+        },
+        "side": {
+          "description": "Which side (baseline or candidate) produced this outcome.",
+          "type": "string"
+        },
+        "total_latency": {
+          "description": "Wall-clock time from issuing the replay request to receiving the\nAPI server's response. Unlike a per-webhook\n[`crate::trace::WebhookInvocation::latency`], this is always\nmeasured directly by the code that issues the request, so it is a\nbare [`Duration`], never an [`Option`].",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "trace": {
+          "description": "What was observed about the webhook chain this fixture passed\nthrough.",
+          "$ref": "#/$defs/AdmissionTrace"
+        },
+        "warnings": {
+          "description": "Warnings the API server attached to its response, verbatim and in\nthe order observed.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "fixture_id",
+        "side",
+        "decision",
+        "warnings",
+        "total_latency",
+        "trace",
+        "diagnostics"
+      ]
+    },
+    "AdmissionSection": {
+      "description": "What both sides' API servers did with one fixture.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "What the baseline side did, verbatim.",
+          "$ref": "#/$defs/AdmissionOutcome"
+        },
+        "candidate": {
+          "description": "What the candidate side did, verbatim.",
+          "$ref": "#/$defs/AdmissionOutcome"
+        },
+        "comparability": {
+          "description": "Whether the two decisions mean the same thing and can be\ncompared at all -- `admissionlab_diff::decision_comparability`'s\nanswer, carrying each side's own verbatim reason when they\ncannot.",
+          "$ref": "#/$defs/DecisionComparability"
+        },
+        "divergenceConfidence": {
+          "description": "How the first divergence was established, as one written word --\nincluding [`DivergenceAttribution::Unattributed`] for the case\nwhere [`Self::first_divergence`] is `null`.",
+          "$ref": "#/$defs/DivergenceAttribution"
+        },
+        "firstDivergence": {
+          "description": "Where in the webhook chain the two sides first diverged, when\nthat could be attributed at all.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DivergenceEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "traceEvidence": {
+          "description": "How complete each side's webhook-chain trace is, surfaced here so\na consumer reading the divergence fields below never has to guess\nwhether an empty `invocations` list means \"no webhook ran\" or\n\"the trace could not be captured\".",
+          "$ref": "#/$defs/SideTraceEvidence"
+        }
+      },
+      "required": [
+        "comparability",
+        "baseline",
+        "candidate",
+        "traceEvidence",
+        "divergenceConfidence"
+      ]
+    },
+    "AdmissionTrace": {
+      "description": "What was observed about the full webhook chain for one fixture, on\none side.",
+      "type": "object",
+      "properties": {
+        "evidence": {
+          "description": "How complete `invocations` is believed to be. Required: no\ndefault, so a document that omits it fails to deserialize rather\nthan silently reading as [`TraceEvidence::Observed`] -- see that\ntype's own documentation.",
+          "$ref": "#/$defs/TraceEvidence"
+        },
+        "invocations": {
+          "description": "Each webhook invocation observed, in the order they were\nobserved to run. May be incomplete or empty; `evidence` is the\nonly field that says how much to trust that.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/WebhookInvocation"
+          }
+        }
+      },
+      "required": [
+        "evidence",
+        "invocations"
+      ]
+    },
+    "CaptureStage": {
+      "description": "The fixture-capture stage: both sides' wall-clock, each side's own,\nand how many fixtures each side replayed.",
+      "type": "object",
+      "properties": {
+        "baselineMs": {
+          "description": "The baseline side's own capture duration, when that side ran.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "candidateMs": {
+          "description": "The candidate side's own capture duration, when that side ran.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fixtures": {
+          "description": "How many fixtures each side replayed.\n\nPer side, not summed across both: both sides replay the same\ncorpus (that is what makes their results comparable at all), so\nthis is the corpus size, and dividing a side's own duration by it\ngives a per-fixture cost. Absent when no side completed its\ncapture, because then nobody counted.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint",
+          "minimum": 0
+        },
+        "wallMs": {
+          "description": "How long the caller waited for both sides' capture together.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "wallMs"
+      ]
+    },
+    "ChangeDocument": {
+      "description": "One graded change, with the identifier that ties its two appearances\n(per fixture, and run-wide) together.",
+      "type": "object",
+      "properties": {
+        "change": {
+          "description": "What differed, verbatim, in `admissionlab-diff`'s own wire\nshape.",
+          "$ref": "#/$defs/SemanticChange"
+        },
+        "expected": {
+          "description": "Whether an `expectations.yaml` entry accounted for it.",
+          "type": "boolean"
+        },
+        "id": {
+          "description": "This change's stable identifier -- see [`semantic_change_id`].",
+          "type": "string"
+        },
+        "severity": {
+          "description": "How much `admissionlab-policy` says it matters. Never decided\nhere.",
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "id",
+        "change",
+        "severity",
+        "expected"
+      ]
+    },
+    "ComponentReport": {
+      "description": "One installed component's identity, for provenance.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The component's name, as the lab configuration named it.",
+          "type": "string"
+        },
+        "version": {
+          "description": "The version actually installed, as observed.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version"
+      ]
+    },
+    "ComponentTiming": {
+      "description": "One component's install-and-readiness duration.\n\nNot measured by this module: it is\n[`crate::run::InstalledComponent::elapsed`] verbatim, the installer's\nown measurement around its own work. See this module's documentation\n(\"Two ways a duration gets here\").",
+      "type": "object",
+      "properties": {
+        "elapsedMs": {
+          "description": "How long it took to install and become ready.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "name": {
+          "description": "The component's name, as the lab configuration named it.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "elapsedMs"
+      ]
+    },
+    "ConditionState": {
+      "description": "What a controller said about one condition -- including having said\nnothing.\n\nThe three Kubernetes values keep their own wire spelling (`\"True\"`,\n`\"False\"`, `\"Unknown\"`, capitalized) rather than being renamed to\nthis project's usual `snake_case`: these are the exact strings a user\nsees in `kubectl get gateway -o yaml`, and a report that spelled them\ndifferently from the cluster it read them from would be needlessly\nharder to check by hand. `\"Missing\"` follows the same convention for\nconsistency even though Kubernetes has no such value. Every variant's\nwire tag is pinned with an explicit `#[serde(rename)]` so renaming a\nRust variant can never silently change the report contract -- the\nsame rule `admissionlab_admission::AdmissionDecision` follows.\n\nNo `Default`: there is no defensible default observation, and a\nderived one would make \"we did not look\" indistinguishable from a\nreal answer.",
+      "oneOf": [
+        {
+          "description": "The controller published this condition with `status: \"True\"`.",
+          "type": "string",
+          "const": "True"
+        },
+        {
+          "description": "The controller published this condition with `status: \"False\"`.",
+          "type": "string",
+          "const": "False"
+        },
+        {
+          "description": "The controller published this condition with `status: \"Unknown\"`\n-- it looked and cannot yet tell.",
+          "type": "string",
+          "const": "Unknown"
+        },
+        {
+          "description": "The condition is not in the object's condition list at all. The\ncontroller has said nothing about it. See this module's\ndocumentation for why this is never folded into\n[`ConditionState::False`].",
+          "type": "string",
+          "const": "Missing"
+        }
+      ]
+    },
+    "DecisionComparability": {
+      "description": "Whether two [`AdmissionOutcome`]s can be compared as decisions at all.\n\n`Incomparable` is a statement about *this lab's* ability to replay the\nfixture on a side, never about the stack being tested. It exists so a\ncaller can distinguish an empty semantic-change list that means \"both\nsides were observed and agreed\" from one that means \"there was\nnothing to compare\" -- see this module's documentation for why that\ndistinction is load-bearing and how Phase 4's summary consumes it.\n\nSerializes with pinned wire tags, since it reaches the same reports\n[`SemanticChange`] does. Derives no `Default`: `Comparable` is the\nconvenient answer, and defaulting to it would silently upgrade \"we\ncould not look\" into \"we looked and it was fine\".",
+      "oneOf": [
+        {
+          "description": "Both sides produced a real admit/deny verdict from a real API\nserver, so their decisions mean the same thing and can be\ncompared.",
+          "type": "string",
+          "const": "comparable"
+        },
+        {
+          "description": "At least one side could not be replayed as a real admission\ndecision. Each field holds that side's own explanation verbatim,\nor [`None`] when that side *was* replayed normally.",
+          "type": "object",
+          "properties": {
+            "incomparable": {
+              "type": "object",
+              "properties": {
+                "baseline": {
+                  "description": "Why the baseline side produced no comparable decision.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "candidate": {
+                  "description": "Why the candidate side produced no comparable decision.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              }
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "incomparable"
+          ]
+        }
+      ]
+    },
+    "Diagnostic": {
+      "description": "One structured diagnostic message.\n\n`code`, `message`, and `context` are canonical field names shared with\nevery later crate that reports through `Diagnostic`; later tasks may\nadd fields but must not rename these. All fields are public and\n`Diagnostic` has no constructor: any combination of `code`, `message`,\nand `context` is valid, and callers build one directly with struct\nliteral syntax.\n\n`context` is a [`BTreeMap`] rather than a `HashMap` so that its\nserialized key order is deterministic — required for reproducible\nreports and diffable snapshots — and its values are [`RedactedValue`]\nrather than `String` so that every context entry has been explicitly\nmarked public or sensitive before it can be attached at all.",
+      "type": "object",
+      "properties": {
+        "code": {
+          "description": "A short, stable machine-readable identifier, for example\n`\"install.failed\"`.",
+          "type": "string"
+        },
+        "context": {
+          "description": "Structured detail supporting `message`. A value that might expose\nsecret material (tokens, credentials, webhook CA bundles, and\nsimilar) must be [`RedactedValue::Sensitive`], never\n[`RedactedValue::Public`].\n\nDescribed to `schemars` as a plain `string` map because that is\nexactly what [`RedactedValue`]'s hand-written [`Serialize`] emits\n-- `Public`'s value verbatim, or the fixed [`REDACTED`] literal.\nDeriving `JsonSchema` on the enum instead would describe the Rust\nvariants, which never appear on the wire.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "message": {
+          "description": "A human-readable description of what happened.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "context"
+      ]
+    },
+    "DivergenceAttribution": {
+      "description": "How a first divergence was established, with no `null` to interpret.\n\nThree of the four values are\n`admissionlab_diff::DivergenceConfidence`'s own, tag for tag. The\nfourth exists because the model's `first_divergence` is an\n[`Option`], and Global Constraint 15 does not accept an absent value\nas a statement: a consumer must be able to read \"no attribution was\nproduced\" without inferring it from a missing object.",
+      "oneOf": [
+        {
+          "description": "The captured evidence locates the divergence directly.",
+          "type": "string",
+          "const": "observed"
+        },
+        {
+          "description": "The divergence was narrowed down from indirect evidence. A\nrenderer must label it rather than present it as an observation.",
+          "type": "string",
+          "const": "inferred"
+        },
+        {
+          "description": "Attribution was attempted and the evidence does not locate the\ndivergence.",
+          "type": "string",
+          "const": "unknown"
+        },
+        {
+          "description": "No attribution was produced at all -- the case where\n[`AdmissionSection::first_divergence`] is `null`. Never \"the two\nsides did not diverge\".",
+          "type": "string",
+          "const": "unattributed"
+        }
+      ]
+    },
+    "DivergenceConfidence": {
+      "description": "How well supported a [`DivergenceEvidence`] claim is.\n\nTask 4.7 computes first-divergence attribution from two normalized\nwebhook traces, and that computation is only ever as good as the\nevidence it was handed: an audit backend can be missing or partial\n(see `admissionlab_admission::trace::TraceEvidence`), and two traces\ncan be byte-identical while the final objects still differ. This enum\nis how such an attribution states its own strength instead of\npresenting every conclusion as equally proven (Global Constraint 15,\nand Global Constraint 7: attribution is deterministic, never guessed\nby a model).\n\nDerives no `Default`, for the same reason\n`admissionlab_admission::trace::TraceEvidence` does not: `Observed` is\nthe variant a developer writes first, so an accidental `Default`\nwould silently upgrade an unproven claim to a proven one.\n\nEach variant's wire tag is pinned explicitly -- this type serializes\ninto the same reports [`SemanticChangeKind`] does, so its names are\nAlpha-stable too.",
+      "oneOf": [
+        {
+          "description": "The divergence itself was directly observed in the captured\nevidence on both sides.",
+          "type": "string",
+          "const": "observed"
+        },
+        {
+          "description": "The divergence was deduced from evidence that was incomplete on\nat least one side. The conclusion is deterministic but the\nunderlying observation was not complete.",
+          "type": "string",
+          "const": "inferred"
+        },
+        {
+          "description": "A difference exists but the captured evidence does not locate it.\nThe canonical case is two identical traces with different final\nobjects: something diverged outside the captured mutating-webhook\nevidence, or that evidence is incomplete.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    },
+    "DivergenceEvidence": {
+      "description": "Where a difference first became visible in the webhook chain.\n\nProduced by Task 4.7's `first_divergence` and carried by\n[`SemanticChange::origin`]. This task declares the type (a\n`SemanticChange` has to name it) and pins its wire shape; the\nfunction that fills one in lands with Task 4.7.\n\nPositions are `(round, index)` pairs matching\n`admissionlab_admission::trace::WebhookInvocation`'s own `round`/\n`index` fields, and serialize as a two-element JSON array\n`[round, index]`. A side's position or webhook name is [`None`] when\nthat side has no invocation at the point of divergence at all -- the\nadded/removed-invocation case -- never as a stand-in for \"not\ncaptured\".\n\n`explanation` is required and non-optional on purpose: an attribution\nwith no human-readable account of *why* is not usable evidence in a\nreport, and a [`DivergenceConfidence::Unknown`] value especially must\ncarry the sentence saying what could not be determined.\n\nDerives no `Default`: like the confidence it carries, evidence exists\nonly because something concluded it.",
+      "type": "object",
+      "properties": {
+        "baseline_position": {
+          "description": "The baseline trace position where the divergence was located, as\n`(round, index)`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          ]
+        },
+        "baseline_webhook": {
+          "description": "The baseline webhook at `baseline_position`, by name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "candidate_position": {
+          "description": "The candidate trace position where the divergence was located, as\n`(round, index)`.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            },
+            {
+              "type": "integer",
+              "format": "uint32",
+              "minimum": 0
+            }
+          ]
+        },
+        "candidate_webhook": {
+          "description": "The candidate webhook at `candidate_position`, by name.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "confidence": {
+          "description": "How well supported this attribution is.",
+          "$ref": "#/$defs/DivergenceConfidence"
+        },
+        "explanation": {
+          "description": "A human-readable account of what diverged and how it was\ndetermined.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "confidence",
+        "explanation"
+      ]
+    },
+    "EnvironmentReport": {
+      "description": "One side's observed environment.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "The stack components installed on this side, in the order they\nwere installed.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentReport"
+          }
+        },
+        "kubernetes": {
+          "description": "The Kubernetes version this side ran, as reported by the cluster.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kubernetes",
+        "components"
+      ]
+    },
+    "EnvironmentSummary": {
+      "description": "What both sides of the comparison actually were.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The baseline side.",
+          "$ref": "#/$defs/EnvironmentReport"
+        },
+        "candidate": {
+          "description": "The candidate side.",
+          "$ref": "#/$defs/EnvironmentReport"
+        }
+      },
+      "required": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    "FixtureDocument": {
+      "description": "One compared unit: an admission fixture, a Gateway route contract, or\n(when nothing at all was observed) neither.",
+      "type": "object",
+      "properties": {
+        "admission": {
+          "description": "The admission evidence, or `null` for an entry that was never\nreplayed through two API servers.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AdmissionSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "bucket": {
+          "description": "The single bucket this entry was counted in, as\n[`FixtureComparison::bucket`] decides it.\n\nWritten even though [`ResultDocument::summary`] already carries\nthe counts: without it a consumer that wants to know *why* a\nfixture is inconclusive rather than identical has to\nre-implement the precedence rule, and a re-implementation is\nexactly what would drift. It is derived at serialization time\nfrom the same method the terminal and HTML renderers call, so it\nis not a second stored copy that can disagree.",
+          "type": "string"
+        },
+        "changes": {
+          "description": "Every graded change attributed to this entry, in\n`admissionlab-policy`'s deterministic order. The same entries\nappear, with the same [`ChangeDocument::id`], in\n[`PolicyDocument::changes`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChangeDocument"
+          }
+        },
+        "fixtureId": {
+          "description": "Which fixture or route contract this is.",
+          "type": "string"
+        },
+        "gatewayReconciliation": {
+          "description": "The Gateway *reconciliation* evidence, or `null` for an entry\nthat is not a Gateway route contract.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReconciliationSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "traffic": {
+          "description": "The Gateway *traffic* evidence, or `null` for an entry that is\nnot a Gateway route contract.\n\nA route contract whose probes never ran still gets a section,\nwith [`TrafficEvidence::Unavailable`]: \"we did not probe\" and\n\"this is not a route contract\" are different facts and the\ndocument states both.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TrafficSection"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "fixtureId",
+        "bucket",
+        "changes"
+      ]
+    },
+    "GatewayClassEvidence": {
+      "description": "What was observed about the `GatewayClass` a `Gateway` names.\n\nOnly `Accepted` is carried, because that is the only condition\nGateway API's standard channel defines for a `GatewayClass` and the\nonly one §1.2's registry names.",
+      "type": "object",
+      "properties": {
+        "accepted": {
+          "description": "Its `Accepted` condition, or [`ObservedCondition::missing`] if it\nhas none yet.",
+          "$ref": "#/$defs/ObservedCondition"
+        },
+        "name": {
+          "description": "The `GatewayClass`'s name (it is cluster-scoped, so a name is a\ncomplete identity).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "accepted"
+      ]
+    },
+    "GatewayComparability": {
+      "description": "How comparable two sides' Gateway evidence is, and therefore which\nclaims about them are honest.\n\nMirrors `admissionlab_diff::TraceComparability` in shape and in\nintent; see this module's \"Evidence completeness\" section for the\nrule each variant encodes. Serializes with pinned wire tags, since it\nreaches the same reports a [`SemanticChange`] does.\n\nDerives no `Default`, for the reason\n`admissionlab_diff::TraceComparability` gives: `Comparable` is the\nflattering answer, and defaulting to it would turn \"we could not\ntell\" into \"we looked and it was fine\".",
+      "oneOf": [
+        {
+          "description": "Both sides converged. Differences *and* absences are evidence,\nand an empty change list means the two sides genuinely behaved\nthe same.",
+          "type": "string",
+          "const": "comparable"
+        },
+        {
+          "description": "Exactly one side converged. Differences between values both sides\npublished are real -- including a required condition the\nconverged side published and the other did not -- but no claim\nrests on the unconverged side's silence unless that side's status\nis current.",
+          "type": "object",
+          "properties": {
+            "partial": {
+              "type": "object",
+              "properties": {
+                "baseline": {
+                  "description": "The baseline side's own evidence level.",
+                  "$ref": "#/$defs/GatewayEvidenceLevel"
+                },
+                "candidate": {
+                  "description": "The candidate side's own evidence level.",
+                  "$ref": "#/$defs/GatewayEvidenceLevel"
+                }
+              },
+              "required": [
+                "baseline",
+                "candidate"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "partial"
+          ]
+        },
+        {
+          "description": "Neither side converged. Nothing was compared: with no stable\nreference on either side, every difference between two in-flight\nstatuses would be noise reported as a regression.",
+          "type": "object",
+          "properties": {
+            "incomparable": {
+              "type": "object",
+              "properties": {
+                "baseline": {
+                  "description": "The baseline side's own evidence level.",
+                  "$ref": "#/$defs/GatewayEvidenceLevel"
+                },
+                "candidate": {
+                  "description": "The candidate side's own evidence level.",
+                  "$ref": "#/$defs/GatewayEvidenceLevel"
+                }
+              },
+              "required": [
+                "baseline",
+                "candidate"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "incomparable"
+          ]
+        }
+      ]
+    },
+    "GatewayEvidence": {
+      "description": "What was observed about one `Gateway`.",
+      "type": "object",
+      "properties": {
+        "conditions": {
+          "description": "Every object-level condition, keyed by type (Step 1). Per-listener\nconditions are deliberately not included -- see this module's\n\"What this module does not normalize\" section.",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ObservedCondition"
+          }
+        },
+        "gatewayClassName": {
+          "description": "The `spec.gatewayClassName` this `Gateway` names, or `None` if it\ndeclared none.\n\nNot in §1.2's frozen field list, and added here for one concrete\nreason Task 6.4 states: it polls the `GatewayClass` \"when the\nGateway names one\", and this is how it knows. Reading it from the\nsame object read that produced the conditions is what keeps the\ntwo consistent -- a second `GET` could observe a different spec.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "generation": {
+          "description": "The `Gateway`'s `metadata.generation` at the moment it was read,\nwhich is what every condition's own `observedGeneration` is\ncompared against.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "identity": {
+          "description": "Which `Gateway` this is about.",
+          "$ref": "#/$defs/GatewayIdentity"
+        }
+      },
+      "required": [
+        "identity",
+        "conditions",
+        "generation"
+      ]
+    },
+    "GatewayEvidenceLevel": {
+      "description": "How good one side's evidence is, as a reference to compare against.\n\nThe Gateway counterpart of `admissionlab_admission::trace::TraceEvidence`,\nand three values for the same reason that one has three: the middle\none changes *which* claims are honest rather than whether any is.\n\nDerives no `Default`. [`GatewayEvidenceLevel::Converged`] is the\nconvenient answer, and defaulting to it would silently upgrade \"the\nwait timed out\" into \"the route settled\".",
+      "oneOf": [
+        {
+          "description": "The route reached a stable, current status within the\nreconciliation deadline. Its conditions and probes are a\nreference behavior.",
+          "type": "string",
+          "const": "converged"
+        },
+        {
+          "description": "The wait ended without convergence, but what the side *did*\npublish describes the spec under test (every compared condition\nit published is [`ConditionFreshness::Current`]).\n\nThis is still real evidence: the waiter did not take a snapshot,\nit waited out the whole deadline, so a condition this side never\npublished is a condition it did not publish *in time*. It is not\na stable reference, which is what makes the comparison\n[`GatewayComparability::Partial`].",
+          "type": "string",
+          "const": "unconverged"
+        },
+        {
+          "description": "The wait ended without convergence *and* what the side published\nis stale or of undeterminable currency -- it describes a spec\nthat has since changed, or carries no `observedGeneration` to\ncheck, or is empty. Absences on this side prove nothing; see this\nmodule's \"Stale evidence weakens absence claims\".",
+          "type": "string",
+          "const": "stale"
+        }
+      ]
+    },
+    "GatewayIdentity": {
+      "description": "Which `Gateway` object something refers to: §1.2's canonical Gateway\nidentity.\n\n`namespace` is non-optional because a `Gateway` is always namespaced\n(unlike a `GatewayClass`, which is cluster-scoped and identified by\nname alone -- see `GatewayClassEvidence` in Task 6.3). Distinct from\n`ParentIdentity` (Task 6.3), which describes a route's *claimed*\nparent as the route wrote it -- where the namespace really can be\nabsent, meaning \"the route's own namespace\" -- rather than a\nresolved, existing object.\n\n`Serialize` (but not `Deserialize`): this appears inside\n[`crate::conditions::GatewayEvidence`], which is captured once from a\nlive cluster and only ever serialized *outward* into a run's report\n-- the same one-way asymmetry, for the same reason,\n`admissionlab_admission::AdmissionOutcome` documents.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The `Gateway`'s name.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "The `Gateway`'s namespace.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "namespace",
+        "name"
+      ]
+    },
+    "HttpProbeResult": {
+      "description": "What one probe request through a Gateway's data plane returned.\n\n`Serialize` but not `Deserialize`, the same one-way asymmetry\n[`crate::reconcile::ReconciliationEvidence`] and\n`admissionlab_admission::AdmissionOutcome` document: this is\nsomething Admission Lab observed, and it only ever travels outward\ninto a run's report.\n\nCarries no copy of the request — see this module's \"Redaction\"\nsection.",
+      "type": "object",
+      "properties": {
+        "attempts": {
+          "description": "How many connection attempts were made, including the one that\nproduced this response. `1` for a probe that connected first\ntime. See this module's \"What gets retried\" section for why this\nis reported rather than normalized away.",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "backend": {
+          "description": "Which workload answered, when the response identified itself as\nan Admission Lab echo backend. `None` means unknown — never\nguessed. See this module's \"Identifying the backend\" section.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "elapsed": {
+          "description": "Wall-clock time from the first connection attempt to the last\nbyte of the response body, measured with [`Instant`] so it is\nmonotonic. Includes every retried attempt: this is how long the\nprobe took, not how long the successful attempt took.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "responseBodySha256": {
+          "description": "The SHA-256 of the response body, lowercase hex, computed by\n`admissionlab_core::sha256_hex` over the bytes exactly as\nreceived. An empty body hashes to SHA-256 of the empty string,\nwhich is a real hash of a real (empty) body rather than a\nsentinel.",
+          "type": "string"
+        },
+        "responseHeaders": {
+          "description": "Every response header, lowercased and sorted, with a repeated\nheader joined by `\", \"`. Nothing is filtered — see this module's\n\"Response headers\" section.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "status": {
+          "description": "The HTTP status code the data plane returned.",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        }
+      },
+      "required": [
+        "status",
+        "responseHeaders",
+        "responseBodySha256",
+        "elapsed",
+        "attempts"
+      ]
+    },
+    "InstallStage": {
+      "description": "The installation stage: both sides' wall-clock, and each side's own\nper-component breakdown.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The baseline side's stack, when that side installed one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SideInstallTiming"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate": {
+          "description": "The candidate side's stack, when that side installed one.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SideInstallTiming"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "wallMs": {
+          "description": "How long the caller waited for both sides' stacks together.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "wallMs"
+      ]
+    },
+    "MigrationBehaviorKind": {
+      "description": "Which routing behavior moved between an `Ingress` and the Gateway API\nobjects meant to replace it.\n\n§1.2's canonical name, frozen at these seven variants by ROADMAP Task\n8.5. Deliberately *not* `admissionlab_diff::SemanticChangeKind` -- see\nthis module's \"A separate vocabulary from `SemanticChangeKind`\".\n\nThe wire tags are `snake_case`, matching every other change\nvocabulary in this workspace (`traffic_backend_changed`,\n`route_attached`, ...), and they are pinned by\n`tests/migration_diff.rs` rather than left to the derive: a rename\nhere would silently change a document a report renders.\n\n`Serialize` but not `Deserialize`: this is observation travelling\noutward, like every other evidence type in this crate.\n\n`JsonSchema` was deliberately absent until ROADMAP Task 8.8, because\nnothing embedded this in the frozen\n`admissionlab.io/result/v1` document and a premature derive\nwould have frozen a shape nobody had chosen. Task 8.8 chose it: a\nresult document now carries an optional top-level `migration` array\n(`admissionlab_report::wire::MigrationSection`), so this type is part\nof a published schema and derives the schema that describes it, from\nthe same declaration that serializes it.",
+      "oneOf": [
+        {
+          "description": "Host-based routing behaves differently.\n\nTwo triggers, both evidence-first: the two sides redirected to\ndifferent *hosts*, or a probe whose request path is the bare root\n`/` got different statuses. A root-path probe carries no\npath-matching information at all -- the only thing distinguishing\nit from any other request to that data plane is its `Host` header\n-- so a status difference on one is a difference in what the\nstacks did with that host.",
+          "type": "string",
+          "const": "host_behavior_changed"
+        },
+        {
+          "description": "Path matching behaves differently: the two sides answered a\nprobe for a specific path differently, and nothing more specific\n(a redirect, a backend, a shared backend) accounts for it.\n\nThis is the residual arm of the status-difference rule, and it is\ndeliberately the residual one: a contract's `path` is the most\nspecific thing a routing rule matches on, and an `Ingress`\n`pathType` and an `HTTPRoute` `path.type` are the pair most\nlikely to have been translated wrongly by hand.",
+          "type": "string",
+          "const": "path_behavior_changed"
+        },
+        {
+          "description": "TLS behaves differently: the two sides redirected to different\nURI *schemes*.\n\nThe classic migration bug this catches is\n`nginx.ingress.kubernetes.io/ssl-redirect` (on by default once an\n`Ingress` has any TLS block) against an `HTTPRoute` whose\n`RequestRedirect` filter names no `scheme`: one side sends the\nclient to `https://`, the other to `http://`.\n\nA known limit, stated rather than hidden: probes reach a data\nplane through a plaintext `kubectl port-forward`, so a redirect's\nscheme is the *only* TLS evidence available today. When a probe\ncan itself speak TLS, a status difference on such a probe belongs\nhere too, and this variant is where that lands.",
+          "type": "string",
+          "const": "tls_behavior_changed"
+        },
+        {
+          "description": "A different workload answered.\n\nClaimed only when *both* sides identified their backend and the\nidentities differ. `backend: None` means \"which workload answered\nis unknown\", never \"a different one did\" -- the same rule\n[`crate::diff::diff_gateway`] applies to\n`traffic_backend_changed`, and for the same reason: a fabricated\nvalue here would fabricate a regression.",
+          "type": "string",
+          "const": "backend_changed"
+        },
+        {
+          "description": "The request the backend received differs, or the redirect target\nwas rewritten differently.\n\nTwo triggers. The two sides redirected to the same scheme and\nhost but a different *path* -- which is a rewrite of the target,\nnot a difference in whether to redirect. Or the same backend\nanswered both sides with different statuses: an identical\nworkload cannot answer differently unless what reached it\ndiffered, and for an echo backend the only thing that can differ\nis the request line the proxy forwarded.\n\nSee this module's \"What the evidence can and cannot show\" for the\nrewrite this cannot see at all.",
+          "type": "string",
+          "const": "rewrite_behavior_changed"
+        },
+        {
+          "description": "Whether, or how, the request is redirected differs: one side sent\na `Location` and the other did not, or both did to the same place\nwith different status codes (a `301` against a `308` is a\ndifferent instruction to a client about method rewriting and\ncacheability).",
+          "type": "string",
+          "const": "redirect_behavior_changed"
+        },
+        {
+          "description": "The baseline `Ingress` carries an `ingress-nginx` annotation with\nno portable Gateway API equivalent.\n\nThe one kind derived from the manifests rather than from traffic,\nand the only one whose `expected` flag can be `true`. See\n[`NONPORTABLE_INGRESS_ANNOTATIONS`] for the catalog and\n[`nonportable_changes`] for the rule.",
+          "type": "string",
+          "const": "non_portable_feature"
+        }
+      ]
+    },
+    "MigrationChangeDocument": {
+      "description": "One migration behavior change, graded.\n\nCarries no `id`: [`semantic_change_id`] exists because a\n`SemanticChange` appears *twice* in this document (per fixture and\nrun-wide) and the two lists need a join key. A migration change\nappears exactly once, under the case that observed it, so an\nidentifier here would be a key with nothing to join to.",
+      "type": "object",
+      "properties": {
+        "detail": {
+          "description": "What was observed, in full enough detail to check the claim.\nWritten by the Gateway engine and deterministic.",
+          "type": "string"
+        },
+        "expected": {
+          "description": "Whether the case's author declared this difference in writing.\nOnly a `non_portable_feature` change can be `true`.",
+          "type": "boolean"
+        },
+        "kind": {
+          "description": "Which routing behavior moved, in\n`admissionlab_gateway::MigrationBehaviorKind`'s own vocabulary —\ndeliberately *not* a `SemanticChangeKind`.",
+          "$ref": "#/$defs/MigrationBehaviorKind"
+        },
+        "severity": {
+          "description": "How much the run says it matters. Decided by\n`admissionlab_cli::pipeline::migration`, never here.",
+          "$ref": "#/$defs/Severity"
+        }
+      },
+      "required": [
+        "kind",
+        "detail",
+        "expected",
+        "severity"
+      ]
+    },
+    "MigrationComparability": {
+      "description": "Whether one migration case's two sides can be compared at all.\n\nThis module's twin of [`crate::diff::GatewayComparability`]; see this\nmodule's \"An incomparable case\" for the argument, and\n[`MigrationComparability::reason`] for what each variant means in\nprose.\n\nDerives no `Default`, for the reason that type gives:\n`Comparable` is the flattering answer, and defaulting to it would\nturn \"we could not tell\" into \"we looked and it was fine\".",
+      "oneOf": [
+        {
+          "description": "Both sides produced traffic evidence for this case.",
+          "type": "string",
+          "const": "comparable"
+        },
+        {
+          "description": "The API server refused the baseline's own objects, so the legacy\nstack never served this case at all. The candidate's evidence, if\nany, stands on its own -- there is nothing to compare it against.",
+          "type": "string",
+          "const": "baseline_not_admitted"
+        },
+        {
+          "description": "The baseline was admitted but never served the case's probes as\ncontracted within its deadline, so it established no reference\nbehavior. See [`crate::ingress`]'s \"THE FINDING\" for why that is\nmeasured with traffic rather than with a status.",
+          "type": "string",
+          "const": "baseline_not_serving"
+        },
+        {
+          "description": "The baseline served the case and the candidate answered no probe\n-- a route that never reconciled, or a suite that skipped its\nprobes with a reason. What the candidate lost is\n[`crate::diff::diff_gateway`]'s claim to make about the Gateway\nside's own two runs; this comparator has nothing to pair.",
+          "type": "string",
+          "const": "candidate_not_serving"
+        }
+      ]
+    },
+    "MigrationSection": {
+      "description": "What one Ingress-to-Gateway migration case did on both sides\n(ROADMAP Task 8.8).\n\nA sibling of [`FixtureDocument`] rather than a section inside one —\nsee [`crate::model::LabResult::migration`] for the argument, which is\nabout vocabularies rather than about layout.",
+      "type": "object",
+      "properties": {
+        "caseId": {
+          "description": "The migration case both sides are about.",
+          "type": "string"
+        },
+        "changes": {
+          "description": "Every observed difference, in the Gateway engine's own\ndeterministic order, each with the severity the run graded it.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MigrationChangeDocument"
+          }
+        },
+        "comparability": {
+          "description": "Whether the two sides were comparable at all.",
+          "$ref": "#/$defs/MigrationComparability"
+        },
+        "comparabilityReason": {
+          "description": "The same answer in prose —\n`admissionlab_gateway::MigrationComparability::reason`'s own\nwords, carried because \"the variant name alone would leave\n'incomparable' unexplained\" and because a `result.json` is read\nby people as well as by programs.",
+          "type": "string"
+        },
+        "probes": {
+          "description": "Every probe both sides answered, paired by index — the same\npairing, and the same [`ProbeExchange`] shape, the Gateway\ntraffic section uses, because it is the same question asked of a\ndifferently-shaped pair of stacks.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProbeExchange"
+          }
+        },
+        "unmatchedExpectations": {
+          "description": "Non-portable features declared for this case that its baseline\nmanifests do not carry. Reported, never graded — see\n[`crate::model::MigrationCaseComparison::unmatched_expectations`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonPortableExpectationDocument"
+          }
+        }
+      },
+      "required": [
+        "caseId",
+        "comparability",
+        "comparabilityReason",
+        "changes",
+        "probes",
+        "unmatchedExpectations"
+      ]
+    },
+    "NonPortableExpectationDocument": {
+      "description": "One declared non-portability that the baseline manifests do not\nactually carry.\n\nA projection rather than the configuration type itself:\n`admissionlab_spec::NonPortableFeatureExpectation` derives\n`Deserialize` (a user writes it) and not `Serialize`, and this\ndocument owns its own `camelCase` keys — see this module's \"Casing\".",
+      "type": "object",
+      "properties": {
+        "feature": {
+          "description": "The feature the case declared, verbatim.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "The author's written justification, verbatim.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feature",
+        "reason"
+      ]
+    },
+    "ObservedCondition": {
+      "description": "One condition as a controller published it, normalized.\n\nNo `Default`, and no way to build a \"blank\" one except\n[`ObservedCondition::missing`], which is explicit about what it\nmeans. This mirrors `admissionlab_admission::trace::TraceEvidence`'s\nown rule: an evidence type with a `Default` is an evidence type that\ncan be fabricated by accident.",
+      "type": "object",
+      "properties": {
+        "observedGeneration": {
+          "description": "The `metadata.generation` this condition was set based upon.\n`None` when the condition is missing, or when the controller\npublished none -- never fabricated as the object's current\ngeneration, which would silently turn every unfresh status into a\nfresh-looking one.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "int64"
+        },
+        "reason": {
+          "description": "The condition's `reason`, a `CamelCase` token from the API's own\nclosed set. `None` when the condition is missing, or when it was\npublished without one. See this module's documentation for why\n`reason` is kept and `message` is not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "description": "What the controller said, or [`ConditionState::Missing`] if it\nsaid nothing.",
+          "$ref": "#/$defs/ConditionState"
+        },
+        "typeName": {
+          "description": "The condition's `type`, verbatim (for example `\"Accepted\"`).",
+          "type": "string"
+        }
+      },
+      "required": [
+        "typeName",
+        "state"
+      ]
+    },
+    "ParentIdentity": {
+      "description": "Which parent a route's status entry is about, as the *status* names\nit: §1.2's canonical parent identity.\n\nDistinct from [`GatewayIdentity`] on purpose. A `GatewayIdentity`\nnames an existing, namespaced object. A `ParentIdentity` is a\n`ParentReference` as written, where Gateway API defines an absent\n`namespace` to mean \"the route's own namespace\" -- so `None` here is\na real, meaningful value rather than missing data.\n[`RouteEvidence::parent_for`] is what resolves that default, using\nthe route's namespace, rather than treating an absent namespace as a\nwildcard that matches anything.\n\n`group` and `kind` (also part of a `ParentReference`) are not carried:\n§1.2 fixes this type's three fields, and a\n[`crate::model::RouteContract`] identifies its parent as a `Gateway`\nby construction, so there is nothing for them to disambiguate here.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "description": "The parent's name.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "The parent's namespace as written in `parentRef`, or `None` if\nthe reference omitted it (meaning the route's own namespace).",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sectionName": {
+          "description": "The listener within the parent this entry is about\n(`parentRef.sectionName`), or `None` if the reference named no\nparticular listener.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "PolicyDisposition": {
+      "description": "A run's overall verdict.\n\nDecided by the *unexpected* changes alone:\n\n- any unexpected [`Severity::Critical`] change => [`Fail`](Self::Fail);\n- otherwise any unexpected [`Severity::Warning`] change =>\n  [`Warn`](Self::Warn);\n- otherwise [`Pass`](Self::Pass) -- including a run whose only\n  changes are [`Severity::Info`], and a run whose only critical\n  changes were explicitly expected.\n\nStale expectations deliberately do not enter into it. A stale entry\nis a statement about the *configuration*, not about the compared\nstacks, and folding it in would make `Warn` mean two unrelated things\nat once -- a user could not tell \"the candidate changed behavior\"\nfrom \"somebody's expectations file needs tidying\". It is reported\nalongside the disposition ([`PolicyResult::stale_expectations`]) so a\nrenderer or a CI job can still act on it.\n\nEach wire tag is pinned with an explicit `#[serde(rename)]`: these\nstrings go into JSON reports and are what CI jobs will branch on.\n[`Serialize`] only, for the same reason as [`ClassifiedChange`].",
+      "oneOf": [
+        {
+          "description": "Nothing unexpected worth acting on.",
+          "type": "string",
+          "const": "pass"
+        },
+        {
+          "description": "Unexpected differences a human should look at, none critical.",
+          "type": "string",
+          "const": "warn"
+        },
+        {
+          "description": "At least one unexpected critical difference.",
+          "type": "string",
+          "const": "fail"
+        }
+      ]
+    },
+    "PolicyDocument": {
+      "description": "The run's verdict and every graded change.",
+      "type": "object",
+      "properties": {
+        "changes": {
+          "description": "Every graded change in the run, in `admissionlab-policy`'s\ndeterministic order.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ChangeDocument"
+          }
+        },
+        "disposition": {
+          "description": "Pass, warn, or fail.",
+          "$ref": "#/$defs/PolicyDisposition"
+        },
+        "staleExpectations": {
+          "description": "Expectations that matched nothing this run.\n\nSpelled `staleExpectations` rather than `stale_expectations`:\nthis document is this crate's, and the freeze made its own keys\nuniformly `camelCase` (see this module's \"Casing\"). The change\nis safe precisely because it happens *at* the version bump.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/StaleExpectation"
+          }
+        }
+      },
+      "required": [
+        "disposition",
+        "changes",
+        "staleExpectations"
+      ]
+    },
+    "ProbeExchange": {
+      "description": "One probe, answered by both sides.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "What the baseline stack's data plane returned.",
+          "$ref": "#/$defs/HttpProbeResult"
+        },
+        "candidate": {
+          "description": "What the candidate stack's data plane returned for the same\nprobe.",
+          "$ref": "#/$defs/HttpProbeResult"
+        },
+        "index": {
+          "description": "The probe's position in the route contract's declared probe\nlist, which is what pairs the two sides.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "index",
+        "baseline",
+        "candidate"
+      ]
+    },
+    "ReconciliationEvidence": {
+      "description": "Everything observed while waiting for one route to reconcile.\n\n`Serialize` only, never `Deserialize`, for the reason\n`admissionlab_admission::AdmissionOutcome` documents: `diagnostics`\nholds [`Diagnostic`], which `admissionlab-core` deliberately\nimplements `Serialize` but not `Deserialize` for, and this evidence\nis captured once from a live cluster and only ever serialized\noutward.\n\nNo `Default`: an evidence type with one can be fabricated by\naccident.",
+      "type": "object",
+      "properties": {
+        "converged": {
+          "description": "Whether the convergence rule was satisfied. `false` at a timeout\n-- and `true` for a route the implementation settled on\n*rejecting*. See this module's documentation.",
+          "type": "boolean"
+        },
+        "diagnostics": {
+          "description": "What was noteworthy about this wait: a timeout, an absent or\nambiguous parent, a stale status, a missing `GatewayClass`.\nEmpty when the route converged cleanly.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Diagnostic"
+          }
+        },
+        "elapsed": {
+          "description": "Wall-clock time from the first poll to the last, measured with\n[`Instant`] so it is monotonic.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "gateway": {
+          "description": "The `Gateway` under contract, as last observed.",
+          "$ref": "#/$defs/GatewayEvidence"
+        },
+        "gatewayClass": {
+          "description": "The `GatewayClass` the `Gateway` named, if it named one and that\nclass exists. `None` covers both \"the Gateway declared no\n`spec.gatewayClassName`\" and \"it named one that is not on the\ncluster\" -- the second also raises a\n[`DIAGNOSTIC_GATEWAY_CLASS_ABSENT`] diagnostic, which is how the\ntwo stay distinguishable.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GatewayClassEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "route": {
+          "description": "The `HTTPRoute` under contract, as last observed.",
+          "$ref": "#/$defs/RouteEvidence"
+        }
+      },
+      "required": [
+        "gateway",
+        "route",
+        "elapsed",
+        "converged",
+        "diagnostics"
+      ]
+    },
+    "ReconciliationSection": {
+      "description": "What both sides' controllers did with one Gateway route contract.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The baseline side's observed conditions, verbatim.",
+          "$ref": "#/$defs/ReconciliationEvidence"
+        },
+        "candidate": {
+          "description": "The candidate side's observed conditions, verbatim.",
+          "$ref": "#/$defs/ReconciliationEvidence"
+        },
+        "comparability": {
+          "description": "How comparable the two sides' reconciliation evidence is --\n`admissionlab_gateway::gateway_comparability`'s answer.",
+          "$ref": "#/$defs/GatewayComparability"
+        },
+        "contractId": {
+          "description": "The route contract both sides are about.",
+          "type": "string"
+        },
+        "evidenceLevel": {
+          "description": "Each side's own evidence level, stated separately from\n[`Self::comparability`] because `comparable` carries neither\nside's level in its own payload.",
+          "$ref": "#/$defs/SideEvidenceLevel"
+        }
+      },
+      "required": [
+        "contractId",
+        "comparability",
+        "evidenceLevel",
+        "baseline",
+        "candidate"
+      ]
+    },
+    "RouteEvidence": {
+      "description": "What was observed about one `HTTPRoute`.",
+      "type": "object",
+      "properties": {
+        "generation": {
+          "description": "The route's `metadata.generation` at the moment it was read.",
+          "type": "integer",
+          "format": "int64"
+        },
+        "name": {
+          "description": "The route's name.",
+          "type": "string"
+        },
+        "namespace": {
+          "description": "The route's namespace.",
+          "type": "string"
+        },
+        "parents": {
+          "description": "One entry per parent the controller processed, in the order the\nstatus listed them.\n\nA `Vec`, not a map: two entries can share a parent name and\ndiffer only by `sectionName`, and a route that has never been\nreconciled has no entries at all (see\n`testdata/objects/gateway-status/httproute-no-status.yaml`).\nOrder is preserved rather than sorted so this stays a faithful\nrecord of what was read; nothing in this crate depends on it.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteParentStatus"
+          }
+        }
+      },
+      "required": [
+        "namespace",
+        "name",
+        "generation",
+        "parents"
+      ]
+    },
+    "RouteParentStatus": {
+      "description": "One entry of a route's `status.parents`: what one controller said\nabout this route's attachment to one parent.",
+      "type": "object",
+      "properties": {
+        "conditions": {
+          "description": "Every condition in this entry, keyed by condition type -- so\nlookup never depends on list order (Step 1).",
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/ObservedCondition"
+          }
+        },
+        "controllerName": {
+          "description": "The `controllerName` that wrote this entry (for example\n`\"istio.io/gateway-controller\"`), or `None` if the entry carried\nnone.\n\nRecorded but never matched on: which controller answered is\nexactly the kind of thing that legitimately differs between a\nbaseline and a candidate stack, so filtering by it would make\nthis crate unable to observe the migration Phase 7 exists for.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent": {
+          "description": "Which parent (and which of its listeners) this entry is about.",
+          "$ref": "#/$defs/ParentIdentity"
+        }
+      },
+      "required": [
+        "parent",
+        "conditions"
+      ]
+    },
+    "RunSummary": {
+      "description": "How many fixtures landed in each of the five buckets.\n\nThe five counts partition the run: they always sum to\n`fixtures_total`, because [`FixtureComparison::bucket`] assigns every\nfixture exactly one bucket. See that method for the precedence rule.\n\nDerives no `Default`: a summary of nothing is not a meaningful value,\nand [`RunSummary::from_fixtures`] on an empty slice already spells\n\"an empty run\" honestly.",
+      "type": "object",
+      "properties": {
+        "critical": {
+          "description": "Fixtures carrying at least one unexpected `critical` change.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "expected": {
+          "description": "Fixtures whose differences were all accounted for -- see\n[`FixtureBucket::Expected`] for exactly what \"accounted for\"\ncovers.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "fixturesTotal": {
+          "description": "How many fixtures the run replayed. Equals the sum of the other\nfive fields.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "identical": {
+          "description": "Fixtures whose two sides were comparable and produced no\nbehavior change at all.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "inconclusive": {
+          "description": "Fixtures whose evidence does not support a comparison at all.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        },
+        "warnings": {
+          "description": "Fixtures carrying at least one unexpected `warning` change.",
+          "type": "integer",
+          "format": "uint",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "fixturesTotal",
+        "identical",
+        "expected",
+        "warnings",
+        "critical",
+        "inconclusive"
+      ]
+    },
+    "SemanticChange": {
+      "description": "One claimed behavior difference between the baseline and candidate\nstacks for one fixture.\n\nImplements [`Serialize`] only, never [`Deserialize`] -- the same\nasymmetry, for the same reason, as\n`admissionlab_admission::outcome::AdmissionOutcome`: `fixture_id` is\nan `admissionlab_core::FixtureId`, which that crate deliberately\nimplements neither trait for, and a `SemanticChange` is only ever\nproduced by a comparison in this crate and serialized *outward* into a\nreport. Nothing reads one back in. (Its `kind` *is* readable, because\nuser-authored expectation files name kinds; see\n[`SemanticChangeKind`].)",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The baseline side's value, as JSON. `None` means the baseline had\nno value here (for example an added container), never that the\nvalue was not captured."
+        },
+        "candidate": {
+          "description": "The candidate side's value, as JSON. `None` means the candidate\nhad no value here (for example a removed container), never that\nthe value was not captured."
+        },
+        "fixture_id": {
+          "description": "Which fixture the difference was observed for. Both compared\nsides always describe the same fixture; the caller pairs them.",
+          "type": "string"
+        },
+        "kind": {
+          "description": "What kind of difference this is.",
+          "$ref": "#/$defs/SemanticChangeKind"
+        },
+        "object_path": {
+          "description": "An RFC 6901 JSON pointer into the compared object, when the\ndifference has one specific location (for example\n`/spec/containers/0/image`). `None` for differences that are not\nabout a field of the object at all, such as a whole-request\ndecision flip.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "origin": {
+          "description": "Where in the webhook chain this difference first became visible,\nwhen that could be attributed. `None` means attribution was not\nattempted or not possible for this change -- it never means \"no\ndivergence occurred\". Filled in by Task 4.7.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DivergenceEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "subject": {
+          "description": "The named thing the difference is about, when there is one -- a\ncontainer name, a webhook name. `None` when the difference is not\nscoped to a named subject. This is the value\n`admissionlab_policy`'s `ChangeSelector::subject` matches\nagainst.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "fixture_id"
+      ]
+    },
+    "SemanticChangeKind": {
+      "description": "What kind of behavior difference a [`SemanticChange`] claims.\n\nSeventeen variants are the complete Alpha (admission) set and nine\nmore are Phase 6's Gateway set. Their wire strings\nare human-oriented `snake_case` and are **not** mechanically derived\nfrom the Rust identifiers -- four of them differ deliberately\n(`ObjectNewlyDenied` serializes as `newly_denied`, `ObjectNewlyAllowed`\nas `newly_allowed`), which is exactly why every variant carries an\nexplicit `#[serde(rename)]`: a reader of this enum must never have to\nwork out which names are derived and which are pinned.\n\nDerives no `Default`. There is no such thing as a default kind of\nbehavior change; a value of this type only ever exists because a\ncomparison concluded something specific.\n\n[`Deserialize`] is derived (unlike [`SemanticChange`] itself, which is\nemit-only) because Task 4.9's `ExpectedChange::kind` is read back out\nof a user-authored `expectations.yaml`.",
+      "oneOf": [
+        {
+          "description": "The baseline admitted the object and the candidate rejected it.",
+          "type": "string",
+          "const": "newly_denied"
+        },
+        {
+          "description": "The baseline rejected the object and the candidate admitted it.",
+          "type": "string",
+          "const": "newly_allowed"
+        },
+        {
+          "description": "A container present only in the candidate's admitted object.",
+          "type": "string",
+          "const": "container_added"
+        },
+        {
+          "description": "A container present only in the baseline's admitted object.",
+          "type": "string",
+          "const": "container_removed"
+        },
+        {
+          "description": "An init container present only in the candidate's admitted object.",
+          "type": "string",
+          "const": "init_container_added"
+        },
+        {
+          "description": "An init container present only in the baseline's admitted object.",
+          "type": "string",
+          "const": "init_container_removed"
+        },
+        {
+          "description": "A volume present only in the candidate's admitted object.",
+          "type": "string",
+          "const": "volume_added"
+        },
+        {
+          "description": "A volume present only in the baseline's admitted object.",
+          "type": "string",
+          "const": "volume_removed"
+        },
+        {
+          "description": "A container's volume mounts differ between the two sides.",
+          "type": "string",
+          "const": "volume_mount_changed"
+        },
+        {
+          "description": "A container's environment differs between the two sides.",
+          "type": "string",
+          "const": "environment_changed"
+        },
+        {
+          "description": "A container image differs between the two sides.",
+          "type": "string",
+          "const": "image_changed"
+        },
+        {
+          "description": "The admitted object's service account differs between the two\nsides.",
+          "type": "string",
+          "const": "service_account_changed"
+        },
+        {
+          "description": "A pod- or container-level security context differs between the\ntwo sides.",
+          "type": "string",
+          "const": "security_context_changed"
+        },
+        {
+          "description": "A container's resource requests or limits differ between the two\nsides.",
+          "type": "string",
+          "const": "resource_requirement_changed"
+        },
+        {
+          "description": "A webhook that was observed to fail on one side and not the\nother.",
+          "type": "string",
+          "const": "webhook_failed"
+        },
+        {
+          "description": "The observed set or ordering of webhook invocations differs\nbetween the two sides.",
+          "type": "string",
+          "const": "webhook_invocation_changed"
+        },
+        {
+          "description": "An observed per-webhook latency differs between the two sides by\nmore than the configured latency policy allows.",
+          "type": "string",
+          "const": "webhook_latency_changed"
+        },
+        {
+          "description": "An `HTTPRoute` is attached to a parent `Gateway` on the candidate\nside that it was not attached to on the baseline side -- the\nparent appears in the candidate's `status.parents` and not in the\nbaseline's.",
+          "type": "string",
+          "const": "route_attached"
+        },
+        {
+          "description": "An `HTTPRoute` is no longer attached to a parent `Gateway` it was\nattached to on the baseline side.",
+          "type": "string",
+          "const": "route_detached"
+        },
+        {
+          "description": "Whether a route's backend references resolve changed between the\ntwo sides: exactly one side published `ResolvedRefs: True`.",
+          "type": "string",
+          "const": "backend_resolution_changed"
+        },
+        {
+          "description": "A route is attached to the same parent `Gateway` through a\ndifferent set of listeners (`parentRef.sectionName`).",
+          "type": "string",
+          "const": "listener_binding_changed"
+        },
+        {
+          "description": "An `Accepted` condition's state differs between the two sides, on\na `GatewayClass`, a `Gateway`, or one of a route's parent status\nentries.",
+          "type": "string",
+          "const": "accepted_condition_changed"
+        },
+        {
+          "description": "A route parent's `ResolvedRefs` condition state differs between\nthe two sides.",
+          "type": "string",
+          "const": "resolved_refs_condition_changed"
+        },
+        {
+          "description": "A `Gateway`'s `Programmed` condition state differs between the\ntwo sides.",
+          "type": "string",
+          "const": "programmed_condition_changed"
+        },
+        {
+          "description": "The HTTP status one probe received through the data plane differs\nbetween the two sides, or the candidate returned no answer at all\nfor a probe the baseline answered.",
+          "type": "string",
+          "const": "traffic_status_changed"
+        },
+        {
+          "description": "The same probe reached a different backend workload on the two\nsides, as each backend identified itself.",
+          "type": "string",
+          "const": "traffic_backend_changed"
+        }
+      ]
+    },
+    "Severity": {
+      "description": "How bad one behavior change is.\n\nOrdered `Info < Warning < Critical` -- the derived [`Ord`] follows\ndeclaration order, and [`crate::evaluate`] relies on it to pick the\nworst unexpected change in a run. Keep the variants in this order.\n\nDerives no `Default`. There is no neutral severity: every value of\nthis type exists because [`default_severity`] or an explicit\n`policy.overrides` entry said something specific, and a `Default`\nimpl would let a future refactor silently grade an unclassified\nchange as whichever variant happened to be first.\n\n[`Serialize`] only, never [`serde::Deserialize`]. A severity reaches\na report outward (as the pinned lowercase names below) but is never\nread back in that way: the one place a user *writes* a severity is\n`PolicyOverrideSpec::severity`, which is a `String` in the\nconfiguration model and is parsed here by [`Severity::from_name`] --\nwhich can name the file location and list the valid spellings in its\nerror, where a serde failure could only say \"unknown variant\".\n\nEach wire tag is pinned with an explicit `#[serde(rename)]` rather\nthan derived from the Rust identifier, matching\n[`SemanticChangeKind`]'s own discipline: these strings appear in JSON\nreports and in hand-written `policy.overrides` entries, so renaming a\nRust variant must never silently change them.",
+      "oneOf": [
+        {
+          "description": "A real difference that is not, on its own, evidence of a problem.",
+          "type": "string",
+          "const": "info"
+        },
+        {
+          "description": "A difference a human should look at before shipping.",
+          "type": "string",
+          "const": "warning"
+        },
+        {
+          "description": "A difference that fails the run unless it was explicitly\nexpected.",
+          "type": "string",
+          "const": "critical"
+        }
+      ]
+    },
+    "SideEvidenceLevel": {
+      "description": "Each side's own Gateway evidence level.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The baseline side's own evidence level.",
+          "$ref": "#/$defs/GatewayEvidenceLevel"
+        },
+        "candidate": {
+          "description": "The candidate side's own evidence level.",
+          "$ref": "#/$defs/GatewayEvidenceLevel"
+        }
+      },
+      "required": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    "SideInstallTiming": {
+      "description": "One side's stack installation.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "One entry per component, in install order.\n\nThree distinguishable states, deliberately: absent means this side\nnever reported a breakdown (its install failed before it could),\n`[]` means it installed successfully with no components at all —\na bare cluster is a legitimate side — and a non-empty list is the\nbreakdown. Collapsing the first two into `[]` would state that a\nfailed install installed nothing, which is usually false.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/ComponentTiming"
+          }
+        },
+        "elapsedMs": {
+          "description": "How long this side's whole stack took to install and become\nready.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "elapsedMs"
+      ]
+    },
+    "SideStage": {
+      "description": "A stage both sides run concurrently: the pair's wall-clock, plus each\nside's own.\n\nThe wall-clock is not the sum and not the maximum of the two sides —\nit is what a caller waiting on both actually waited. It is usually a\nlittle above the slower side (the join's own overhead) and is the\nnumber that belongs in \"the run spent this long here\".",
+      "type": "object",
+      "properties": {
+        "baselineMs": {
+          "description": "The baseline side's own duration, when that side ran.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "candidateMs": {
+          "description": "The candidate side's own duration, when that side ran.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "wallMs": {
+          "description": "How long the caller waited for both sides together.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "wallMs"
+      ]
+    },
+    "SideTraceEvidence": {
+      "description": "Each side's webhook-chain trace completeness.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "The baseline side's own trace evidence level.",
+          "$ref": "#/$defs/TraceEvidence"
+        },
+        "candidate": {
+          "description": "The candidate side's own trace evidence level.",
+          "$ref": "#/$defs/TraceEvidence"
+        }
+      },
+      "required": [
+        "baseline",
+        "candidate"
+      ]
+    },
+    "StageTimings": {
+      "description": "How long each stage of one run took.\n\nProduced by [`TimingRecorder::snapshot`]. Every stage is optional and\nan absent one is omitted entirely — see this module's documentation\nfor why that is a correctness requirement rather than a formatting\npreference.\n\nWire names are pinned literals in `camelCase`, and every duration is\nserialized as whole milliseconds under a key that says so\n(`...Ms`). Milliseconds because that is the resolution at which every\nnumber here is meaningful: the fastest stage a run has (semantic\ncomparison) is budgeted in hundreds of milliseconds, and the slowest\n(cluster creation) in tens of seconds, so sub-millisecond precision\nwould be noise printed to four extra digits.",
+      "type": "object",
+      "properties": {
+        "cleanup": {
+          "description": "Deleting both clusters. Absent for a `--keep-clusters` run, which\ndeletes nothing, and absent from a `result.json` for the same\nreason `reportingMs` is.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SideStage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "clusterCreation": {
+          "description": "Creating both ephemeral clusters.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SideStage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "comparisonMs": {
+          "description": "Normalizing both sides' evidence, diffing it, attributing the\nfirst divergence, grading it against the policy and the\nexpectations, and assembling the result — exactly the stretch\n[`crate::run_manifest::RunStage::Comparison`] covers.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "elapsedMs": {
+          "description": "Wall-clock from the moment this run started being timed to the\nmoment this snapshot was taken.\n\nAlways present, and never the sum of the stages above: it also\ncovers loading and validating the configuration, hashing the\ninputs, probing the host, and every gap between stages. The\ndifference between this and the stages' sum is itself the useful\nnumber when it grows.",
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "fixtureCapture": {
+          "description": "Replaying the fixture corpus through both sides.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CaptureStage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "gatewaySuite": {
+          "description": "Applying the Gateway suite to both sides, observing every route's\nreconciliation, and sending or skipping every traffic probe\n(ROADMAP Task 6.11).\n\nAbsent — the key omitted entirely — for a lab with no `gateway:`\nsection, which never runs the stage. That is the same rule every\nother field here follows and the reason it is optional: an\nadmission-only run has no Gateway stage that took zero time, it\nhas none at all.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SideStage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "installation": {
+          "description": "Installing both sides' component stacks, per side and per\ncomponent.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstallStage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reportingMs": {
+          "description": "Redacting the result once and rendering and writing every view of\nit.\n\nStructurally absent from a `result.json`, which is one of the\nfiles this stage writes — see this module's documentation.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "elapsedMs"
+      ]
+    },
+    "StaleExpectation": {
+      "description": "An expectation that matched nothing in this run.\n\nSurfaced so a stale entry in an `expectations.yaml` is visible rather\nthan silently harmless: an expectation written for a regression that\nhas since been fixed keeps suppressing nothing, and the only way a\nuser finds out is if the tool says so.\n\nProduced by [`crate::match_expectations`]; declared here rather than\nin [`crate::expectation`] because it is a *result* type,\n[`PolicyResult`]'s frozen shape carries it, and Task 4.8 needed it\nbefore expectations existed.\n\nDerives no `Default`, and its `reason` is required: a stale\nexpectation with no account of what did not happen is not usable\nevidence.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "description": "The `id` of the expectation that matched nothing.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why it is stale -- what did not happen, in the run's own terms.\n\n**Not** the expectation's own `reason` field (the human\njustification for why the change was expected). That one explains\nwhy the author wrote the entry; this one explains why it did not\napply. `id` is how a reader gets back to the original.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "reason"
+      ]
+    },
+    "TraceEvidence": {
+      "description": "How completely [`AdmissionTrace::invocations`] reflects what actually\nhappened.\n\nEvery value carries **no** `Default`, this type derives no `Default`,\nand no field holding it may carry `#[serde(default)]`: the one\nconcrete way that \"unknown\" can quietly become a fabricated fact here\nis a caller (or an evolving JSON payload) omitting this field and\nsomething silently filling in a plausible-looking value. Because\n`Observed` is (deliberately) the variant a developer would write\nfirst, an accidental `Default` derivation would default to it -- the\nsingle most dangerous collapse this type exists to prevent, since it\nwould claim the admission chain was watched when it was not\n(controller supplement §1, Task 3.3). Deserializing any document that\nomits this field must fail; see `tests/model.rs`'s\n`deserializing_admission_trace_without_evidence_fails` for the test\nthat pins this, and its own doc comment for how it was mutation-\ntested.\n\nEach variant's wire tag is pinned with an explicit `#[serde(rename)]`\nrather than left to derive from the Rust identifier (controller\nsupplement §5): Phase 4 and the JSON report contract depend on these\nexact strings never drifting.",
+      "oneOf": [
+        {
+          "description": "The full webhook chain was watched; `invocations` is believed\ncomplete.",
+          "type": "string",
+          "const": "observed"
+        },
+        {
+          "description": "Some, but not all, of the webhook chain was watched; `invocations`\nmay be missing entries.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "No usable evidence of the webhook chain was available;\n`invocations` should be treated as empty regardless of its actual\nlength.",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "TrafficEvidence": {
+      "description": "Whether a route contract's traffic evidence supports a comparison.\n\nThe Gateway data plane's counterpart of\n`admissionlab_admission::TraceEvidence`, and named with the same\nthree words for the same reason: an empty [`TrafficSection::pairs`]\nhas two completely different meanings and the document must say\nwhich one this is.",
+      "oneOf": [
+        {
+          "description": "Both sides answered at least one probe.",
+          "type": "string",
+          "const": "observed"
+        },
+        {
+          "description": "Exactly one side answered any probe. Its results are real\nevidence about that side; nothing here compares the two.",
+          "type": "string",
+          "const": "partial"
+        },
+        {
+          "description": "Neither side answered a probe -- the route contract declared\nnone, or the probes never ran. Never \"both data planes behaved\nthe same\".",
+          "type": "string",
+          "const": "unavailable"
+        }
+      ]
+    },
+    "TrafficSection": {
+      "description": "What both sides' data planes returned for one route contract's\nprobes.",
+      "type": "object",
+      "properties": {
+        "contractId": {
+          "description": "The route contract these probes belong to.",
+          "type": "string"
+        },
+        "evidence": {
+          "description": "Whether probe evidence exists on both sides, one, or neither.",
+          "$ref": "#/$defs/TrafficEvidence"
+        },
+        "pairs": {
+          "description": "Every probe both sides answered, paired by index -- the pairing\n`admissionlab_gateway::diff` itself uses, because a suite sends\nits probes in declaration order on both sides.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ProbeExchange"
+          }
+        },
+        "unpairedBaseline": {
+          "description": "Baseline probes with no candidate counterpart.\n\nCarried rather than dropped, and carried *here* rather than\nfolded into [`Self::pairs`] with a fabricated other half: a\none-sided probe is real evidence about one side and no evidence\nat all about the other.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HttpProbeResult"
+          }
+        },
+        "unpairedCandidate": {
+          "description": "Candidate probes with no baseline counterpart.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HttpProbeResult"
+          }
+        }
+      },
+      "required": [
+        "contractId",
+        "evidence",
+        "pairs",
+        "unpairedBaseline",
+        "unpairedCandidate"
+      ]
+    },
+    "WebhookInvocation": {
+      "description": "One webhook's observed participation in one admission round.",
+      "type": "object",
+      "properties": {
+        "configuration": {
+          "description": "The name of the `ValidatingWebhookConfiguration` or\n`MutatingWebhookConfiguration` this webhook belongs to.",
+          "type": "string"
+        },
+        "index": {
+          "description": "This invocation's position among webhooks invoked within `round`\n(zero-based).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "latency": {
+          "description": "How long this webhook call took to respond, when it was measured.\n`None` -- never a fabricated `0` -- means the duration was not\nmeasured or could not be attributed to this specific invocation;\na zero here would read as \"instantaneous,\" which Phase 4's\nlatency comparison would then treat as a real (and false)\nimprovement (controller supplement §1, Task 3.3).",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "mutated": {
+          "description": "Whether this webhook's response carried a JSON Patch that changed\nthe object. `None` means the evidence could not establish\nwhether it mutated -- this is never collapsed to `Some(false)`:\ndoing so would fabricate \"it did not mutate\" for a webhook this\nproject could not actually observe, which is precisely the\nbehavioural gap this product exists to detect (controller\nsupplement §1, Task 3.3).",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
+        "outcome": {
+          "description": "What this webhook was observed to do with the request.",
+          "$ref": "#/$defs/WebhookOutcome"
+        },
+        "patch": {
+          "description": "The JSON Patch this webhook's response carried, when one was\nobserved. `None` covers both \"this webhook did not mutate\" and\n\"whether it mutated is unknown\" -- a caller must consult\n`mutated` to tell those apart; `patch` alone never distinguishes\nthem.",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": true
+        },
+        "round": {
+          "description": "Which admission round this invocation ran in (zero-based:\nmutating webhooks can run in more than one round as each mutates\nthe object further).",
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "webhook": {
+          "description": "This webhook's own name within `configuration`.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "configuration",
+        "webhook",
+        "round",
+        "index",
+        "outcome"
+      ]
+    },
+    "WebhookOutcome": {
+      "description": "What one webhook, in one round, was observed to do with the request.\n\nThis is the *webhook's* own result, distinct from\n[`crate::outcome::AdmissionDecision`], which is the API server's\nfinal verdict after every webhook in every round has run. Carries no\n`Default` and no `#[serde(default)]`-eligible field for the same\nreason [`TraceEvidence`] does not: a missing `outcome` must never be\nread as a webhook having quietly succeeded (controller supplement §2,\nTask 3.3 -- \"do not let a missing outcome default to success\").\n\nFour variants, not three: `Allowed`/`Denied` are the two decisions a\nwebhook that actually ran and responded can reach; `Errored` is a\nwebhook call that failed outright (timeout, connection refused, a\nmalformed response) -- which is not the same fact as `Denied` and\nmust stay distinguishable from it, since `failurePolicy: Ignore`\ntreats an error as \"allow\" while `Fail` treats it as \"deny\", and later\ntasks (3.6, 3.7) need to tell that apart from the underlying evidence,\nnot this type. `Unknown` is the explicit \"the evidence could not tell\nus\" case Global Constraint 15 requires: it is a fourth, distinct\nvalue, never a fallback encoded by omission or by collapsing onto one\nof the other three.",
+      "oneOf": [
+        {
+          "description": "The webhook ran, responded, and allowed the request to proceed\n(`response.allowed: true`).",
+          "type": "string",
+          "const": "allowed"
+        },
+        {
+          "description": "The webhook ran, responded, and denied the request\n(`response.allowed: false`).",
+          "type": "string",
+          "const": "denied"
+        },
+        {
+          "description": "The webhook call itself failed (timeout, connection error, or an\notherwise unusable response) rather than reaching a normal\nallow/deny verdict.",
+          "type": "string",
+          "const": "errored"
+        },
+        {
+          "description": "The evidence available could not establish which of the above\nhappened.",
+          "type": "string",
+          "const": "unknown"
+        }
+      ]
+    }
+  }
+}

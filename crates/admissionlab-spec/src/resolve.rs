@@ -3,12 +3,13 @@
 //!
 //! # One resolver, every version
 //!
-//! [`resolve_beta_lab`] is the only implementation. A `v1beta1` document
-//! reaches it directly from [`crate::load_any_supported_lab`]; a
-//! `v1alpha1` document reaches it through
-//! [`crate::migrate_v1alpha1_to_v1beta1`] first, whether it arrived via
-//! that same loader or via [`resolve_lab`]'s [`LoadedLab`]. Nothing here
-//! branches on a version, and [`ResolvedLab`] records none — see its own
+//! [`resolve_v1_lab`] is the only implementation. An `admissionlab.io/v1`
+//! document reaches it directly from [`crate::load_any_supported_lab`]; a
+//! `v1beta1` document reaches it through
+//! [`crate::migrate_v1beta1_to_v1`] and a `v1alpha1` document through
+//! both migrations in turn, whether they arrived via that same loader or
+//! via [`resolve_lab`]'s [`LoadedLab`]. Nothing here branches on a
+//! version, and [`ResolvedLab`] records none — see its own
 //! "Version-independent by construction".
 //!
 //! # Path resolution: always relative to the configuration file, never the
@@ -43,13 +44,13 @@ use globset::Glob;
 
 use crate::component::{self, ResolvedComponent};
 use crate::error::SpecError;
-use crate::migrate::migrate_v1alpha1_to_v1beta1;
+use crate::migrate::{migrate_v1alpha1_to_v1beta1, migrate_v1beta1_to_v1};
 use crate::model::{
     EnvironmentSpec, FixtureSelectionSpec, GatewaySuiteSpec, MigrationCaseSpec, MigrationSuiteSpec,
     PolicySpec,
 };
+use crate::v1::V1Lab;
 use crate::v1alpha1::V1Alpha1Lab;
-use crate::v1beta1::V1Beta1Lab;
 use crate::validate;
 
 /// A [`V1Alpha1Lab`] freshly parsed from a configuration file, paired
@@ -83,7 +84,7 @@ pub struct LoadedLab {
 ///
 /// This type carries no `apiVersion` and no version marker of any kind,
 /// and that is a design commitment rather than an omission. Every
-/// supported document version is migrated to [`V1Beta1Lab`] *before*
+/// supported document version is migrated to [`V1Lab`] *before*
 /// resolution (see [`crate::load_any_supported_lab`] and `migrate.rs`),
 /// so there is exactly one resolver, one resolved shape, and one thing
 /// for the whole workspace above this crate to consume. Adding a version
@@ -103,7 +104,7 @@ pub struct LoadedLab {
 /// 8.3; each is `Some` exactly when the document has the corresponding
 /// top-level section. A `v1alpha1` document always resolves to
 /// `migration: None`, because that version has no `migration:` key at
-/// all — see [`crate::V1Beta1Lab::migration`].
+/// all — see [`crate::V1Lab::migration`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedLab {
     /// The path this configuration was loaded from, exactly as
@@ -197,7 +198,9 @@ pub fn resolve_lab(loaded: LoadedLab) -> Result<ResolvedLab, SpecError> {
     // "Version-independent by construction".
     let beta = migrate_v1alpha1_to_v1beta1(raw)
         .map_err(|error| SpecError::validation(&source_path, "apiVersion", error))?;
-    resolve_beta_lab(source_path, beta)
+    let stable = migrate_v1beta1_to_v1(beta)
+        .map_err(|error| SpecError::validation(&source_path, "apiVersion", error))?;
+    resolve_v1_lab(source_path, stable)
 }
 
 /// Validates and resolves a current-version document — the single
@@ -211,10 +214,7 @@ pub fn resolve_lab(loaded: LoadedLab) -> Result<ResolvedLab, SpecError> {
 /// # Errors
 ///
 /// See [`resolve_lab`], whose documented failures are all raised here.
-pub(crate) fn resolve_beta_lab(
-    source_path: PathBuf,
-    raw: V1Beta1Lab,
-) -> Result<ResolvedLab, SpecError> {
+pub(crate) fn resolve_v1_lab(source_path: PathBuf, raw: V1Lab) -> Result<ResolvedLab, SpecError> {
     let config_dir = config_directory(&source_path);
 
     let baseline = resolve_environment("baseline", &raw.baseline, &config_dir, &source_path)?;

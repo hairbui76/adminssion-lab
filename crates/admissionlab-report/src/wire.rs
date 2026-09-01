@@ -1,9 +1,10 @@
-//! The frozen `admissionlab.io/result/v1beta1` result document.
+//! The frozen `admissionlab.io/result/v1` result document.
 //!
-//! ROADMAP Task 7.2 freezes the machine-readable result. This module is
+//! ROADMAP Task 7.2 froze the machine-readable result and Task 9.1
+//! promotes that same shape to the stable identifier. This module is
 //! that freeze: [`ResultDocument`] *is* the wire format, it is the only
 //! thing a [`LabResult`] ever serializes as (see that type's
-//! hand-written [`Serialize`]), and `schemas/result-v1beta1.json` is
+//! hand-written [`Serialize`]), and `schemas/result-v1.json` is
 //! generated from these very types by [`crate::schema`]. One definition
 //! serves the artifact, the published schema, and the golden, so none of
 //! the three can drift from the other two.

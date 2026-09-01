@@ -68,7 +68,7 @@
 //! the full argument, including why the sentinel is a loud one.
 
 use admissionlab_core::FixtureId;
-// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1` result
 // schema): every type this file defines is embedded verbatim in that
 // document, so the schema generated from the result model has to
 // describe it. Derives and `#[schemars(with = ...)]` restatements of

@@ -162,8 +162,8 @@
 //!
 //! # Schema
 //!
-//! [`run_manifest_v1beta1_json_schema`] generates
-//! `schemas/run-manifest-v1beta1.json` from the same derives that govern
+//! [`run_manifest_v1_json_schema`] generates
+//! `schemas/run-manifest-v1.json` from the same derives that govern
 //! serialization, so the published schema can never describe a shape
 //! Admission Lab does not actually write. `tests/run_manifest.rs`
 //! regenerates it and compares byte-for-byte, exactly as
@@ -171,32 +171,49 @@
 //! schema; see that crate's `schema.rs` for the determinism argument,
 //! which applies here unchanged.
 //!
-//! `schemas/run-manifest-v1alpha1.json` is **frozen**, not generated: it
-//! describes the shape a v1alpha1 writer produced, and no Rust type
-//! writes that shape any more. It stays checked in because manifests in
-//! that shape still exist in users' artifact directories and this build
-//! still reads them, and `tests/run_manifest_beta.rs` keeps it honest by
-//! asserting the generated v1beta1 schema is a backward-compatible
-//! *superset* of it — every v1alpha1 property still present, every
-//! v1alpha1 requirement still required, and every addition optional.
-//! That is `docs/schema-migrations.md`'s pre-v1.0 compatibility rule as
-//! an executable test rather than a promise.
+//! `schemas/run-manifest-v1beta1.json` and
+//! `schemas/run-manifest-v1alpha1.json` are **frozen**, not generated:
+//! they describe the shapes earlier writers produced, and no Rust type
+//! writes either shape any more. They stay checked in because manifests
+//! in those shapes still exist in users' artifact directories and this
+//! build still reads them, and `tests/run_manifest_beta.rs` keeps them
+//! honest by asserting the generated v1 schema is a backward-compatible
+//! *superset* of each — every earlier property still present, every
+//! earlier requirement still required, and every addition optional. That
+//! is `docs/schema-migrations.md`'s compatibility rule as an executable
+//! test rather than a promise.
 //!
-//! # Two schema versions, one Rust type (Task 7.3)
+//! # Three schema versions, one Rust type (Tasks 7.3 and 9.1)
 //!
-//! [`SCHEMA_VERSION`] is `admissionlab.io/run-manifest/v1beta1` and is
-//! the only version this crate ever *writes*. It reads both that and
-//! [`SCHEMA_VERSION_V1ALPHA1`], because a manifest is a record of
-//! something that already happened: refusing to reproduce a run because
-//! Admission Lab has since promoted its own provenance document would
-//! throw away exactly the artifact the document exists to preserve.
+//! [`SCHEMA_VERSION`] is `admissionlab.io/run/v1` and is the only version
+//! this crate ever *writes*. It reads that and both
+//! [`SCHEMA_VERSION_V1BETA1`] and [`SCHEMA_VERSION_V1ALPHA1`], because a
+//! manifest is a record of something that already happened: refusing to
+//! reproduce a run because Admission Lab has since promoted its own
+//! provenance document would throw away exactly the artifact the document
+//! exists to preserve.
+//!
+//! **The stable identifier drops the `-manifest` infix**
+//! (`admissionlab.io/run/v1`, not `admissionlab.io/run-manifest/v1`).
+//! That is a freeze decision, taken at the one boundary where renaming an
+//! identifier costs nothing that is not already being spent: the string
+//! is matched by consumers, so it is exactly the kind of value that can
+//! only change when the version changes, and `run/v1` is the shorter name
+//! this project intends to keep for the life of v1. Both older
+//! identifiers keep their original spelling, because a document already
+//! on disk carries the string it was written with.
 //!
 //! [`read_run_manifest`] is the reader, and it dispatches on the
 //! document's own `schemaVersion` **before** deserializing the body:
 //!
-//! - `v1beta1` — read in full.
-//! - `v1alpha1` — read into the same type, with every field v1beta1 added
-//!   left `None`. A v1alpha1 document that carries a v1beta1-only field
+//! - `run/v1` — read in full.
+//! - `run-manifest/v1beta1` — read in full. The stable freeze added no
+//!   field and removed none, so a Beta manifest *is* a v1 manifest with a
+//!   different identifier on it; what it is not is a document this build
+//!   would write, which is why its own version is preserved.
+//! - `run-manifest/v1alpha1` — read into the same type, with every field
+//!   v1beta1 added left `None`. A v1alpha1 document that carries a
+//!   v1beta1-only field
 //!   is rejected rather than accepted leniently: it is not a document any
 //!   version of Admission Lab ever wrote, and guessing which half of it
 //!   to believe is the silent wrongness this whole module avoids.
@@ -228,22 +245,31 @@ use crate::ids::{FixtureId, RunId};
 use crate::tool::{DoctorReport, ToolName};
 
 /// The `schemaVersion` value every manifest this crate writes carries
-/// (ROADMAP Task 7.3).
+/// (ROADMAP Task 9.1).
 ///
 /// Namespaced and versioned the same way `admissionlab-report`'s own
 /// `SCHEMA_VERSION` is, so a consumer holding an arbitrary Admission Lab
 /// JSON document can tell the two apart from this field alone.
 ///
-/// Promoted from `v1alpha1` for Public Beta. Beta's compatibility rule —
-/// written out in full in `docs/schema-migrations.md` — is that optional
-/// fields may be added, existing field semantics may never change
-/// silently, and a removal or rename requires another version bump with a
-/// migration note. The v1alpha1 → v1beta1 step obeys it: nothing was
-/// removed, nothing was renamed, nothing changed meaning, and every
-/// addition is optional.
-pub const SCHEMA_VERSION: &str = "admissionlab.io/run-manifest/v1beta1";
+/// **Stable.** Within `v1.x` optional fields may be added, existing field
+/// semantics may never change (silently or otherwise), a required field
+/// may never be removed, and a removal or rename needs a `v2` with a
+/// migration note — the rule in full is `docs/schema-migrations.md`'s
+/// "The stable-schema rule". The `v1beta1` → `v1` step obeys it in the
+/// strongest possible way: the document's *shape* is unchanged, and only
+/// this identifier moved.
+///
+/// The identifier is `admissionlab.io/run/v1` rather than
+/// `admissionlab.io/run-manifest/v1` — see this module's "Three schema
+/// versions, one Rust type" for why the infix was dropped here and only
+/// here.
+pub const SCHEMA_VERSION: &str = "admissionlab.io/run/v1";
 
-/// The previous `schemaVersion` this build still **reads**
+/// The Public Beta `schemaVersion` this build still **reads**
+/// ([`read_run_manifest`]) and never writes.
+pub const SCHEMA_VERSION_V1BETA1: &str = "admissionlab.io/run-manifest/v1beta1";
+
+/// The Public Alpha `schemaVersion` this build still **reads**
 /// ([`read_run_manifest`]) and never writes.
 ///
 /// Kept as a named constant rather than spelled inline at the one match
@@ -258,7 +284,11 @@ pub const SCHEMA_VERSION_V1ALPHA1: &str = "admissionlab.io/run-manifest/v1alpha1
 /// Newest first because this is also the order a rejection message lists
 /// them in, and the version a user most likely wants is the one this
 /// build writes.
-pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &[SCHEMA_VERSION, SCHEMA_VERSION_V1ALPHA1];
+pub const SUPPORTED_SCHEMA_VERSIONS: &[&str] = &[
+    SCHEMA_VERSION,
+    SCHEMA_VERSION_V1BETA1,
+    SCHEMA_VERSION_V1ALPHA1,
+];
 
 /// Everything needed to say what produced one run, and (Task 5.3) to
 /// attempt reproducing it.
@@ -719,9 +749,9 @@ pub struct ComponentProvenance {
 ///
 /// # What `None` means, at each version
 ///
-/// [`RunManifest::gateway`] is `None` on a **v1beta1** manifest exactly
-/// when the run's configuration had no `gateway:` section — the run never
-/// entered [`RunStage::GatewaySuite`] at all. On a **v1alpha1** manifest
+/// [`RunManifest::gateway`] is `None` on a **v1beta1 or v1** manifest
+/// exactly when the run's configuration had no `gateway:` section — the
+/// run never entered [`RunStage::GatewaySuite`] at all. On a **v1alpha1** manifest
 /// it means "not recorded", which is a different claim; the manifest's
 /// own [`RunManifest::schema_version`] is what distinguishes them (see
 /// this module's "Two schema versions, one Rust type" section).
@@ -1204,16 +1234,18 @@ impl RunManifestWriter {
 /// `schema.rs` for why generating this twice always produces
 /// byte-for-byte identical output.
 ///
-/// There is deliberately no `run_manifest_v1alpha1_json_schema`
-/// counterpart. A generator can only ever describe the type that exists
-/// now, so a v1alpha1 generator would silently start describing v1beta1
-/// the moment a field was added — which is exactly how a "frozen" schema
-/// stops being frozen. `schemas/run-manifest-v1alpha1.json` is a
-/// checked-in artifact with no generator behind it, and the test that
-/// keeps it meaningful compares it against *this* schema rather than
-/// regenerating it (see this module's "Schema" section).
+/// There is deliberately no `run_manifest_v1beta1_json_schema` or
+/// `run_manifest_v1alpha1_json_schema` counterpart. A generator can only
+/// ever describe the type that exists now, so a v1beta1 generator would
+/// silently start describing v1 the moment a field was added — which is
+/// exactly how a "frozen" schema stops being frozen.
+/// `schemas/run-manifest-v1beta1.json` and
+/// `schemas/run-manifest-v1alpha1.json` are checked-in artifacts with no
+/// generator behind them, and the tests that keep them meaningful compare
+/// them against *this* schema rather than regenerating them (see this
+/// module's "Schema" section).
 #[must_use]
-pub fn run_manifest_v1beta1_json_schema() -> schemars::Schema {
+pub fn run_manifest_v1_json_schema() -> schemars::Schema {
     schemars::schema_for!(RunManifest)
 }
 
@@ -1264,7 +1296,8 @@ pub enum ManifestReadError {
         #[source]
         source: serde_json::Error,
     },
-    /// A v1alpha1 document carries a field that only exists in v1beta1.
+    /// A v1alpha1 document carries a field that was introduced in
+    /// v1beta1.
     ///
     /// No version of Admission Lab ever wrote such a document, so it was
     /// assembled or edited by hand, and there is no honest way to read
@@ -1281,7 +1314,9 @@ pub enum ManifestReadError {
         schema_version: String,
         /// The offending field, in its wire spelling.
         field: &'static str,
-        /// The version that field belongs to.
+        /// The version that introduced the field
+        /// ([`SCHEMA_VERSION_V1BETA1`]) — the one the document would have
+        /// to be re-filed under to carry it honestly.
         beta: &'static str,
     },
 }
@@ -1299,10 +1334,10 @@ struct SchemaVersionProbe {
 /// Reads a run manifest of any supported schema version.
 ///
 /// **The one entry point for turning `run.json` bytes into a
-/// [`RunManifest`].** See this module's "Two schema versions, one Rust
+/// [`RunManifest`].** See this module's "Three schema versions, one Rust
 /// type" section for the dispatch and for what the v1alpha1 path leaves
 /// `None`. A caller that reached for `serde_json::from_str::<RunManifest>`
-/// instead would read a v1alpha1 document as though it were v1beta1 —
+/// instead would read a v1alpha1 document as though it were current —
 /// silently, and with a `schemaVersion` field sitting right there saying
 /// otherwise.
 ///
@@ -1325,8 +1360,8 @@ pub fn read_run_manifest(json: &str) -> Result<RunManifest, ManifestReadError> {
         });
     }
 
-    // One deserialization for both versions, because v1beta1 *is*
-    // v1alpha1 plus optional fields — that is the compatibility rule
+    // One deserialization for all three versions, because v1 *is*
+    // v1beta1 *is* v1alpha1 plus optional fields — that is the compatibility rule
     // `docs/schema-migrations.md` states, and this is where it pays for
     // itself. What the v1alpha1 path adds is the strictness a shared type
     // cannot express: `#[serde(default)]` makes the new fields optional
@@ -1344,7 +1379,10 @@ pub fn read_run_manifest(json: &str) -> Result<RunManifest, ManifestReadError> {
         return Err(ManifestReadError::FieldFromNewerVersion {
             schema_version: probe.schema_version,
             field,
-            beta: SCHEMA_VERSION,
+            // The version that *introduced* the field, which is the one a
+            // user has to re-file the document under — not the version
+            // this build happens to write today.
+            beta: SCHEMA_VERSION_V1BETA1,
         });
     }
 

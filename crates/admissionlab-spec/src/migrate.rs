@@ -1,20 +1,51 @@
-//! Migrating a frozen `admissionlab.io/v1alpha1` lab document to the
-//! current `admissionlab.io/v1beta1` model (ROADMAP Task 7.1 Step 3).
+//! Migrating an older lab document forward to the current
+//! `admissionlab.io/v1` model (ROADMAP Task 7.1 Step 3, Task 9.1 Step 3).
 //!
-//! [`migrate_v1alpha1_to_v1beta1`] is the *only* bridge between the two
-//! versions. It is pure — it performs no I/O, consults no environment,
-//! and resolves no path — so it can be tested exhaustively against
+//! Two bridges, chained, and no other path between versions:
+//!
+//! ```text
+//! v1alpha1 --migrate_v1alpha1_to_v1beta1--> v1beta1 --migrate_v1beta1_to_v1--> v1
+//! ```
+//!
+//! Both are pure — they perform no I/O, consult no environment, and
+//! resolve no path — so they can be tested exhaustively against
 //! hand-built values, and so a migration can never depend on the machine
-//! it runs on. [`crate::load_any_supported_lab`] calls it immediately
-//! after parsing an Alpha document and before
+//! it runs on. [`crate::load_any_supported_lab`] calls whichever prefix
+//! of the chain a document needs, immediately after parsing it and before
 //! [`crate::resolve_lab`] ever sees the result; nothing else in the
-//! workspace needs to know that two versions exist.
+//! workspace needs to know that three versions exist.
 //!
-//! # The freeze review: every v1alpha1 field, and what happened to it
+//! **Chained rather than one function per pair.** There is no
+//! `migrate_v1alpha1_to_v1`, and there deliberately never will be: with
+//! `n` versions, per-pair migrations are `n^2` functions that can
+//! disagree, and the one that gets exercised least is the one carrying an
+//! Alpha document — the oldest input and the one with the least margin
+//! for a silent mistake. One step per version boundary means an Alpha
+//! document travels the *same* code a Beta document does for the second
+//! half of its journey.
+//!
+//! # The stable freeze review (Task 9.1 Step 1)
+//!
+//! `v1beta1 -> v1` renames nothing and removes nothing. Every public Beta
+//! field was walked once more for necessity and naming consistency —
+//! including the `migration:` section, which landed after the Beta freeze
+//! as an additive change and is therefore reviewed here for the first
+//! time — and the audit's outcome is the table in
+//! `docs/schema-migrations.md`'s "Configuration: `v1beta1` -> `v1`" note.
+//! A rename is only cheap at a version boundary, and this is the last
+//! boundary at which it was cheap; the answer was still "keep", because
+//! the Beta freeze had already made every one of these calls deliberately
+//! and re-litigating them would have cost every existing user a rewrite
+//! to buy nothing.
+//!
+//! # The Beta freeze review: every v1alpha1 field, and what happened to it
 //!
 //! "Freezing" a schema means looking at every name once, on purpose,
-//! while renaming one is still cheap. This is that record. Two names
-//! changed; every other name was examined and deliberately kept.
+//! while renaming one is still cheap. This is that record for the
+//! `v1alpha1 -> v1beta1` boundary — the one that did change two names —
+//! and every conclusion in it survived the stable review above unchanged.
+//! Two names changed; every other name was examined and deliberately
+//! kept.
 //!
 //! ## Renamed (2)
 //!
@@ -124,19 +155,22 @@
 //! no document reachable through the loader ever is.
 
 use crate::model::KIND;
+use crate::v1::{self, V1Lab};
 use crate::v1alpha1::{self, V1Alpha1Lab};
 use crate::v1beta1::{self, V1Beta1Lab};
 
-/// The only way [`migrate_v1alpha1_to_v1beta1`] can fail: it was handed
-/// something that is not an `admissionlab.io/v1alpha1` `Lab` document.
+/// The only way a migration in this module can fail: it was handed
+/// something that is not a `Lab` document of the version it migrates
+/// *from*.
 ///
 /// See this module's "Then why does this return a `Result`?" — every
-/// *field* in a genuine Alpha document migrates unambiguously, so there
-/// is no per-field variant here and no variant that defaults anything.
+/// *field* in a genuine document of the source version migrates
+/// unambiguously, so there is no per-field variant here and no variant
+/// that defaults anything.
 #[derive(Debug, thiserror::Error, PartialEq, Eq, Clone)]
 pub enum MigrationError {
-    /// The document's `apiVersion` is not [`v1alpha1::API_VERSION`], so
-    /// there is no basis for reading it as an Alpha document.
+    /// The document's `apiVersion` is not the one the migration reads, so
+    /// there is no basis for reading it as a document of that version.
     #[error(
         "cannot migrate a document whose apiVersion is {found:?}: \
          migration from {expected:?} to {target:?} is defined only for {expected:?} documents"
@@ -144,9 +178,11 @@ pub enum MigrationError {
     UnexpectedApiVersion {
         /// The `apiVersion` the document actually carried.
         found: String,
-        /// [`v1alpha1::API_VERSION`].
+        /// The version this migration reads
+        /// ([`v1alpha1::API_VERSION`] or [`v1beta1::API_VERSION`]).
         expected: &'static str,
-        /// [`v1beta1::API_VERSION`].
+        /// The version this migration produces
+        /// ([`v1beta1::API_VERSION`] or [`v1::API_VERSION`]).
         target: &'static str,
     },
 
@@ -164,7 +200,8 @@ pub enum MigrationError {
 }
 
 /// Translates a frozen `admissionlab.io/v1alpha1` lab document into the
-/// current `admissionlab.io/v1beta1` model.
+/// `admissionlab.io/v1beta1` model — the first half of the chain to the
+/// current model, whose second half is [`migrate_v1beta1_to_v1`].
 ///
 /// Pure: no I/O, no environment, no path resolution. Every field maps
 /// 1:1 (see this module's "Why this migration is total"); the only two
@@ -235,6 +272,71 @@ pub fn migrate_v1alpha1_to_v1beta1(old: V1Alpha1Lab) -> Result<V1Beta1Lab, Migra
         // field, and this one is optional in Beta precisely because
         // omitting it is a complete, meaningful configuration.
         migration: None,
+    })
+}
+
+/// Translates a `admissionlab.io/v1beta1` lab document into the stable
+/// `admissionlab.io/v1` model (ROADMAP Task 9.1).
+///
+/// Pure, and totally trivial by design: the stable freeze renamed
+/// nothing and removed nothing, and [`V1Lab`] shares every nested type
+/// with [`V1Beta1Lab`] rather than declaring copies of them (see
+/// [`crate::v1`]'s "Zero wire changes from `v1beta1`"), so the only value
+/// that changes is the `apiVersion` the document now declares.
+///
+/// That triviality is the *result* being asserted, not a shortcut taken
+/// on the way to it. A migration with nothing to do is what "we audited
+/// every field and kept every one" looks like when it is written down as
+/// code, and the exhaustive destructure below is what keeps it honest: a
+/// field added to either model without an answer here is a compile error.
+///
+/// # Errors
+///
+/// Returns [`MigrationError`] if `old` is not an
+/// `admissionlab.io/v1beta1` document whose `kind` is `Lab` — the same
+/// caller precondition [`migrate_v1alpha1_to_v1beta1`] has, for the same
+/// reason (see this module's "Then why does this return a `Result`?"),
+/// and equally unreachable through [`crate::load_any_supported_lab`].
+pub fn migrate_v1beta1_to_v1(old: V1Beta1Lab) -> Result<V1Lab, MigrationError> {
+    let V1Beta1Lab {
+        api_version,
+        kind,
+        baseline,
+        candidate,
+        fixtures,
+        policy,
+        expectations_file,
+        gateway,
+        migration,
+    } = old;
+
+    if api_version != v1beta1::API_VERSION {
+        return Err(MigrationError::UnexpectedApiVersion {
+            found: api_version,
+            expected: v1beta1::API_VERSION,
+            target: v1::API_VERSION,
+        });
+    }
+    if kind != KIND {
+        return Err(MigrationError::UnexpectedKind {
+            found: kind,
+            expected: KIND,
+        });
+    }
+
+    Ok(V1Lab {
+        // The one value migration changes. Everything below is the same
+        // Rust type in both models, so moving the value *is* the
+        // migration — there is nothing left to translate.
+        api_version: v1::API_VERSION.to_owned(),
+        kind,
+        baseline,
+        candidate,
+        fixtures,
+        policy,
+        expectations_file,
+        gateway,
+        migration,
     })
 }
 

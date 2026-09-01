@@ -1,29 +1,30 @@
-//! The run manifest's *versions* (ROADMAP Task 7.3).
+//! The run manifest's *versions* (ROADMAP Tasks 7.3 and 9.1).
 //!
 //! `tests/run_manifest.rs` covers the document — what it may contain, how
 //! it hashes, what it looks like on the wire. This file covers the one
-//! thing a version bump adds: that there are now two shapes in the world
-//! and this build has to be right about which one it is holding.
+//! thing a version bump adds: that there are now three identifiers in the
+//! world and this build has to be right about which one it is holding.
 //!
 //! Four groups:
 //!
-//! - **The v1beta1 document.** Round-trips through the versioned reader,
-//!   and still refuses an unknown field — promoting a schema must not
-//!   quietly relax the strictness the alpha document already had.
-//! - **The v1alpha1 document, still readable.** The checked-in
-//!   `testdata/golden/run-manifest-alpha.json` is read back through the
+//! - **The document this build writes.** Round-trips through the
+//!   versioned reader, and still refuses an unknown field — promoting a
+//!   schema must not quietly relax the strictness the older documents
+//!   already had.
+//! - **The older documents, still readable.** The checked-in
+//!   `testdata/golden/run-manifest-alpha.json` and
+//!   `testdata/golden/run-manifest-beta.json` are read back through the
 //!   versioned reader with no editing at all, and a hand-stripped alpha
 //!   manifest of a real source tree still plans a reproduction. This is
-//!   the promise Task 7.3 exists to make: a run recorded before the
-//!   promotion is exactly as reproducible as one recorded after it.
+//!   the promise Task 7.3 made and Task 9.1 renews: a run recorded before
+//!   a promotion is exactly as reproducible as one recorded after it.
 //! - **Refusals.** An unknown `schemaVersion` names every version this
 //!   build reads; a v1alpha1 document carrying a v1beta1 field is
 //!   refused rather than half-believed.
-//! - **The compatibility rule as a test.** The generated v1beta1 schema
-//!   is compared against the frozen `schemas/run-manifest-v1alpha1.json`
-//!   and must be a backward-compatible superset of it — which is
-//!   `docs/schema-migrations.md`'s pre-v1.0 rule, checked rather than
-//!   promised.
+//! - **The compatibility rule as a test.** The generated v1 schema is
+//!   compared against *both* frozen schema files and must be a
+//!   backward-compatible superset of each — which is
+//!   `docs/schema-migrations.md`'s rule, checked rather than promised.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -33,8 +34,8 @@ use admissionlab_core::reproduce::{DEFAULT_LAB_FILE_NAME, plan_reproduction};
 use admissionlab_core::run_manifest::{
     ComponentProvenance, EnvironmentProvenance, GatewayProvenance, HostProvenance,
     ManifestReadError, RunManifest, RunStage, RunStatus, SCHEMA_VERSION, SCHEMA_VERSION_V1ALPHA1,
-    SUPPORTED_SCHEMA_VERSIONS, ToolProvenance, file_sha256, read_run_manifest,
-    run_manifest_v1beta1_json_schema, sha256_hex,
+    SCHEMA_VERSION_V1BETA1, SUPPORTED_SCHEMA_VERSIONS, ToolProvenance, file_sha256,
+    read_run_manifest, run_manifest_v1_json_schema, sha256_hex,
 };
 use admissionlab_core::{FixtureId, RunId};
 
@@ -74,8 +75,9 @@ fn workspace_file(relative: &str) -> PathBuf {
         .join(relative)
 }
 
-/// A v1beta1 manifest with every field v1beta1 added actually populated.
-fn beta_manifest() -> RunManifest {
+/// A manifest in the version this build writes, with every field
+/// v1beta1 added actually populated.
+fn current_manifest() -> RunManifest {
     let environment = || EnvironmentProvenance {
         kubernetes_version: "1.36.4".to_owned(),
         node_image: NODE_IMAGE.to_owned(),
@@ -197,37 +199,49 @@ fn write_source(dir: &Path) -> PathBuf {
 }
 
 // ---------------------------------------------------------------------
-// The v1beta1 document
+// The document this build writes
 // ---------------------------------------------------------------------
 
-/// The version this build writes is v1beta1, and nothing else.
+/// The version this build writes is the stable `run/v1`, and nothing
+/// else.
 ///
-/// Pinned as a literal rather than compared against another constant:
-/// the string is a wire value that consumers match on, so a typo in the
+/// Pinned as literals rather than compared against other constants: these
+/// strings are wire values that consumers match on, so a typo in the
 /// promotion must fail here rather than propagate into every manifest
-/// written from now on.
+/// written from now on. Note the stable identifier drops the `-manifest`
+/// infix the two pre-stable ones carry — that is the deliberate freeze
+/// decision `run_manifest.rs` explains, not a typo for this test to
+/// "fix".
 #[test]
-fn the_written_schema_version_is_v1beta1() {
-    assert_eq!(SCHEMA_VERSION, "admissionlab.io/run-manifest/v1beta1");
+fn the_written_schema_version_is_the_stable_v1() {
+    assert_eq!(SCHEMA_VERSION, "admissionlab.io/run/v1");
+    assert_eq!(
+        SCHEMA_VERSION_V1BETA1,
+        "admissionlab.io/run-manifest/v1beta1"
+    );
     assert_eq!(
         SCHEMA_VERSION_V1ALPHA1,
         "admissionlab.io/run-manifest/v1alpha1"
     );
     assert_eq!(
         SUPPORTED_SCHEMA_VERSIONS,
-        [SCHEMA_VERSION, SCHEMA_VERSION_V1ALPHA1],
-        "both versions are read; only the newest is written"
+        [
+            SCHEMA_VERSION,
+            SCHEMA_VERSION_V1BETA1,
+            SCHEMA_VERSION_V1ALPHA1
+        ],
+        "all three versions are read; only the newest is written"
     );
 }
 
-/// A v1beta1 manifest survives serialization and the versioned reader
-/// unchanged, new fields and all.
+/// A manifest this build wrote survives serialization and the versioned
+/// reader unchanged, every field and all.
 #[test]
-fn a_v1beta1_manifest_round_trips_through_the_versioned_reader() {
-    let manifest = beta_manifest();
+fn a_v1_manifest_round_trips_through_the_versioned_reader() {
+    let manifest = current_manifest();
     let text = serde_json::to_string(&manifest).expect("a manifest always serializes");
 
-    let parsed = read_run_manifest(&text).expect("a v1beta1 manifest reads");
+    let parsed = read_run_manifest(&text).expect("a v1 manifest reads");
     assert_eq!(parsed, manifest);
     assert_eq!(parsed.schema_version, SCHEMA_VERSION);
 }
@@ -235,8 +249,8 @@ fn a_v1beta1_manifest_round_trips_through_the_versioned_reader() {
 /// Promotion does not relax strictness: an unknown field is still
 /// refused, and the rejection still names it.
 #[test]
-fn a_v1beta1_manifest_still_rejects_unknown_fields() {
-    let text = serde_json::to_string(&beta_manifest())
+fn a_v1_manifest_still_rejects_unknown_fields() {
+    let text = serde_json::to_string(&current_manifest())
         .expect("a manifest always serializes")
         .replace(
             "{\"schemaVersion\"",
@@ -256,8 +270,58 @@ fn a_v1beta1_manifest_still_rejects_unknown_fields() {
 }
 
 // ---------------------------------------------------------------------
-// The v1alpha1 document, still readable
+// The older documents, still readable
 // ---------------------------------------------------------------------
+
+/// A v1beta1 manifest reads in full, with its own version preserved.
+///
+/// The stable freeze added no field and removed none, so a Beta document
+/// *is* a v1 document with a different identifier on it — which is
+/// exactly why the identifier is not rewritten on read. A consumer that
+/// wants to know which build recorded a run has this field and nothing
+/// else to go on.
+#[test]
+fn a_v1beta1_manifest_still_reads_in_full() {
+    let mut manifest = current_manifest();
+    manifest.schema_version = SCHEMA_VERSION_V1BETA1.to_owned();
+    let text = serde_json::to_string(&manifest).expect("a manifest always serializes");
+
+    let parsed = read_run_manifest(&text).expect("a v1beta1 manifest still reads");
+    assert_eq!(parsed, manifest);
+    assert_eq!(
+        parsed.schema_version, SCHEMA_VERSION_V1BETA1,
+        "the document's own version is preserved, never normalized to the one this build writes"
+    );
+    // Everything v1beta1 added is still read as the value it carries,
+    // rather than being blanked because the identifier is older.
+    assert!(parsed.gateway.is_some());
+    assert!(parsed.config_api_version.is_some());
+    assert!(parsed.baseline.images.is_some());
+}
+
+/// The checked-in v1beta1 golden manifest — a document this build no
+/// longer writes — still reads, byte for byte as it sits in the
+/// repository.
+///
+/// Read from the file rather than from a value built here, for the reason
+/// the v1alpha1 test below gives: the claim is about *historical
+/// artifacts*, and that file is the closest thing this repository has to a
+/// manifest a user actually has in an artifact directory.
+#[test]
+fn the_checked_in_v1beta1_golden_manifest_still_reads() {
+    let path = workspace_file("testdata/golden/run-manifest-beta.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|error| panic!("the frozen v1beta1 golden manifest is missing: {error}"));
+
+    let manifest = read_run_manifest(&text).expect("a v1beta1 manifest still reads");
+
+    assert_eq!(manifest.schema_version, SCHEMA_VERSION_V1BETA1);
+    assert_eq!(manifest.status, RunStatus::Completed);
+    assert!(
+        manifest.config_api_version.is_some(),
+        "a v1beta1 manifest records the configuration version it was driven by"
+    );
+}
 
 /// The checked-in v1alpha1 golden manifest — a document this build no
 /// longer writes — is still read, with its own version preserved and
@@ -305,7 +369,7 @@ fn the_checked_in_v1alpha1_golden_manifest_still_reads() {
 /// does not look closely.
 #[test]
 fn an_absent_image_list_is_not_an_empty_one() {
-    let mut manifest = beta_manifest();
+    let mut manifest = current_manifest();
     manifest.baseline.images = Some(Vec::new());
     let recorded_none =
         read_run_manifest(&serde_json::to_string(&manifest).expect("a manifest always serializes"))
@@ -329,7 +393,7 @@ fn a_v1alpha1_manifest_still_plans_a_reproduction() {
     let dir = unique_dir("plan");
     let source = write_source(&dir);
 
-    let mut recorded = beta_manifest();
+    let mut recorded = current_manifest();
     recorded.config_sha256 =
         file_sha256(&source.join(DEFAULT_LAB_FILE_NAME)).expect("hash the configuration");
     recorded.expectations_sha256 = None;
@@ -356,14 +420,14 @@ fn a_v1alpha1_manifest_still_plans_a_reproduction() {
 /// version this build does read.
 #[test]
 fn an_unknown_schema_version_names_the_supported_versions() {
-    let text = serde_json::to_string(&beta_manifest())
+    let text = serde_json::to_string(&current_manifest())
         .expect("a manifest always serializes")
-        .replace(SCHEMA_VERSION, "admissionlab.io/run-manifest/v2");
+        .replace(SCHEMA_VERSION, "admissionlab.io/run/v2");
 
     let error = read_run_manifest(&text).expect_err("an unknown schema version is refused");
     assert!(
         matches!(&error, ManifestReadError::UnsupportedSchemaVersion { found, supported }
-            if found == "admissionlab.io/run-manifest/v2"
+            if found == "admissionlab.io/run/v2"
                 && *supported == SUPPORTED_SCHEMA_VERSIONS),
         "{error:?}"
     );
@@ -398,7 +462,7 @@ fn a_document_without_a_schema_version_is_not_a_manifest() {
 #[test]
 fn a_v1alpha1_document_carrying_a_v1beta1_field_is_refused() {
     for field in V1BETA1_ADDITIONS {
-        let manifest = beta_manifest();
+        let manifest = current_manifest();
         let mut value: serde_json::Value = serde_json::from_str(&as_v1alpha1_document(&manifest))
             .expect("the stripped document is JSON");
         let full = serde_json::to_value(&manifest).expect("a manifest always serializes");
@@ -413,7 +477,7 @@ fn a_v1alpha1_document_carrying_a_v1beta1_field_is_refused() {
             matches!(&error, ManifestReadError::FieldFromNewerVersion { field: named, schema_version, beta }
                 if *named == field
                     && schema_version == SCHEMA_VERSION_V1ALPHA1
-                    && *beta == SCHEMA_VERSION),
+                    && *beta == SCHEMA_VERSION_V1BETA1),
             "{error:?}"
         );
         assert!(
@@ -427,7 +491,7 @@ fn a_v1alpha1_document_carrying_a_v1beta1_field_is_refused() {
 /// the top-level check would miss.
 #[test]
 fn a_v1alpha1_document_carrying_a_v1beta1_side_field_is_refused() {
-    let manifest = beta_manifest();
+    let manifest = current_manifest();
     let mut value: serde_json::Value =
         serde_json::from_str(&as_v1alpha1_document(&manifest)).expect("the stripped document");
     value["candidate"]["images"] = serde_json::json!(["admissionlab-echo:dev"]);
@@ -445,31 +509,45 @@ fn a_v1alpha1_document_carrying_a_v1beta1_side_field_is_refused() {
 // The compatibility rule, as a test
 // ---------------------------------------------------------------------
 
-/// `docs/schema-migrations.md`'s pre-v1.0 rule, checked against the two
+/// `docs/schema-migrations.md`'s compatibility rule, checked against the
 /// artifacts it governs.
 ///
-/// The frozen `schemas/run-manifest-v1alpha1.json` is the previous
-/// version's published contract; the generated v1beta1 schema is this
-/// build's. The rule says a version bump before v1.0 may **add optional
-/// fields** and nothing else, so:
+/// The frozen `schemas/run-manifest-v1alpha1.json` and
+/// `schemas/run-manifest-v1beta1.json` are the previous versions'
+/// published contracts; the generated v1 schema is this build's. The rule
+/// says a promotion may **add optional fields** and nothing else, so, for
+/// each frozen file:
 ///
-/// - every v1alpha1 property still exists in v1beta1 (no removal, no
+/// - every property it declares still exists in v1 (no removal, no
 ///   rename — either would need a migration note, and there is none);
-/// - every v1alpha1 requirement is still required (a requirement dropped
-///   is a semantics change, even though it looks like a relaxation);
-/// - every v1beta1 addition is **optional** (a new required field would
-///   make every existing manifest invalid against the new schema).
+/// - every requirement it declares is still required (a requirement
+///   dropped is a semantics change, even though it looks like a
+///   relaxation);
+/// - every v1 addition is **optional** (a new required field would make
+///   every existing manifest invalid against the new schema).
 ///
-/// This is why the alpha schema file stays checked in with no generator
-/// behind it: it is the reference the next promotion is measured against.
+/// This is why a superseded schema file stays checked in with no
+/// generator behind it: it is the reference the next promotion is
+/// measured against.
 #[test]
-fn the_v1beta1_schema_is_a_backward_compatible_superset_of_v1alpha1() {
+fn the_v1_schema_is_a_backward_compatible_superset_of_every_frozen_version() {
+    for frozen in [
+        "schemas/run-manifest-v1alpha1.json",
+        "schemas/run-manifest-v1beta1.json",
+    ] {
+        assert_superset_of_frozen(frozen);
+    }
+}
+
+/// One frozen schema file's worth of [the rule
+/// above](the_v1_schema_is_a_backward_compatible_superset_of_every_frozen_version).
+fn assert_superset_of_frozen(frozen: &str) {
     let alpha: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(workspace_file("schemas/run-manifest-v1alpha1.json"))
-            .expect("the frozen v1alpha1 schema is checked in"),
+        &std::fs::read_to_string(workspace_file(frozen))
+            .unwrap_or_else(|error| panic!("the frozen schema {frozen} is checked in: {error}")),
     )
     .expect("the frozen schema is JSON");
-    let beta = serde_json::to_value(run_manifest_v1beta1_json_schema())
+    let beta = serde_json::to_value(run_manifest_v1_json_schema())
         .expect("a schemars::Schema always serializes");
 
     let properties = |schema: &serde_json::Value| -> Vec<String> {
@@ -498,8 +576,8 @@ fn the_v1beta1_schema_is_a_backward_compatible_superset_of_v1alpha1() {
     for property in properties(&alpha) {
         assert!(
             beta_properties.contains(&property),
-            "v1beta1 dropped or renamed the v1alpha1 property {property:?}; that needs a new \
-             schema version and a migration note in docs/schema-migrations.md"
+            "v1 dropped or renamed {property:?}, which {frozen} publishes; that needs a v2 and a \
+             migration note in docs/schema-migrations.md"
         );
     }
 
@@ -507,8 +585,8 @@ fn the_v1beta1_schema_is_a_backward_compatible_superset_of_v1alpha1() {
     for property in required(&alpha) {
         assert!(
             beta_required.contains(&property),
-            "v1beta1 stopped requiring {property:?}, which v1alpha1 required; a requirement \
-             dropped is a semantics change, not an addition"
+            "v1 stopped requiring {property:?}, which {frozen} requires; a requirement dropped \
+             is a semantics change, not an addition"
         );
     }
 
@@ -519,13 +597,13 @@ fn the_v1beta1_schema_is_a_backward_compatible_superset_of_v1alpha1() {
         }
         assert!(
             !beta_required.contains(property),
-            "v1beta1 added {property:?} as a *required* field, which invalidates every v1alpha1 \
-             manifest; additions before v1.0 must be optional"
+            "v1 added {property:?} as a *required* field, which invalidates every manifest \
+             written against {frozen}; additions must be optional"
         );
         assert!(
             V1BETA1_ADDITIONS.contains(&property.as_str()),
-            "v1beta1 added the top-level property {property:?}, which this test does not know \
-             about; add it to V1BETA1_ADDITIONS and re-read run_manifest.rs's \"What this \
+            "the top-level property {property:?} is not in {frozen} and this test does not know \
+             about it; add it to V1BETA1_ADDITIONS and re-read run_manifest.rs's \"What this \
              document may never contain\" section first"
         );
     }
@@ -534,13 +612,13 @@ fn the_v1beta1_schema_is_a_backward_compatible_superset_of_v1alpha1() {
 /// The same rule one level down, for the side environment that also
 /// gained a field.
 #[test]
-fn the_v1beta1_environment_schema_is_a_backward_compatible_superset() {
+fn the_v1_environment_schema_is_a_backward_compatible_superset() {
     let alpha: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(workspace_file("schemas/run-manifest-v1alpha1.json"))
             .expect("the frozen v1alpha1 schema is checked in"),
     )
     .expect("the frozen schema is JSON");
-    let beta = serde_json::to_value(run_manifest_v1beta1_json_schema())
+    let beta = serde_json::to_value(run_manifest_v1_json_schema())
         .expect("a schemars::Schema always serializes");
 
     let alpha_environment = &alpha["$defs"]["EnvironmentProvenance"];
@@ -552,12 +630,12 @@ fn the_v1beta1_environment_schema_is_a_backward_compatible_superset() {
     {
         assert!(
             beta_environment["properties"].get(name).is_some(),
-            "v1beta1 dropped or renamed the v1alpha1 environment property {name:?}"
+            "v1 dropped or renamed the v1alpha1 environment property {name:?}"
         );
     }
     assert!(
         beta_environment["properties"].get("images").is_some(),
-        "v1beta1 adds images to each side's environment"
+        "v1 keeps the images v1beta1 added to each side's environment"
     );
     let beta_required: Vec<&str> = beta_environment["required"]
         .as_array()

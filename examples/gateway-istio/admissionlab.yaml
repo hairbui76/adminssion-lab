@@ -88,7 +88,7 @@
 # timing window that remains: a route can be fully `Programmed` while no
 # pod behind it is ready, and a request sent into that window is
 # answered by the data plane rather than by a backend.
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 
 baseline:

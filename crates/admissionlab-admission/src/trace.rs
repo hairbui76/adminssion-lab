@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1` result
 // schema): every type this file defines is embedded verbatim in that
 // document, so the schema generated from the result model has to
 // describe it. Derives and `#[schemars(with = ...)]` restatements of

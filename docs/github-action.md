@@ -153,11 +153,11 @@ failing run as well as a passing one. Its contents:
 
 | File | When | What it is |
 | --- | --- | --- |
-| `result.json` | the run reached a verdict | The machine-readable result: every fixture, every graded change, both sides' captured admission outcomes, and the environments they ran in. Schema `admissionlab.io/result/v1beta1` — frozen and additive-only, checked in as [`schemas/result-v1beta1.json`](../schemas/result-v1beta1.json) and described in [`docs/schema-migrations.md`](schema-migrations.md). |
+| `result.json` | the run reached a verdict | The machine-readable result: every fixture, every graded change, both sides' captured admission outcomes, and the environments they ran in. Schema `admissionlab.io/result/v1` — frozen and additive-only, checked in as [`schemas/result-v1.json`](../schemas/result-v1.json) and described in [`docs/schema-migrations.md`](schema-migrations.md). |
 | `report.html` | the run reached a verdict | The standalone report page — per-fixture drill-down with the full webhook trace and every patch. No external scripts, no network. |
 | `diagnostics.json` | the run failed at or after installation | The stage that failed, the failure, and every diagnostic collected up to that point. Written *before* cleanup runs. |
 | `github-summary.md` | always, unless the process died before writing anything | The same Markdown the action appended to the job summary. |
-| `run-manifests/<run-id>.json` | a run workspace existed | The run manifest: tool versions, node images, and configuration digests — what `admissionlab reproduce` needs. Schema `admissionlab.io/run-manifest/v1beta1` ([`schemas/run-manifest-v1beta1.json`](../schemas/run-manifest-v1beta1.json)). |
+| `run-manifests/<run-id>.json` | a run workspace existed | The run manifest: tool versions, node images, and configuration digests — what `admissionlab reproduce` needs. Schema `admissionlab.io/run/v1` ([`schemas/run-manifest-v1.json`](../schemas/run-manifest-v1.json)). |
 
 `result.json` and `diagnostics.json` are mutually exclusive by design. A
 run that never compared both sides has not earned a verdict, and writing
@@ -226,7 +226,7 @@ words:
 >
 > At least one unexpected critical difference. `admissionlab test` exits 1.
 >
-> Run `01K...` — result schema `admissionlab.io/result/v1beta1`
+> Run `01K...` — result schema `admissionlab.io/result/v1`
 > (frozen; additive changes only).
 >
 > **### Fixtures** — a six-row table: `identical`, `expected`,

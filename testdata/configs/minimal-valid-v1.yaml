@@ -1,0 +1,19 @@
+# The stable `admissionlab.io/v1` twin of `minimal-valid.yaml` and
+# `minimal-valid-v1beta1.yaml`: one lab, written in all three supported
+# versions, so "an older document still means the same thing" is an
+# equality between values rather than a claim in a changelog.
+#
+# Nothing here is renamed, and nothing was renamed at the stable freeze
+# either (ROADMAP Task 9.1 Step 1). The smallest valid document is
+# therefore identical in all three versions apart from one line.
+# `tests/stable_schema.rs` loads this file, its Beta twin and its Alpha
+# twin and asserts all three resolve to the same lab.
+apiVersion: admissionlab.io/v1
+kind: Lab
+baseline:
+  kubernetes: "1.29.4"
+candidate:
+  kubernetes: "1.29.4"
+fixtures:
+  include:
+    - "fixtures/**/*.yaml"

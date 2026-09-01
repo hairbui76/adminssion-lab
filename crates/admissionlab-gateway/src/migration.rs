@@ -157,7 +157,7 @@
 //! ROADMAP Task 8.7 landed [`crate::probe::EchoObservation`], which
 //! *does* carry the path the backend received -- and deliberately kept
 //! it **outside** [`HttpProbeResult`], because that type is embedded
-//! verbatim in the frozen `admissionlab.io/result/v1beta1` document and
+//! verbatim in the frozen `admissionlab.io/result/v1` document and
 //! a sixth field on it would be a schema change. So the limit above is
 //! unchanged and this comparator is unchanged: an echoed path is not
 //! part of the evidence a [`MigrationComparison`] is computed from, and
@@ -267,7 +267,7 @@ pub fn expected_nonportable_features(case: &MigrationCaseSpec) -> BTreeSet<&str>
 ///
 /// `JsonSchema` was deliberately absent until ROADMAP Task 8.8, because
 /// nothing embedded this in the frozen
-/// `admissionlab.io/result/v1beta1` document and a premature derive
+/// `admissionlab.io/result/v1` document and a premature derive
 /// would have frozen a shape nobody had chosen. Task 8.8 chose it: a
 /// result document now carries an optional top-level `migration` array
 /// (`admissionlab_report::wire::MigrationSection`), so this type is part

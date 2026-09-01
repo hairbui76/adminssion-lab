@@ -1,11 +1,11 @@
-//! The frozen `admissionlab.io/result/v1beta1` contract.
+//! The frozen `admissionlab.io/result/v1` contract.
 //!
 //! Three things are asserted here, and together they are the freeze:
 //!
-//! 1. `schemas/result-v1beta1.json` is exactly what
-//!    [`admissionlab_report::result_v1beta1_json_schema`] currently
+//! 1. `schemas/result-v1.json` is exactly what
+//!    [`admissionlab_report::result_v1_json_schema`] currently
 //!    generates from the Rust result model, byte for byte.
-//! 2. `testdata/golden/result-v1beta1.json` is exactly what the shared
+//! 2. `testdata/golden/result-v1.json` is exactly what the shared
 //!    canonical example serializes to -- that assertion lives in
 //!    `tests/json.rs`, which owns the golden -- and *validates against
 //!    the generated schema*, which is this file's job.
@@ -42,29 +42,29 @@ mod support;
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use admissionlab_report::{render_json, result_v1beta1_json_schema, semantic_change_id};
+use admissionlab_report::{render_json, result_v1_json_schema, semantic_change_id};
 use serde_json::Value;
 use support::canonical_result;
 
 /// The checked-in golden document, embedded at compile time.
-const GOLDEN: &str = include_str!("../../../testdata/golden/result-v1beta1.json");
+const GOLDEN: &str = include_str!("../../../testdata/golden/result-v1.json");
 
-/// Path to `schemas/result-v1beta1.json`, at the workspace root (two
-/// levels above this crate's `CARGO_MANIFEST_DIR`).
+/// Path to `schemas/result-v1.json`, at the workspace root (two levels
+/// above this crate's `CARGO_MANIFEST_DIR`).
 fn schema_file_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../schemas/result-v1beta1.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../schemas/result-v1.json")
 }
 
-/// Path to `testdata/golden/result-v1beta1.json`.
+/// Path to `testdata/golden/result-v1.json`.
 fn golden_file_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/result-v1beta1.json")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../testdata/golden/result-v1.json")
 }
 
 /// The current schema as canonical, pretty-printed JSON text with a
 /// single trailing newline -- the exact form checked in at
 /// [`schema_file_path`].
 fn render_schema() -> String {
-    let schema = result_v1beta1_json_schema();
+    let schema = result_v1_json_schema();
     let mut text =
         serde_json::to_string_pretty(&schema).expect("a schemars::Schema always serializes");
     text.push('\n');
@@ -94,7 +94,7 @@ fn schema_matches_checked_in_file() {
     assert_eq!(
         render_schema(),
         expected,
-        "the generated schema no longer matches schemas/result-v1beta1.json; the result schema is \
+        "the generated schema no longer matches schemas/result-v1.json; the result schema is \
          frozen -- if this change is deliberate and additive, regenerate with `cargo test -p \
          admissionlab-report --test result_schema -- --ignored regenerate_schema_file`, and if it \
          removes or renames a field it needs a new schema version and a migration note instead"
@@ -127,7 +127,7 @@ fn the_schema_describes_the_frozen_version() {
 
     assert_eq!(
         golden["schemaVersion"],
-        Value::String("admissionlab.io/result/v1beta1".to_owned())
+        Value::String("admissionlab.io/result/v1".to_owned())
     );
     assert_eq!(
         golden["schemaVersion"],
@@ -330,13 +330,13 @@ fn a_change_identifier_ignores_its_grade_and_its_attribution() {
 }
 
 #[test]
-#[ignore = "run explicitly to (re)write schemas/result-v1beta1.json after a deliberate model change"]
+#[ignore = "run explicitly to (re)write schemas/result-v1.json after a deliberate model change"]
 fn regenerate_schema_file() {
     std::fs::write(schema_file_path(), render_schema()).expect("write schema file");
 }
 
 #[test]
-#[ignore = "run explicitly to (re)write testdata/golden/result-v1beta1.json after a deliberate model change"]
+#[ignore = "run explicitly to (re)write testdata/golden/result-v1.json after a deliberate model change"]
 fn regenerate_golden_file() {
     let rendered = render_json(&canonical_result()).expect("the canonical result serializes");
     std::fs::write(golden_file_path(), rendered).expect("write golden file");

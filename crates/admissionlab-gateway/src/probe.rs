@@ -177,7 +177,7 @@
 //!
 //! This is additive and deliberately kept *outside* [`HttpProbeResult`].
 //! That type is embedded verbatim in the frozen
-//! `admissionlab.io/result/v1beta1` document, and a sixth field on it
+//! `admissionlab.io/result/v1` document, and a sixth field on it
 //! would be a schema change; a request's echoed path is evidence a
 //! portable-contract suite asserts on, not something Task 6.9's
 //! comparator reports.

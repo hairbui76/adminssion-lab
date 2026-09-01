@@ -85,7 +85,7 @@
 # `recipes/ingress-nginx-legacy/README.md` for the retirement dates and
 # for Admission Lab's stance; nothing here is a recommendation to deploy
 # it.
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 
 baseline:

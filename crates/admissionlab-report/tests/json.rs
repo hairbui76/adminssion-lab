@@ -1,14 +1,13 @@
-//! Golden and behavioral tests for the frozen v1beta1 JSON result
-//! artifact.
+//! Golden and behavioral tests for the frozen v1 JSON result artifact.
 //!
 //! This file owns the golden document; `tests/result_schema.rs` owns the
 //! published schema, validates this golden against it, and asserts the
 //! freeze's own three requirements. There was never a checked-in Alpha
-//! *schema*, and the Alpha golden retired with the version it recorded:
-//! this crate emits exactly one result version, so one golden is the
-//! complete record of what it writes.
+//! *schema*, and each superseded golden retired with the version it
+//! recorded: this crate emits exactly one result version and reads none,
+//! so one golden is the complete record of what it writes.
 //!
-//! The golden lives in `testdata/golden/result-v1beta1.json` rather than
+//! The golden lives in `testdata/golden/result-v1.json` rather than
 //! inline, because unlike the terminal report this document is a
 //! contract other tools read: a reviewer changing the model should have
 //! to look at a real, complete, pretty-printed example of what consumers
@@ -28,8 +27,8 @@ use admissionlab_report::{ReportError, SCHEMA_VERSION, render_json, write_json_r
 use serde_json::Value;
 use support::canonical_result;
 
-/// The committed Beta example, embedded at compile time.
-const GOLDEN: &str = include_str!("../../../testdata/golden/result-v1beta1.json");
+/// The committed stable example, embedded at compile time.
+const GOLDEN: &str = include_str!("../../../testdata/golden/result-v1.json");
 
 /// A fresh, guaranteed-unique directory under the system temp directory,
 /// following the same convention as the other crates' filesystem tests.
@@ -56,8 +55,8 @@ fn the_canonical_result_matches_the_golden_byte_for_byte() {
 
     assert_eq!(
         rendered, GOLDEN,
-        "the frozen v1beta1 result shape changed; review \
-         `testdata/golden/result-v1beta1.json` and regenerate it deliberately with \
+        "the frozen v1 result shape changed; review \
+         `testdata/golden/result-v1.json` and regenerate it deliberately with \
          `cargo test -p admissionlab-report --test result_schema -- --ignored \
          regenerate_golden_file`"
     );
@@ -93,8 +92,8 @@ fn serialization_is_deterministic() {
 }
 
 #[test]
-fn the_schema_version_is_the_pinned_beta_identifier() {
-    assert_eq!(SCHEMA_VERSION, "admissionlab.io/result/v1beta1");
+fn the_schema_version_is_the_pinned_stable_identifier() {
+    assert_eq!(SCHEMA_VERSION, "admissionlab.io/result/v1");
     assert_eq!(
         golden_value()["schemaVersion"],
         Value::String(SCHEMA_VERSION.to_owned()),

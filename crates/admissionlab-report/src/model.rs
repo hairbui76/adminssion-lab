@@ -23,8 +23,8 @@
 //! # Serialization boundary
 //!
 //! This module holds the *in-memory* model. It is not the wire format.
-//! ROADMAP Task 7.2 froze the serialized document as
-//! `admissionlab.io/result/v1beta1`, and [`crate::wire`] defines that
+//! ROADMAP Task 9.1 freezes the serialized document as
+//! `admissionlab.io/result/v1`, and [`crate::wire`] defines that
 //! document as its own borrowed projection of a [`LabResult`]; read
 //! that module for the frozen shape, the three evidence sections, the
 //! explicit availability fields, and the change-identifier scheme.
@@ -59,22 +59,28 @@ use admissionlab_policy::{PolicyResult, Severity};
 use schemars::JsonSchema;
 use serde::{Serialize, Serializer};
 
-/// The Beta result schema identifier, written into
+/// The stable result schema identifier, written into
 /// [`LabResult::schema_version`].
 ///
-/// **Frozen** (ROADMAP Task 7.2, Global Constraint 9). Before v1.0 a
-/// reader of this document may be given *additional* optional fields;
-/// no existing field's meaning changes silently, and removing or
-/// renaming one requires a new schema version and a migration note. The
-/// shape this identifier names is generated into
-/// `schemas/result-v1beta1.json` from [`crate::wire::ResultDocument`]
-/// and recorded byte for byte in `testdata/golden/result-v1beta1.json`.
+/// **Frozen** (ROADMAP Task 9.1, Global Constraint 9). Within `v1.x` a
+/// reader of this document may be given *additional* optional fields; no
+/// existing field's meaning changes silently, no semantic-change wire
+/// string is renamed, and removing or renaming a field requires a new
+/// result schema version and a migration note. The shape this identifier
+/// names is generated into `schemas/result-v1.json` from
+/// [`crate::wire::ResultDocument`] and recorded byte for byte in
+/// `testdata/golden/result-v1.json`.
 ///
-/// This crate emits exactly one version. The preceding
-/// `admissionlab.io/result/v1alpha1` documents were explicitly
-/// experimental and are no longer produced; there was never a checked-in
-/// Alpha *schema* for them to be validated against.
-pub const SCHEMA_VERSION: &str = "admissionlab.io/result/v1beta1";
+/// This crate emits exactly one version, and reads none: a result is
+/// built from a run and serialized outward, so there is no "read an
+/// older result" path to keep working and no migration to write. The
+/// preceding `admissionlab.io/result/v1beta1` documents have the *same*
+/// shape — the stable freeze renamed nothing and removed nothing — and
+/// their published schema stays checked in at
+/// `schemas/result-v1beta1.json` as the contract those documents were
+/// written against. `admissionlab.io/result/v1alpha1` documents predate
+/// any checked-in schema and were explicitly experimental.
+pub const SCHEMA_VERSION: &str = "admissionlab.io/result/v1";
 
 /// One comparison run, ready to render.
 ///
@@ -170,7 +176,7 @@ pub struct LabResult {
 }
 
 /// Serializes a result as the frozen
-/// `admissionlab.io/result/v1beta1` document, and never as this
+/// `admissionlab.io/result/v1` document, and never as this
 /// struct's own field list.
 ///
 /// Hand-written rather than derived so that there is exactly one wire

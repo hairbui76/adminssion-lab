@@ -40,7 +40,7 @@ const GOLDEN: &str = r#"## Admission Lab: FAIL
 
 At least one unexpected critical difference. `admissionlab test` exits 1.
 
-Run beta-demo-run — result schema admissionlab.io/result/v1beta1 (frozen; additive changes only).
+Run beta-demo-run — result schema admissionlab.io/result/v1 (frozen; additive changes only).
 
 ### Fixtures
 

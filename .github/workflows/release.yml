@@ -187,11 +187,12 @@ jobs:
           {
             echo "Admission Lab \`${TAG}\` — Public Beta."
             echo
-            echo "Admission Lab is pre-1.0. The \`admissionlab.io/result/v1beta1\`"
-            echo "result schema is frozen and grows by addition only; the"
-            echo "configuration is \`admissionlab.io/v1beta1\`, and"
-            echo "\`admissionlab.io/v1alpha1\` configurations still load unchanged."
-            echo "See \`docs/schema-migrations.md\`. Nothing is stable until v1.0."
+            echo "The document contracts are frozen at v1 and grow by addition"
+            echo "only: the result schema is \`admissionlab.io/result/v1\`, the run"
+            echo "manifest is \`admissionlab.io/run/v1\`, and the configuration is"
+            echo "\`admissionlab.io/v1\` — with \`admissionlab.io/v1beta1\` and"
+            echo "\`admissionlab.io/v1alpha1\` configurations still loading unchanged."
+            echo "See \`docs/schema-migrations.md\`."
             echo
             echo "### Artifacts"
             echo

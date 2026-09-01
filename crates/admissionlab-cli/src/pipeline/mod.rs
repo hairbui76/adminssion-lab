@@ -887,9 +887,10 @@ fn prepare_inputs(
         crate::exit::disposition_for_spec_error(&error)
     })?;
     // Accepts every `apiVersion` this build still reads — a Public Alpha
-    // `admissionlab.io/v1alpha1` file as well as today's
-    // `admissionlab.io/v1beta1` — migrating the former before resolving it
-    // (ROADMAP Task 7.1 Step 2).
+    // `admissionlab.io/v1alpha1` or Public Beta `admissionlab.io/v1beta1`
+    // file as well as today's `admissionlab.io/v1` — migrating the older
+    // ones forward before resolving them (ROADMAP Task 7.1 Step 2, Task
+    // 9.1 Step 3).
     let lab = load_any_supported_lab(request.config).map_err(|error| {
         console.problem(&format!("failed to load lab configuration: {error}"));
         crate::exit::disposition_for_spec_error(&error)

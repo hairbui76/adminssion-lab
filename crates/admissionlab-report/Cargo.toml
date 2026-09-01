@@ -67,7 +67,7 @@ admissionlab-policy = { workspace = true }
 # unredacted payload. Same crate/library name mismatch (`json-patch` on
 # the registry, `json_patch` in Rust) the root `Cargo.toml` documents.
 json-patch = { workspace = true }
-# ROADMAP Task 7.2: `schema.rs` generates `schemas/result-v1beta1.json`
+# ROADMAP Task 9.1: `schema.rs` generates `schemas/result-v1.json`
 # from the same `wire` types that serialize a run's `result.json`, so the
 # published schema cannot drift from the document it describes. Same
 # version `admissionlab-spec` and `admissionlab-core` already resolve for

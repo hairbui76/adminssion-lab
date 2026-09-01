@@ -107,7 +107,7 @@ contract two weights and a sample count.
 **Those live in `tests/portable_contracts.rs`, as a repo-internal
 model, and deliberately not in `admissionlab-spec`.** Three reasons:
 
-1. `admissionlab.io/v1beta1` is frozen. Optional additive fields would
+1. `admissionlab.io/v1` is frozen. Optional additive fields would
    be permitted before v1.0 under the migration policy, so this is a
    judgement rather than a prohibition — but a frozen schema should
    grow for users, not for the project's own test tooling.

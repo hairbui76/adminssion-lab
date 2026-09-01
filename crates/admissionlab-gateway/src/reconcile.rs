@@ -111,7 +111,7 @@ use async_trait::async_trait;
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::{ApiResource, DynamicObject};
 use kube::{Api, Client, Config};
-// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1` result
 // schema): every type this file defines that reaches a run's result
 // document is embedded verbatim in it, so the schema generated from the
 // result model has to describe it. Derives and `#[schemars(with = ...)]`

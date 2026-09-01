@@ -32,7 +32,7 @@ inside a disposable cluster (`admissionlab-test-webhook`, `admissionlab-echo`).
 
 | Crate | What it owns |
 | --- | --- |
-| `admissionlab-spec` | The `Lab` document in every supported version — `admissionlab.io/v1beta1` (current) and `admissionlab.io/v1alpha1` (migrated on load) — with the strict models, `load_any_supported_lab`, `migrate_v1alpha1_to_v1beta1`, `resolve_lab`, and the JSON Schemas. Owns the *resolved* install/readiness/normalization/capability vocabulary every other crate names. |
+| `admissionlab-spec` | The `Lab` document in every supported version — `admissionlab.io/v1` (current), `admissionlab.io/v1beta1` and `admissionlab.io/v1alpha1` (both migrated on load) — with the strict models, `load_any_supported_lab`, `migrate_v1alpha1_to_v1beta1`, `migrate_v1beta1_to_v1`, `resolve_lab`, and the JSON Schemas. Owns the *resolved* install/readiness/normalization/capability vocabulary every other crate names. |
 | `admissionlab-core` | Run identity and workspace: `RunId`/`FixtureId`/`Side`/`Diagnostic`, `ArtifactStore`/`RunPaths`, `ProcessRunner`, `RunManifest`, `StageTimings`, `RunDisposition`, and `LabRunner` — the orchestration of the stages that happen *while clusters exist*. Declares the `ClusterManager`, `StackInstaller` and `FixtureCapture` traits. |
 | `admissionlab-cluster` | `KindClusterManager`: the `kind` lifecycle, per-side kubeconfigs, node-image resolution against `compatibility/kubernetes.yaml`, and the rendered audit policy every cluster boots with. |
 | `admissionlab-installer` | Installing one side's components: `HelmInstaller`, the raw-manifest backend, the readiness probes, and `install_stack`'s ordered component loop. |

@@ -222,10 +222,10 @@ pub enum ReproduceError {
     /// hopefully: reproducing from a document whose field meanings may
     /// have changed is exactly the silent wrongness this command exists
     /// to avoid. Which versions *are* understood is
-    /// [`SUPPORTED_SCHEMA_VERSIONS`] — as of ROADMAP Task 7.3 that is
-    /// both `v1beta1` and `v1alpha1`, because a manifest records
-    /// something that already happened and a run recorded before the
-    /// promotion is exactly as reproducible as one recorded after it.
+    /// [`SUPPORTED_SCHEMA_VERSIONS`] — as of ROADMAP Task 9.1 that is
+    /// `run/v1` and both pre-stable identifiers, because a manifest
+    /// records something that already happened and a run recorded before
+    /// a promotion is exactly as reproducible as one recorded after it.
     ///
     /// Reached only by a [`RunManifest`] built in memory: a manifest read
     /// from bytes has already been through
@@ -400,10 +400,10 @@ pub fn plan_reproduction_from_config(
     };
 
     // `load_any_supported_lab`, not the Alpha-only `load_lab`: a run
-    // recorded against a v1beta1 configuration must be reproducible from
-    // that same file (Task 7.1 made more than one `apiVersion` loadable;
-    // the hash above already verified the exact bytes, so which
-    // vocabulary reads them is provenance, not drift).
+    // recorded against a configuration in any supported version must be
+    // reproducible from that same file (Tasks 7.1 and 9.1 made three
+    // `apiVersion`s loadable; the hash above already verified the exact
+    // bytes, so which vocabulary reads them is provenance, not drift).
     let resolved_lab = load_any_supported_lab(config).map_err(|source| ReproduceError::Config {
         source: Box::new(source),
         config: Box::new(config_input.clone()),

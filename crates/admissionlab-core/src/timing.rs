@@ -100,7 +100,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1` result
 // schema): `StageTimings` is embedded in that document, so the generated
 // schema has to describe it and its four nested stage types. Derives and
 // `#[schemars(with = ...)]` restatements of what the existing

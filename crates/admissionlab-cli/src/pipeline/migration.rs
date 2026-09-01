@@ -112,7 +112,7 @@
 //!
 //! `admissionlab_core::TimedStage` and
 //! `admissionlab_core::RunStage` are the run manifest's own frozen stage
-//! vocabulary (`admissionlab.io/run-manifest/v1beta1`). Adding a
+//! vocabulary (`admissionlab.io/run/v1`). Adding a
 //! `MigrationSuite` variant would be a change to a *different* frozen
 //! document than the one Task 8.8 owns, made in passing, so it is not
 //! made: the migration phase is not separately timed and records no

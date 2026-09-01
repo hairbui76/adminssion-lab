@@ -1,31 +1,33 @@
-# Configuration reference — `admissionlab.io/v1beta1`
+# Configuration reference — `admissionlab.io/v1`
 
 The complete reference for `admissionlab.yaml` (the `Lab` document) and its
 companion `expectations.yaml` (the `Expectations` document).
 
 A machine-readable JSON Schema for the `Lab` document lives at
-[`schemas/admissionlab-v1beta1.json`](../schemas/admissionlab-v1beta1.json).
+[`schemas/admissionlab-v1.json`](../schemas/admissionlab-v1.json).
 Point your editor at it and a wrong `apiVersion` or a misspelled key is flagged
 as you type.
 
-> **Public Beta.** `admissionlab.io/v1beta1` is the current configuration
-> version and the one every file under [`examples/`](../examples/) is written
-> in. It grows only by **addition** from here — a new optional field with a
-> default that preserves existing behavior. A rename or a removal needs a new
-> `apiVersion` and a new migration, exactly as `v1alpha1` → `v1beta1` had.
-> Nothing is *stable* until v1.0.
+> **Stable.** `admissionlab.io/v1` is the current configuration version and the
+> one every file under [`examples/`](../examples/) is written in. It grows only
+> by **addition** — a new optional field with a default that preserves existing
+> behavior. Within `v1.x` no field changes meaning and no required field is
+> removed; a rename or a removal needs a `v2` with a migration, which is a
+> deliberately expensive thing to ask for.
 
-> **`admissionlab.io/v1alpha1` still loads, unchanged.** You do not have to
-> migrate anything to run this release. See
-> [Reading a `v1alpha1` configuration](#reading-a-v1alpha1-configuration) below
-> and [`docs/schema-migrations.md`](schema-migrations.md) for the field-by-field
+> **`admissionlab.io/v1beta1` and `admissionlab.io/v1alpha1` still load,
+> unchanged.** You do not have to migrate anything to run this release, and the
+> promotion to `v1` renamed nothing: a `v1beta1` file becomes a `v1` file by
+> editing its `apiVersion` line and nothing else. See
+> [Reading an older configuration](#reading-an-older-configuration) below and
+> [`docs/schema-migrations.md`](schema-migrations.md) for the field-by-field
 > record.
 
 ---
 
 ## Contents
 
-- [Reading a `v1alpha1` configuration](#reading-a-v1alpha1-configuration)
+- [Reading an older configuration](#reading-an-older-configuration)
 - [Two strictness rules that apply everywhere](#two-strictness-rules-that-apply-everywhere)
 - [Path resolution](#path-resolution)
 - [Top-level fields](#top-level-fields)
@@ -42,51 +44,60 @@ as you type.
 
 ---
 
-## Reading a `v1alpha1` configuration
+## Reading an older configuration
 
-A `v1alpha1` lab document loads and runs exactly as it always did. The loader
-accepts both versions, migrates a `v1alpha1` document to the `v1beta1` model in
-memory, and resolves that — so there is one resolver, one resolved shape, and
-no behavior that depends on which version you wrote.
+A `v1beta1` or `v1alpha1` lab document loads and runs exactly as it always did.
+The loader accepts all three versions and migrates an older document forward
+one version boundary at a time — `v1alpha1` → `v1beta1` → `v1` — in memory,
+then resolves that. There is one resolver, one resolved shape, and no behavior
+that depends on which version you wrote.
 
-**Two keys were renamed, and only two.** Both times, to put the unit in the
+**`v1beta1` → `v1` renamed nothing.** Every key, default and meaning is
+identical; the only edit is the `apiVersion` line. The freeze audit that
+reached that conclusion, field by field, is in
+[`docs/schema-migrations.md`](schema-migrations.md).
+
+**`v1alpha1` → `v1beta1` renamed two keys, and only two.** Both times, to put the unit in the
 name: the value was always plain milliseconds, and a bare integer named
 `absoluteIncrease` or `reconciliationTimeout` does not say so. A reader had to
 open this page to find out whether `50` meant fifty milliseconds or fifty
 seconds — which is precisely the kind of question a configuration file should
 answer by itself.
 
-| `v1alpha1` | `v1beta1` | Value |
+| `v1alpha1` | `v1beta1` and `v1` | Value |
 | --- | --- | --- |
 | `policy.latency.absoluteIncrease` | `policy.latency.absoluteIncreaseMillis` | Unchanged. Milliseconds in both. |
 | `gateway.reconciliationTimeout` | `gateway.reconciliationTimeoutMillis` | Unchanged. Milliseconds in both. |
 
-Nothing else moved: every other key is spelled identically in both versions.
+Nothing else moved: every other key is spelled identically in all three
+versions.
 
-**The two spellings do not mix.** A `v1beta1` document that says
+**The two spellings do not mix.** A `v1` or `v1beta1` document that says
 `absoluteIncrease` is a named parse error, and so is a `v1alpha1` document that
 says `absoluteIncreaseMillis`. That is deliberate — an alias would let a file
 mean something it does not say — and it is the one thing to watch for when you
 migrate: change the `apiVersion` line and the two keys **together**.
 
-To migrate by hand: rewrite `apiVersion:` to `admissionlab.io/v1beta1`, then
-rename whichever of those two keys your file actually uses. There is no
-migration command, because there is nothing a command would do that a
-three-line edit does not.
+To migrate by hand: rewrite `apiVersion:` to `admissionlab.io/v1`, then rename
+whichever of those two keys your file actually uses (nothing to rename if you
+are coming from `v1beta1`). There is no migration command, because there is
+nothing a command would do that a three-line edit does not.
 
 [`docs/schema-migrations.md`](schema-migrations.md) is the full record: what
 each rename was for, which names were examined and deliberately kept, and how
-the same discipline applies to the result and run-manifest documents. The
-`v1alpha1` schema itself stays checked in, frozen, at
+the same discipline applies to the result and run-manifest documents. Both
+older schemas stay checked in, frozen, at
+[`schemas/admissionlab-v1beta1.json`](../schemas/admissionlab-v1beta1.json) and
 [`schemas/admissionlab-v1alpha1.json`](../schemas/admissionlab-v1alpha1.json) —
-an editor pointed at it still validates an Alpha file correctly.
+an editor pointed at either still validates a file of that version correctly.
 
-`testdata/configs/renamed-fields-v1alpha1.yaml` is a complete `v1alpha1` lab —
-every optional section populated, both renamed keys in their old spelling —
-kept in this repository, and loaded by
-`crates/admissionlab-spec/tests/migrate_alpha_beta.rs` on every test run, for
-no other purpose than to keep proving that an Alpha file nobody touched still
-resolves to exactly what it always did.
+`testdata/configs/renamed-fields-v1alpha1.yaml` and its `-v1beta1` and `-v1`
+twins are one complete lab — every optional section populated, both renamed
+keys in each spelling — written out three times and kept in this repository.
+`crates/admissionlab-spec/tests/migrate_alpha_beta.rs` and
+`tests/stable_schema.rs` load all three on every test run, for no other purpose
+than to keep proving that an older file nobody touched still resolves to
+exactly what it always did.
 
 ---
 
@@ -100,9 +111,9 @@ resolves to exactly what it always did.
    `releaseName`, `absoluteIncreaseMillis`, `objectPath`, `fixtureGlob`.
 
 `kind` is checked against its one legal value (`Lab`) immediately after
-parsing, and `apiVersion` against the supported set —
-`admissionlab.io/v1beta1` (current) and `admissionlab.io/v1alpha1` (migrated on
-load). Any other value is refused by name, listing both.
+parsing, and `apiVersion` against the supported set — `admissionlab.io/v1`
+(current), `admissionlab.io/v1beta1` and `admissionlab.io/v1alpha1` (both
+migrated on load). Any other value is refused by name, listing all three.
 
 ---
 
@@ -137,7 +148,7 @@ Absolute paths are used as written.
 ## Top-level fields
 
 ```text
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 baseline: { ... }        # required
 candidate: { ... }       # required
@@ -150,13 +161,13 @@ expectationsFile: ...    # optional
 
 | Field | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `apiVersion` | string | yes | — | `admissionlab.io/v1beta1`, or `admissionlab.io/v1alpha1` (migrated on load). Nothing else. |
+| `apiVersion` | string | yes | — | `admissionlab.io/v1`, or `admissionlab.io/v1beta1` / `admissionlab.io/v1alpha1` (migrated on load). Nothing else. |
 | `kind` | string | yes | — | Must be exactly `Lab`. |
 | `baseline` | object | yes | — | The unmodified stack being compared against. |
 | `candidate` | object | yes | — | The stack under test. |
 | `fixtures` | object | yes | — | Which fixtures to replay through both sides. |
 | `gateway` | object | no | none | The Gateway behavior suite. Omit the whole section for an admission-only lab; see [`gateway`](#gateway). |
-| `migration` | object | no | none | The Ingress-to-Gateway migration suite. `v1beta1` only — a `v1alpha1` document has no such key and always resolves to none. See [`migration`](#migration). |
+| `migration` | object | no | none | The Ingress-to-Gateway migration suite. `v1beta1` and later only — a `v1alpha1` document has no such key and always resolves to none. See [`migration`](#migration). |
 | `policy` | object | no | all defaults | Omit the whole section to accept every default. |
 | `expectationsFile` | path | no | none | Path to an `Expectations` document, resolved against the config file's directory. A missing file here is exit `2` — you named it, so it is your configuration at fault. |
 
@@ -647,7 +658,7 @@ policy:
 | --- | --- | --- | --- |
 | `failOn` | set of change-kind names | `[]` | Categories that fail the run when observed, *in addition to* the default-critical set. Names are the wire names in the table below — exactly the strings a JSON report prints, so a name copied out of a report always works. An unknown name fails at load time, before any cluster exists. Duplicates collapse. |
 | `overrides` | list | `[]` | Targeted exceptions, see below. |
-| `latency.absoluteIncreaseMillis` | integer milliseconds | `100` | Written as a plain integer (`absoluteIncreaseMillis: 50`), not a duration object. Spelled `absoluteIncrease` in `v1alpha1`; see [Reading a `v1alpha1` configuration](#reading-a-v1alpha1-configuration). |
+| `latency.absoluteIncreaseMillis` | integer milliseconds | `100` | Written as a plain integer (`absoluteIncreaseMillis: 50`), not a duration object. Spelled `absoluteIncrease` in `v1alpha1`; see [Reading an older configuration](#reading-an-older-configuration). |
 | `latency.relativeMultiplier` | number | `2.0` | — |
 
 ### Latency thresholds
@@ -751,7 +762,7 @@ and does not hide it from the report** — it only stops it from failing the run
 Point at it from the lab document:
 
 ```yaml
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 baseline:
   kubernetes: "1.36.4"
@@ -765,9 +776,10 @@ expectationsFile: expectations.yaml
 
 And write it as its own document. **Note the `apiVersion`: it is
 `v1alpha1`, and that is correct.** `Expectations` is a separate document with
-its own version line, and Public Beta promoted the `Lab` document only —
-`admissionlab.io/v1alpha1` is the one value this file's loader accepts, whatever
-the lab beside it says. Setting it to `v1beta1` to match is exit `2`.
+its own version line, and neither the Public Beta promotion nor the stable
+freeze touched anything but the `Lab` document — `admissionlab.io/v1alpha1` is
+the one value this file's loader accepts, whatever the lab beside it says.
+Setting it to `v1` to match is exit `2`.
 
 ```yaml
 apiVersion: admissionlab.io/v1alpha1
@@ -798,7 +810,7 @@ expectations:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `apiVersion` | string | yes | Must be exactly `admissionlab.io/v1alpha1` — **not** the lab document's `v1beta1`. This document versions independently of the `Lab` one and has not been promoted; when it is, [`docs/schema-migrations.md`](schema-migrations.md) will carry that migration too. |
+| `apiVersion` | string | yes | Must be exactly `admissionlab.io/v1alpha1` — **not** the lab document's `v1`. This document versions independently of the `Lab` one and has not been promoted; when it is, [`docs/schema-migrations.md`](schema-migrations.md) will carry that migration too. |
 | `kind` | string | yes | Must be exactly `Expectations`. |
 | `expectations[].id` | string | yes | Stable, file-unique handle. Appears in the report and in stale-expectation warnings, so renaming it renames it everywhere. |
 | `expectations[].fixtures` | glob | yes | A glob over fixture IDs. **`"*"` is how you say "any fixture"** — spelled out rather than implied by omission, because an expectation silently spanning every fixture in the repository is not something to arrive at by leaving a line out. |

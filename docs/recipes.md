@@ -248,7 +248,7 @@ Kyverno recipe transcribed into a lab document, comparing it against the
 previous chart version:
 
 ```yaml
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 
 baseline:
@@ -293,7 +293,7 @@ section uses the identical vocabulary, so the recipe's entries paste in
 verbatim:
 
 ```yaml
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 baseline:
   kubernetes: "1.35.8"

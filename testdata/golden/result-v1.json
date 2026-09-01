@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "admissionlab.io/result/v1beta1",
+  "schemaVersion": "admissionlab.io/result/v1",
   "runId": "beta-demo-run",
   "summary": {
     "fixturesTotal": 5,

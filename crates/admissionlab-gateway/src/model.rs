@@ -71,7 +71,7 @@ pub use admissionlab_spec::{
 /// -- the same one-way asymmetry, for the same reason,
 /// `admissionlab_admission::AdmissionOutcome` documents.
 // ROADMAP Task 7.2: `GatewayIdentity` is embedded in the frozen
-// `admissionlab.io/result/v1beta1` result document (inside
+// `admissionlab.io/result/v1` result document (inside
 // `GatewayEvidence`), so the generated schema has to describe it.
 // Derive only -- no field, name, or semantic change.
 #[derive(

@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 
 use admissionlab_spec::{
     MigrationError, ResolvedLab, SpecError, V1Alpha1Lab, V1Beta1Lab, load_any_supported_lab,
-    load_lab, migrate_v1alpha1_to_v1beta1, resolve_lab, v1alpha1, v1beta1,
+    load_lab, migrate_v1alpha1_to_v1beta1, resolve_lab, v1, v1alpha1, v1beta1,
 };
 
 // ---------------------------------------------------------------------
@@ -109,12 +109,13 @@ fn valid_alpha_documents() -> Vec<PathBuf> {
 }
 
 /// The `examples/` a user copies from — every one of which must be a
-/// `v1beta1` document, and must load.
+/// document in the current version, and must load.
 fn example_documents() -> Vec<PathBuf> {
     let root = workspace_root();
     vec![
         root.join("examples/admission-basic/admissionlab.yaml"),
         root.join("examples/gateway-istio/admissionlab.yaml"),
+        root.join("examples/ingress-to-gateway/admissionlab.yaml"),
         root.join("examples/kyverno-istio-upgrade/admissionlab.yaml"),
     ]
 }
@@ -177,31 +178,33 @@ fn the_alpha_read_support_fixtures_really_are_alpha_documents() {
 }
 
 #[test]
-fn the_examples_directory_is_written_in_the_current_v1beta1() {
-    // The reversed guard (ROADMAP Task 7.7 step 6). `examples/` is what a
-    // user copies, so it must showcase the version this release actually
-    // documents — an example still written in the previous version is
-    // how a deprecated spelling outlives its deprecation. Alpha
-    // read-support is proven by `testdata/configs/` instead, which is
-    // where a compatibility fixture belongs: nobody copies it into a
-    // repository by accident.
+fn the_examples_directory_is_written_in_the_current_version() {
+    // The reversed guard (ROADMAP Task 7.7 step 6, re-aimed at the stable
+    // version by Task 9.1 step 5). `examples/` is what a user copies, so
+    // it must showcase the version this release actually documents — an
+    // example still written in a previous version is how a superseded
+    // spelling outlives its supersession. Read support for the older
+    // versions is proven by `testdata/configs/` instead, which is where a
+    // compatibility fixture belongs: nobody copies it into a repository
+    // by accident.
     for path in example_documents() {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("{} must be readable: {e}", path.display()));
         assert!(
-            text.contains(v1beta1::API_VERSION),
+            text.contains(&format!("apiVersion: {}", v1::API_VERSION)),
             "{} does not declare {}; every example must showcase the current \
              configuration version",
             path.display(),
-            v1beta1::API_VERSION
+            v1::API_VERSION
         );
-        assert!(
-            !text.contains(v1alpha1::API_VERSION),
-            "{} still mentions {}; migrate it, or move the comment that names the old \
-             version into docs/schema-migrations.md",
-            path.display(),
-            v1alpha1::API_VERSION
-        );
+        for superseded in [v1beta1::API_VERSION, v1alpha1::API_VERSION] {
+            assert!(
+                !text.contains(&format!("apiVersion: {superseded}")),
+                "{} is still written in {superseded}; migrate it, or move the comment that \
+                 names the old version into docs/schema-migrations.md",
+                path.display()
+            );
+        }
     }
 }
 
@@ -313,16 +316,19 @@ fn the_renamed_duration_keys_are_really_renamed() {
 
 #[test]
 fn an_unsupported_api_version_is_refused_and_names_every_supported_version() {
+    // `admissionlab.io/v2` rather than the `admissionlab.io/v1` this test
+    // used to try: v1 became a *supported* version at ROADMAP Task 9.1,
+    // and an "unsupported version" test has to name one that really is.
     let dir = TempDir::new("unsupported");
     let path = dir.write_config(
-        "apiVersion: admissionlab.io/v1\n\
+        "apiVersion: admissionlab.io/v2\n\
          kind: Lab\n\
          baseline:\n  kubernetes: \"1.29.4\"\n\
          candidate:\n  kubernetes: \"1.29.4\"\n\
          fixtures:\n  include:\n    - \"fixtures/**/*.yaml\"\n",
     );
 
-    let error = load_any_supported_lab(&path).expect_err("v1 is not a supported version");
+    let error = load_any_supported_lab(&path).expect_err("v2 is not a supported version");
     let message = error.to_string();
     assert!(matches!(error, SpecError::Validation { .. }), "{message}");
     for version in [v1beta1::API_VERSION, v1alpha1::API_VERSION] {
@@ -332,7 +338,7 @@ fn an_unsupported_api_version_is_refused_and_names_every_supported_version() {
         );
     }
     assert!(
-        message.contains("admissionlab.io/v1\""),
+        message.contains("admissionlab.io/v2\""),
         "the error must quote what was actually found, got: {message}"
     );
 }

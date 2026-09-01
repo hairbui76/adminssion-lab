@@ -7,17 +7,18 @@
 //!
 //! # The schema is frozen
 //!
-//! [`crate::model::SCHEMA_VERSION`] is `admissionlab.io/result/v1beta1`
-//! and this document is **frozen** (ROADMAP Task 7.2, Global Constraint
-//! 9). Before v1.0 a reader may be given additional optional fields; no
-//! existing field's meaning changes silently, and removing or renaming
-//! one requires a new schema version and a migration note. This writer
-//! emits that one version and no other.
+//! [`crate::model::SCHEMA_VERSION`] is `admissionlab.io/result/v1` and
+//! this document is **frozen** (ROADMAP Task 9.1, Global Constraint 9).
+//! Within `v1.x` a reader may be given additional optional fields; no
+//! existing field's meaning changes silently, no semantic-change wire
+//! string is renamed, and removing or renaming a field requires a new
+//! result schema version and a migration note. This writer emits that one
+//! version and no other.
 //!
 //! The shape itself is [`crate::wire::ResultDocument`]'s, not
 //! [`LabResult`]'s field list -- read that module before changing
 //! anything a consumer can see. The published schema is
-//! `schemas/result-v1beta1.json`, generated from those same types by
+//! `schemas/result-v1.json`, generated from those same types by
 //! [`crate::schema`].
 //!
 //! # Determinism

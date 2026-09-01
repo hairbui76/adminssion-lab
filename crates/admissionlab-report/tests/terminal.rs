@@ -35,7 +35,7 @@ use support::canonical_result;
 /// the value this renders (see `admissionlab_core::timing`). They are
 /// absent, not zero.
 const GOLDEN: &str = r#"Admission Lab result  run beta-demo-run
-schema admissionlab.io/result/v1beta1 (frozen; additive changes only)
+schema admissionlab.io/result/v1 (frozen; additive changes only)
 
 Environments
   baseline   Kubernetes v1.34.1  (sidecar-injector 1.26.3)

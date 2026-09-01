@@ -3,10 +3,11 @@
 //!
 //! Two entry points, one of which is the one to use:
 //!
-//! - [`load_any_supported_lab`] is the loader (ROADMAP Task 7.1 Step 2).
-//!   It dispatches on the document's own `apiVersion`, parses it with
-//!   that version's model, migrates it to the current model if it is not
-//!   already, and returns a fully resolved [`ResolvedLab`].
+//! - [`load_any_supported_lab`] is the loader (ROADMAP Task 7.1 Step 2,
+//!   Task 9.1 Step 3). It dispatches on the document's own `apiVersion`,
+//!   parses it with that version's model, migrates it forward to the
+//!   current model if it is not already, and returns a fully resolved
+//!   [`ResolvedLab`].
 //! - [`load_lab`] is the original `v1alpha1`-only loader, kept because it
 //!   is the one entry point that hands back the *unresolved*
 //!   [`LoadedLab`] — the as-written document, paths and all — which is
@@ -35,8 +36,9 @@ use std::path::Path;
 use serde::Deserialize;
 
 use crate::error::SpecError;
-use crate::migrate::migrate_v1alpha1_to_v1beta1;
+use crate::migrate::{MigrationError, migrate_v1alpha1_to_v1beta1, migrate_v1beta1_to_v1};
 use crate::resolve::{LoadedLab, ResolvedLab};
+use crate::v1::{self, V1Lab};
 use crate::v1alpha1::{self, V1Alpha1Lab};
 use crate::v1beta1::{self, V1Beta1Lab};
 use crate::{resolve, validate};
@@ -44,9 +46,10 @@ use crate::{resolve, validate};
 /// Every `apiVersion` [`load_any_supported_lab`] accepts, current first.
 ///
 /// Ordered deliberately: an error message built from this list names the
-/// version a user should be writing today before the one that is merely
+/// version a user should be writing today before the ones that are merely
 /// still read.
-pub const SUPPORTED_API_VERSIONS: [&str; 2] = [v1beta1::API_VERSION, v1alpha1::API_VERSION];
+pub const SUPPORTED_API_VERSIONS: [&str; 3] =
+    [v1::API_VERSION, v1beta1::API_VERSION, v1alpha1::API_VERSION];
 
 /// Just enough of a lab document to decide which model to parse it with.
 ///
@@ -106,23 +109,28 @@ pub fn declared_api_version(path: &Path) -> Result<String, SpecError> {
 /// `apiVersion` it declares.
 ///
 /// This is the entry point the CLI uses, and the only one that
-/// implements ROADMAP Task 7.1 Step 2's promise that Public Alpha
-/// configurations keep working:
+/// implements ROADMAP Task 7.1 Step 2's and Task 9.1 Step 3's promise
+/// that every configuration a supported release accepted keeps working:
 ///
-/// - `admissionlab.io/v1beta1` documents are parsed with the current
-///   model ([`V1Beta1Lab`]) and resolved directly.
+/// - `admissionlab.io/v1` documents are parsed with the current stable
+///   model ([`V1Lab`]) and resolved directly.
+/// - `admissionlab.io/v1beta1` documents are parsed with the frozen Beta
+///   model ([`V1Beta1Lab`]) and migrated by [`migrate_v1beta1_to_v1`].
 /// - `admissionlab.io/v1alpha1` documents are parsed with the frozen
-///   Alpha model ([`V1Alpha1Lab`]), migrated by
-///   [`migrate_v1alpha1_to_v1beta1`], and then resolved by the very same
-///   code — there is one resolver, not one per version, which is what
-///   makes "an Alpha config behaves identically" a structural property
-///   rather than a pair of implementations to keep in sync.
+///   Alpha model ([`V1Alpha1Lab`]) and migrated one boundary at a time,
+///   through [`migrate_v1alpha1_to_v1beta1`] and then
+///   [`migrate_v1beta1_to_v1`].
 /// - Anything else is refused with an error naming every version that
 ///   *is* supported.
 ///
+/// All three then meet the very same resolver — there is one, not one
+/// per version, which is what makes "an older config behaves identically"
+/// a structural property rather than three implementations to keep in
+/// sync.
+///
 /// The returned [`ResolvedLab`] carries no trace of which version it came
 /// from: by the time it exists, the document has been normalized to one
-/// model. No crate above this one needs to know two versions exist.
+/// model. No crate above this one needs to know three versions exist.
 ///
 /// # Errors
 ///
@@ -145,25 +153,35 @@ pub fn load_any_supported_lab(path: &Path) -> Result<ResolvedLab, SpecError> {
         return Err(unsupported_api_version(path, None));
     };
 
-    let beta = if api_version == v1beta1::API_VERSION {
+    // Unreachable in practice — every branch below checks the document's
+    // `apiVersion` and `kind` before migrating, which is the only
+    // precondition a migration has (see `migrate.rs`). Mapped rather than
+    // unwrapped anyway: an unreachable branch that panics is still a
+    // panic if the reasoning behind it ever stops holding.
+    let migration_failed = |error: MigrationError| SpecError::validation(path, "apiVersion", error);
+
+    let stable = if api_version == v1::API_VERSION {
+        let raw: V1Lab = parse_document(&text, path)?;
+        validate::document_header(v1::API_VERSION, &raw.api_version, &raw.kind, path)?;
+        raw
+    } else if api_version == v1beta1::API_VERSION {
         let raw: V1Beta1Lab = parse_document(&text, path)?;
         validate::document_header(v1beta1::API_VERSION, &raw.api_version, &raw.kind, path)?;
-        raw
+        migrate_v1beta1_to_v1(raw).map_err(migration_failed)?
     } else if api_version == v1alpha1::API_VERSION {
         let raw: V1Alpha1Lab = parse_document(&text, path)?;
         validate::api_version_and_kind(&raw.api_version, &raw.kind, path)?;
-        // Unreachable in practice — the check above already proved this
-        // document's `apiVersion` and `kind`, which is the only
-        // precondition migration has (see `migrate.rs`). Mapped rather
-        // than unwrapped anyway: an unreachable branch that panics is
-        // still a panic if the reasoning behind it ever stops holding.
-        migrate_v1alpha1_to_v1beta1(raw)
-            .map_err(|error| SpecError::validation(path, "apiVersion", error))?
+        // One step per version boundary, chained: an Alpha document
+        // travels the same code a Beta one does for the second half of
+        // its journey. See `migrate.rs`'s "Chained rather than one
+        // function per pair".
+        let beta = migrate_v1alpha1_to_v1beta1(raw).map_err(migration_failed)?;
+        migrate_v1beta1_to_v1(beta).map_err(migration_failed)?
     } else {
         return Err(unsupported_api_version(path, Some(&api_version)));
     };
 
-    resolve::resolve_beta_lab(path.to_path_buf(), beta)
+    resolve::resolve_v1_lab(path.to_path_buf(), stable)
 }
 
 /// Reads and strictly parses the `admissionlab.yaml` configuration file at

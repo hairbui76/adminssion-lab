@@ -1,0 +1,860 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "V1Lab",
+  "description": "The root of a stable `admissionlab.yaml` configuration file.\n\nField for field, type for type, and default for default, this is\n[`crate::V1Beta1Lab`] — see this module's \"Zero wire changes from\n`v1beta1`\". The two differ in exactly one place, and it is the one\nplace they have to: the `apiVersion` a document must carry to be\nparsed by this model.",
+  "type": "object",
+  "properties": {
+    "apiVersion": {
+      "description": "Must equal [`API_VERSION`]; checked by\n[`crate::load_any_supported_lab`] and `const`-locked in the\ngenerated schema (see [`api_version_schema`]).",
+      "type": "string",
+      "const": "admissionlab.io/v1"
+    },
+    "baseline": {
+      "description": "The unmodified stack being compared against.",
+      "$ref": "#/$defs/EnvironmentSpec"
+    },
+    "candidate": {
+      "description": "The stack under test for regressions.",
+      "$ref": "#/$defs/EnvironmentSpec"
+    },
+    "expectationsFile": {
+      "description": "Path to an expectations file, resolved by [`crate::resolve_lab`]\nagainst this configuration file's own directory.\n\nThe `Expectations` document versions independently of this one and\nis still `admissionlab.io/v1alpha1`; promoting the lab document\ndid not promote it (see `docs/schema-migrations.md`).",
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null
+    },
+    "fixtures": {
+      "description": "Which fixtures to replay through both environments.",
+      "$ref": "#/$defs/FixtureSelectionSpec"
+    },
+    "gateway": {
+      "description": "The Gateway behavior suite. Omit the section entirely for an\nadmission-only lab — [`crate::ResolvedLab::gateway`] is then\n`None`.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/GatewaySuiteSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "kind": {
+      "description": "Must equal [`crate::model::KIND`]; checked by\n[`crate::load_any_supported_lab`] and `const`-locked in the\ngenerated schema (see [`crate::model::kind_schema`]).",
+      "type": "string",
+      "const": "Lab"
+    },
+    "migration": {
+      "description": "The Ingress-to-Gateway migration suite. Omit the section entirely\n— as every lab that is not migrating off `Ingress` does — and\n[`crate::ResolvedLab::migration`] is `None`.\n\nPart of the stable contract, not an experiment carried into it:\nthe section landed in `v1beta1` after that version's freeze, as\nthe additive change the Beta rule allowed, and Task 9.1's field\naudit reviewed it on the same terms as every field that predates\nit.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/MigrationSuiteSpec"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "policy": {
+      "description": "Regression policy. Omit entirely to accept every field's default\n(see [`PolicySpec`]'s `Default` impl).",
+      "$ref": "#/$defs/PolicySpec"
+    }
+  },
+  "additionalProperties": false,
+  "required": [
+    "apiVersion",
+    "kind",
+    "baseline",
+    "candidate",
+    "fixtures"
+  ],
+  "$defs": {
+    "ComponentSpec": {
+      "description": "One admission-stack component to install into an [`EnvironmentSpec`].\n\nThis is the **user-facing YAML form**. [`crate::component`] defines\nthe separate resolved component model [`crate::resolve_lab`] converts\nthis into ([`crate::ResolvedComponent`]); this type only carries what\na user writes by hand.",
+      "type": "object",
+      "properties": {
+        "install": {
+          "description": "How to install this component. Required by [`crate::resolve_lab`]\n— recipe-driven installation (Task 2.5) does not exist yet, so\nthis is currently the only source of a resolved\n[`crate::InstallMethod`]. Any relative paths inside it\n(`HelmInstallSpec::values_files`, `ManifestsInstallSpec::paths`)\nare resolved against the configuration file's own directory by\n[`crate::resolve_lab`], the same as every other path in the\ndocument — see [`crate::resolve::config_directory`].",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/InstallMethodSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "name": {
+          "description": "The component's name, used to correlate it with its counterpart in\nthe other environment and to detect duplicates. Required by\n[`crate::resolve_lab`] until recipe-derived naming exists (Task\n2.5) — currently the only source of a resolved name.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "readiness": {
+          "description": "Conditions this component must satisfy before the next component\non the same side is installed, and before any fixture is\nreplayed.\n\nEmpty by default, which is a real and sometimes correct answer (a\ncomponent that only applies cluster-scoped configuration has\nnothing to wait on) — but for anything that serves admission it is\nalmost never the right one. `helm upgrade --install` returns as\nsoon as a release's manifests are applied, and `kubectl apply` as\nsoon as its objects exist; neither waits for a controller to be\nrunning, for a `caBundle` to be filled in, or for a webhook\nconfiguration that a controller creates at *runtime* to appear at\nall. A lab that replays fixtures inside that window observes a\nstack that is not yet the stack under test, and does so at a\ndifferent moment on each side — which is exactly the\nnondeterminism Global Constraint 7 rules out.\n\nThe variant set mirrors `recipes/*/recipe.yaml`'s own `readiness`\nsection one for one — deliberately, so a certified recipe's\nchecks can be transcribed into a lab file unchanged (see\n[`ReadinessCheckSpec`]).",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadinessCheckSpec"
+          }
+        },
+        "recipe": {
+          "description": "A named recipe to install this component from. Recipe resolution\nis Task 2.5's responsibility; this field is carried through\nunresolved and does not currently affect resolution at all — an\nexplicit `install` block (below) is required regardless of\nwhether `recipe` is also set.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "version": {
+          "description": "The component's version, in whatever form its install method\nunderstands (a Helm chart version, an image tag, and so on).\n[`crate::resolve_lab`] requires a non-empty value here *unless*\nthe install method itself carries an unambiguous version (a\npinned Helm chart version), in which case an omitted value here\ndefaults to that.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false
+    },
+    "EnvironmentSpec": {
+      "description": "One side (baseline or candidate) of a comparison: a Kubernetes version\nplus the extra components installed on top of it.",
+      "type": "object",
+      "properties": {
+        "components": {
+          "description": "Components to install on top of the base cluster, in installation\norder. Empty by default: a bare Kubernetes cluster with no extra\ncomponents is a valid environment.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ComponentSpec"
+          }
+        },
+        "images": {
+          "description": "Container images already present in the operator's **local**\nimage store that must be side-loaded into this side's ephemeral\ncluster before anything is installed into it.\n\nEmpty by default, and empty for every lab whose workloads come\nfrom a registry: a `kind` node pulls those itself. The field\nexists for the case a registry cannot answer at all — a manifest\nreferencing an image that was built locally and never pushed,\nwhich is exactly what Admission Lab's own Gateway suites do (the\ndeterministic echo backend in `crates/admissionlab-echo` is built\nby `scripts/build-test-images.sh` and tagged\n`admissionlab-echo:dev`, and the manifests that reference it use\n`imagePullPolicy: IfNotPresent`). Without this list such a\nmanifest fails inside the run with an `ErrImageNeverPull` that\nreads as a broken fixture rather than as a missing image.\n\nEach entry is a plain image reference (`name:tag`), passed\nthrough verbatim as one argument to the cluster backend's own\nside-load command — never interpolated into a shell string\n(Global Constraint 12). Loading happens once, immediately after\nthe cluster is created and before the first component is\ninstalled, and a failure to load fails the cluster rather than\nbeing discovered later as a scheduling error.\n\n**This is not a way to skip a registry for convenience.** Both\nsides list their own images independently, so a lab that loads\ndifferent images per side is expressible and is exactly as\nvisible in the configuration as a different chart version would\nbe.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "kubernetes": {
+          "description": "The Kubernetes version to provision, for example `\"1.30.4\"`. Must\nnot be empty — validated by [`crate::resolve_lab`].",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kubernetes"
+      ]
+    },
+    "FixtureSelectionSpec": {
+      "description": "Which fixtures to replay through both environments.",
+      "type": "object",
+      "properties": {
+        "include": {
+          "description": "Glob patterns selecting fixture files, resolved by\n[`crate::resolve_lab`] against this configuration file's own\ndirectory. Must not be empty — validated by [`crate::resolve_lab`].\n\nThese same patterns also select *fixture matrix* declarations: a\nmatched document whose `apiVersion` is `admissionlab.io/v1alpha1`\nand whose `kind` is `FixtureMatrix` is not replayed as a\nKubernetes object. It names one base document plus an explicit,\nhand-written list of RFC 6902 JSON Patch cases, and fixture\ndiscovery expands it into one ordinary fixture per case (see\n`admissionlab_fixtures::matrix`). There is deliberately no\nseparate `matrices:` field here: a matrix lives in the fixture\ntree next to the fixtures it varies, so one include list stays\nthe single answer to \"which fixtures does this lab replay?\", and\na matrix cannot be selected by a rule the ordinary fixtures\naround it are not.\n\nA matrix's `base` document is *only* a template. It is replayed\nas a fixture in its own right if and only if it independently\nmatches one of these patterns — this list is the whole rule, and\ndeclaring a document as a matrix base neither adds it to nor\nremoves it from the replay set. (A matrix's own `base` path is\nresolved against the matrix document's directory, not against\nthis configuration file's, so a fixture tree containing matrices\nstays relocatable independently of where the lab that selects it\nlives.)",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "GatewayEndpointSpec": {
+      "description": "The hand-written form of [`crate::GatewayEndpointStrategy`]: how to\nfind the `Service` fronting a Gateway's data plane, exactly as it is\nwritten in YAML.\n\n```yaml\ngatewayEndpoint:\n  type: serviceBySelector\n  namespace: \"{gatewayNamespace}\"\n  selector:\n    gateway.networking.k8s.io/gateway-name: \"{gatewayName}\"\n  portName: http\n```\n\n# One raw type, two documents\n\nThis is the raw shape for **both** `admissionlab.yaml`'s\n[`GatewaySuiteSpec::gateway_endpoint`] and a recipe's own\n`gatewayEndpoint:` block: `admissionlab_recipes::model` names this\ntype rather than declaring a second one. Two deserializable shapes\nfor one resolved [`crate::GatewayEndpointStrategy`] is precisely the\nsynonym §1.2 forbids — they would be free to drift a field apart,\nand the recipe half and the lab half would then mean subtly\ndifferent things while looking identical in YAML. Defining it here\nis what makes that impossible, and it is the same direction\n[`crate::GatewayEndpointStrategy`] itself already resolved: the leaf\ncrate both producers and both consumers can name.\n\nInternally tagged (a `type:` discriminant beside the variant's own\nfields), matching [`InstallMethodSpec`] and [`ReadinessCheckSpec`] —\nsee the first for why `serde_norway` cannot represent a natural\n`type:` key with external tagging. `deny_unknown_fields` at this\nlevel too, so an invented key is a parse error here exactly as it is\neverywhere else in this schema.\n\nBoth ports are optional and neither is defaulted at parse time: what\nthey mean is a question about a `Service` that does not exist yet\nwhen a document is read, so it is answered where the `Service` is\nactually read (`admissionlab_gateway::endpoint`). Validating them\nhere would mean guessing.",
+      "oneOf": [
+        {
+          "description": "Find the data-plane `Service` by label selector — the form this\nshould normally take (see [`crate::GatewayEndpointStrategy`]'s\n\"Prefer the selector to the name\").",
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "description": "The namespace to search, usually `\"{gatewayNamespace}\"`.",
+              "type": "string"
+            },
+            "port": {
+              "description": "Which of the matched `Service`'s ports to use, by number.",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "default": null,
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "portName": {
+              "description": "Which of the matched `Service`'s ports to use, by name.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "selector": {
+              "description": "Label requirements every candidate `Service` must satisfy.\nKeys are literal; only values are substituted.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "serviceBySelector"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "selector"
+          ]
+        },
+        {
+          "description": "Find the data-plane `Service` by an exact name.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The `Service`'s name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The `Service`'s namespace.",
+              "type": "string"
+            },
+            "port": {
+              "description": "See [`GatewayEndpointSpec::ServiceBySelector::port`].",
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "default": null,
+              "maximum": 65535,
+              "minimum": 0
+            },
+            "portName": {
+              "description": "See [`GatewayEndpointSpec::ServiceBySelector::port_name`].",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "type": {
+              "type": "string",
+              "const": "serviceByName"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        }
+      ]
+    },
+    "GatewaySuiteSpec": {
+      "description": "The Gateway behavior suite (ROADMAP Task 6.1): the Gateway API\nfixtures a lab persists in each side's cluster, plus the traffic\ncontract each route is expected to satisfy.\n\n# Why this type lives in `admissionlab-spec` and not `admissionlab-gateway`\n\nROADMAP Task 6.1 lists `crates/admissionlab-gateway/src/model.rs` as\nthis type's file, but §1.2's cross-task type registry *also* freezes\n[`crate::ResolvedLab::gateway`] as an `Option<GatewaySuiteSpec>`.\nThose two statements can only both hold if exactly one crate defines\nthe type and the other names it — and the direction is forced:\n`admissionlab-gateway` depends on `admissionlab-core`, which depends\non this crate, so a `spec -> gateway` edge would be a dependency\ncycle Cargo rejects outright. The canonical definition therefore\nlives here, next to every other type a user hand-writes in\n`admissionlab.yaml`, and `admissionlab_gateway::model` **re-exports\nthis exact type** rather than declaring a second one — §1.2's \"these\nnames are canonical\" rule forbids a synonym, and a parallel\n`GatewayRouteContract`-style twin is exactly the drift that rule\nexists to prevent. Everything Phase 6 adds that a *user never writes*\n(observed conditions, reconciliation evidence, probe results) is\ndeclared in `admissionlab-gateway` itself; only the hand-written\nconfiguration surface is here. That is the same split this workspace\nalready uses between [`crate::ComponentSpec`] (hand-written) and\n[`crate::ResolvedComponent`] (runtime).\n\n# One type for both the raw and the resolved stage\n\nUnlike [`EnvironmentSpec`]/[`crate::ResolvedEnvironment`], there is\nno separate resolved twin, because §1.2 freezes the single name\n`GatewaySuiteSpec` on [`crate::ResolvedLab`]. The two stages are\ndistinguished by *where the value is read from*, and the difference\nis confined to one field:\n\n- in [`V1Beta1Lab::gateway`], every [`GatewaySuiteSpec::manifests`]\n  path is exactly as the user wrote it (possibly relative);\n- in [`crate::ResolvedLab::gateway`], every path has been joined onto\n  the configuration file's own directory by [`crate::resolve_lab`].\n\nNothing else changes between the stages: [`RouteContract`] and\n[`crate::HttpProbeContract`] contain no filesystem paths at all, and\n[`crate::resolve_lab`] validates them in place rather than rewriting\nthem.\n\n# Traffic expectations are not regression policy\n\n[`crate::HttpProbeContract::expected_status`] and\n[`crate::HttpProbeContract::expected_backend`] say what a route *should do*.\nThey deliberately carry no severity, no `failOn` category, and no\n\"expected regression\" marker: Global Constraint 6 keeps\nclassification out of vendor-supplied metadata, and this project\nalready has exactly one place where a behavioral difference is graded\n([`PolicySpec`], evaluated by `admissionlab-policy`) and exactly one\nplace where a known-and-accepted difference is recorded (the\nexpectations file, [`V1Beta1Lab::expectations_file`]). A severity field\nhere would be a second, competing grader whose answer could disagree\nwith the first for the same run — see [`PolicyOverrideSpec`] for the\nvocabulary that already exists for \"this difference is acceptable\".",
+      "type": "object",
+      "properties": {
+        "gatewayEndpoint": {
+          "description": "How to find the `Service` that fronts each Gateway's data plane,\nso a probe can be sent through it.\n\n`None` — the default — means **no traffic probe is ever sent**.\nEvery [`RouteContract`] still has its reconciliation observed and\ncompared; a contract that also declares [`RouteContract::probes`]\nhas each of them recorded as an explicit skip rather than\nsilently dropped, because a run that cannot reach a data plane\nhas not observed that route's traffic behavior and must not\nimply it did (Global Constraint 15).\n\n# Why this is written here and not inherited from a recipe\n\n[`crate::GatewayEndpointStrategy`]'s own documentation calls this\n*install metadata*, and a certified recipe declares it\n(`recipes/istio-gateway/recipe.yaml`'s `gatewayEndpoint:` block\nparses into the very same [`GatewayEndpointSpec`] this field\ntakes). But `admissionlab.yaml` has no recipe resolution:\n[`crate::ComponentSpec::recipe`] is carried through unresolved, and\nevery component in a lab file spells out its own\n`install`/`readiness` by hand. A lab that hand-writes how Istio\nis installed must equally hand-write where Istio's data plane\nis; inferring it from a recipe the run never loaded would be a\nguess wearing a citation. When recipe-driven components land,\nthis field becomes the override rather than the only source, and\nthe type is already the one a recipe produces.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/GatewayEndpointSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manifests": {
+          "description": "Kubernetes manifest files defining the Gateway API fixture:\nnamespaces, backends, `GatewayClass`, `Gateway`, `HTTPRoute`, and\nanything else the suite needs. Resolved against the configuration\nfile's own directory by [`crate::resolve_lab`], the same as every\nother path in the document (see [`crate::resolve::config_directory`]).\nMust not be empty — validated by [`crate::resolve_lab`], for the\nsame reason [`crate::ManifestsInstallSpec::paths`] must not be: a suite\nthat installs nothing and calls that success is a quiet no-op.\n\n**These manifests are persisted, not dry-run.** Global Constraint\n16 makes server-side dry-run the authoritative *admission*\nfixture mode; ROADMAP Phase 6's own execution note carves out\nGateway fixtures explicitly, because controller reconciliation\nand data-plane programming require durable resources. The\nisolation that makes that safe is the disposable cluster itself —\nsee `admissionlab_gateway::apply`'s module documentation, which\nis where that statement is enforced rather than merely repeated.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "readiness": {
+          "description": "Conditions the suite's own manifests must satisfy after they are\napplied and before any route's behavior is observed.\n\nEmpty by default, and the same vocabulary [`crate::ComponentSpec::readiness`]\nuses — for the same reason, restated one layer down: applying a\nmanifest returns when its objects *exist*, never when the\nworkloads they describe are running. A backend `Deployment` that\nis not yet `Available` has no endpoints, so a request routed to\nit is answered by the data plane's own `503` — a statement about\nthis run's timing rather than about the route, and one that would\ndiffer between the two sides on every run.\n\n# Gate on what the fixture owns\n\nThe right entries here are the suite's *own* objects: the echo\nbackends, a `Job` that seeds them. Gating on something the\nimplementation under test provisions (Istio's generated\ndata-plane `Deployment`, say) is a real trade and is sometimes\nstill correct — but it exchanges \"reported as a behavior\ndifference\" for \"fails the run before a comparison happens\", so\nit belongs only where that object's absence is *not* the thing\nbeing compared. Nothing here is inferred; a suite that declares\nno readiness waits for nothing.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReadinessCheckSpec"
+          }
+        },
+        "reconciliationTimeoutMillis": {
+          "description": "How long to wait for a route to reach a stable, current status on\neach side before recording it as unconverged.\n\nWritten in YAML as a plain integer number of milliseconds\n(`reconciliationTimeoutMillis: 120000`), matching\n[`LatencyPolicy::absolute_increase`]'s established style — unit in\nthe wire name, [`Duration`] in Rust; see that field for why the\ntwo spellings differ — rather than serde's default `{secs, nanos}`\nobject shape. Defaults to\n[`crate::DEFAULT_RECONCILIATION_TIMEOUT`] when omitted, and must be\nnon-zero — a zero timeout could never observe the two-poll\nstability window `admissionlab_gateway::reconcile` requires, so\nit would report every route as unconverged without ever having\nlooked.",
+          "type": "integer",
+          "format": "uint64",
+          "default": 120000,
+          "minimum": 0
+        },
+        "routes": {
+          "description": "The routes this suite observes and probes. Must not be empty, and\nevery [`RouteContract::id`] must be unique within the suite —\nboth validated by [`crate::resolve_lab`].",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/RouteContract"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "manifests",
+        "routes"
+      ]
+    },
+    "HttpProbeContract": {
+      "description": "One HTTP request to send through a reconciled route, and what the\nresponse is expected to look like.\n\nSee [`GatewaySuiteSpec`]'s \"Traffic expectations are not regression\npolicy\" section for why nothing here grades a mismatch.",
+      "type": "object",
+      "properties": {
+        "expectedBackend": {
+          "description": "Which backend the request is expected to reach, as that backend\nreports itself (ROADMAP Task 6.5's deterministic echo server\nanswers with its own identity). `None` means the contract does\nnot constrain *which* backend answered, only the status — a real\nand sometimes correct answer for a probe asserting a 404 or a\n403, where no backend was reached at all.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "expectedStatus": {
+          "description": "The HTTP status code the response is expected to carry. Must be a\nreal HTTP status code (`100..=599`) — validated by\n[`crate::resolve_lab`]; see [`is_valid_http_status`].",
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "headers": {
+          "description": "Extra request headers to send, beyond `Host` (which is `host`\nabove). A [`BTreeMap`] rather than a `Vec` of pairs so the\nserialized/schema order is deterministic and a repeated header\nname cannot silently mean two different things. Empty by\ndefault.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {}
+        },
+        "host": {
+          "description": "The `Host` header to send, which is what a Gateway API listener's\n`hostname` and an `HTTPRoute`'s `hostnames` are matched against.\nRequired and non-empty: a Gateway that routes purely on path\nstill needs *some* authority in the request, and leaving it\nimplicit would make the probe's meaning depend on whatever\naddress the data plane happened to be reached at.",
+          "type": "string"
+        },
+        "method": {
+          "description": "The HTTP method, uppercase, from [`ALLOWED_HTTP_METHODS`].\nValidated by [`crate::resolve_lab`]; see that constant for why\nthe list is closed and why case matters.",
+          "type": "string"
+        },
+        "path": {
+          "description": "The request path, which must begin with `/` — the same shape an\n`HTTPRoute`'s `matches[].path.value` takes. Validated by\n[`crate::resolve_lab`].",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "path",
+        "method",
+        "expectedStatus"
+      ]
+    },
+    "InstallMethodSpec": {
+      "description": "The user-facing YAML form of a component's install method.\n\nThis is intentionally minimal: enough to express the two Alpha\ninstallers — a Helm chart, or a fixed set of raw manifests — exactly\nas a user would write them by hand. [`crate::InstallMethod`] is the\nseparate *resolved* form the installer actually consumes; the two are\ndistinct types by design and must not be merged or aliased.\n\nRepresented as an internally tagged enum (a `type` discriminant field\nalongside the variant's own fields), not the more common\nexternally-tagged `{helm: {...}}` shape: `serde_yaml`/`serde_norway`\nonly support externally tagged enums via an explicit YAML type tag\n(`!Helm ...`), not a wrapping single-key mapping, so external tagging\ncannot represent this the way a hand-written YAML config wants to.\nInternally tagged enums use a format-agnostic buffering strategy that\nworks with a plain mapping, giving both a natural YAML shape:\n\n```yaml\ninstall:\n  type: helm\n  chart: cert-manager\n  repo: https://charts.jetstack.io\n```\n\nand a strict one: an unrecognized `type` or a misspelled field inside\nthe variant is still a loud, named error.",
+      "oneOf": [
+        {
+          "description": "Install via a Helm chart.",
+          "type": "object",
+          "properties": {
+            "chart": {
+              "description": "The chart reference passed to `helm install` (a repo-relative\nchart name, a local path, or an `oci://` reference). The\nrepo-relative and `oci://` forms are both installable; a local\npath is not — see `repo`.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The namespace to install into. Defaults to the component's own\nresolved name when omitted — **that default is not always\ncorrect** and must be overridden whenever a chart's own\nconvention differs from the component's name: for example\n`istio/istiod` and `istio/base` both conventionally install into\n`istio-system`, not `istiod`/`base`.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "releaseName": {
+              "description": "The Helm release name (`helm upgrade --install <release_name>\n...`). Defaults to the component's own resolved name when\nomitted.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "repo": {
+              "description": "The Helm repository URL backing `chart`. Required by\n[`crate::resolve_lab`] for **every** Helm install, including an\n`oci://` one.\n\nFor a bare `<repo>/<chart>` reference this is the classic HTTP\nchart repository `admissionlab_installer::helm` registers with\n`helm repo add` before installing. For an `oci://` reference\nnothing is registered — the reference locates itself — and this\nfield instead records the registry path that reference is rooted\nat, which is provenance a reader and a run report both want.\nRequiring it in both cases keeps this a field that always means\n\"where this chart comes from\" rather than one whose emptiness\nsilently encodes which install path was taken.\n\nA local-path `chart` remains unresolvable: there is no repository\nURL that would describe one, and nothing in this project installs\na chart from the local filesystem.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "repoName": {
+              "description": "The local name to register `repo` under (`helm repo add\n<repo_name> <repo_url>`). Defaults to the component's own\nresolved name when omitted — see\n[`crate::component::resolve_component`]'s documentation. Purely a\nlocal bookkeeping label with no cluster-visible effect, so the\ndefault is safe to leave unset in the common case.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "setValues": {
+              "description": "Literal `--set-string` key/value overrides passed to `helm\nupgrade --install`. Empty by default.",
+              "type": "object",
+              "additionalProperties": {
+                "type": "string"
+              },
+              "default": {}
+            },
+            "type": {
+              "type": "string",
+              "const": "helm"
+            },
+            "valuesFiles": {
+              "description": "Values override files, resolved against the configuration file's\nown directory by [`crate::resolve_lab`] — see\n[`ComponentSpec::install`] and [`crate::resolve::config_directory`].",
+              "type": "array",
+              "default": [],
+              "items": {
+                "type": "string"
+              }
+            },
+            "version": {
+              "description": "The chart version passed to `helm install --version`. Required by\n[`crate::resolve_lab`] to be an exact pin, never a floating range\n— see [`crate::validate::require_pinned_helm_version`]'s\ndocumentation for exactly what counts as floating and why.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "chart"
+          ]
+        },
+        {
+          "description": "Install a fixed set of raw Kubernetes manifests.",
+          "type": "object",
+          "properties": {
+            "paths": {
+              "description": "Manifest file or directory paths, resolved against the\nconfiguration file's own directory by [`crate::resolve_lab`] — see\n[`HelmInstallSpec::values_files`]'s documentation; the same\napplies here. Must not be empty — validated by\n[`crate::resolve_lab`].",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "type": {
+              "type": "string",
+              "const": "manifests"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "paths"
+          ]
+        }
+      ]
+    },
+    "LatencyPolicy": {
+      "description": "Thresholds below which a latency increase from baseline to candidate is\nnot itself treated as a regression.\n\nA candidate observation only counts as a latency regression once it\nexceeds *both* thresholds: `baseline + absolute_increase` and\n`baseline * relative_multiplier`. Exact evaluation semantics are Task\n4.8's responsibility; this type only carries the configured values.\n\n`absolute_increase` is written in YAML as a plain integer number of\nmilliseconds (`absoluteIncreaseMillis: 50`), not `serde`'s default\n`{secs, nanos}` object representation for [`Duration`] — that default\nis correct for machine-to-machine formats but not for a configuration\nfile a person hand-writes.\n\n# Why the wire name carries the unit and the Rust name does not\n\nThe YAML value is a bare integer, so `absoluteIncrease: 50` said\nnothing about whether 50 meant milliseconds or seconds, and the two\nreadings differ by 1000x — an off-by-a-factor bug that fails silently\nas \"the threshold is never (or always) crossed\" rather than loudly as\na parse error. Kubernetes' own API settles this the same way\n(`timeoutSeconds`, `periodSeconds`, `initialDelaySeconds`), so\n`admissionlab.io/v1beta1` spells the field `absoluteIncreaseMillis`.\nThe *Rust* field stays `absolute_increase`: its type is [`Duration`],\nwhich already carries the unit, and suffixing a `Duration` with\n`_millis` would state a precision the type does not have. That is the\nwhole of the divergence between the two spellings, and it is the\nreason for it.",
+      "type": "object",
+      "properties": {
+        "absoluteIncreaseMillis": {
+          "description": "The absolute latency increase, in milliseconds, tolerated before a\ncandidate observation counts as a regression. Defaults to 100\nmilliseconds when `policy.latency` is omitted (the Alpha default\nROADMAP Task 4.6 Step 3 fixes: a latency increase is reported only\nwhen the candidate is at least 100ms slower *and* at least 2x the\nbaseline for the same webhook).",
+          "type": "integer",
+          "format": "uint64",
+          "default": 100,
+          "minimum": 0
+        },
+        "relativeMultiplier": {
+          "description": "The multiplier on baseline latency tolerated before a candidate\nobservation counts as a regression. Defaults to `2.0` when\n`policy.latency` is omitted -- see\n[`LatencyPolicy::absolute_increase`] for the paired Alpha default\nand its source.",
+          "type": "number",
+          "format": "double",
+          "default": 2.0
+        }
+      },
+      "additionalProperties": false
+    },
+    "MigrationCaseSpec": {
+      "description": "One migration case: the `Ingress` manifests that define today's\nbehavior, the Gateway API manifests intended to replace them, the\nprobes that must answer identically through both, and the differences\nthe author already knows about and has written down.\n\n# The two manifest lists are peers, not a source and a target\n\nNeither list is derived from the other (see [`MigrationSuiteSpec`]'s\n\"Admission Lab does not convert anything\"). They are applied to the\n*baseline* and the *candidate* side respectively, and both are\nresolved against the configuration file's own directory exactly as\n[`GatewaySuiteSpec::manifests`] is. Both must be non-empty: a case\nwith an empty side has nothing to install there, so every probe\nagainst that side would measure the absence of a fixture rather than\na migration.",
+      "type": "object",
+      "properties": {
+        "baselineIngressManifests": {
+          "description": "The `Ingress` manifests (plus whatever namespaces, backends and\n`IngressClass` they need) that define the behavior being\nmigrated *away from*, applied to the baseline side. Resolved\nagainst the configuration file's own directory. Must not be\nempty.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "candidateGatewayManifests": {
+          "description": "The Gateway API manifests (`GatewayClass`, `Gateway`,\n`HTTPRoute`, backends) intended to reproduce that behavior,\napplied to the candidate side. **Written by the user, never\ngenerated from the list above.** Resolved against the\nconfiguration file's own directory. Must not be empty.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "expectedNonportable": {
+          "description": "Behavioral differences the author already knows the migration\nintroduces, each with a written justification. Empty by default:\na migration nobody expects to change anything declares nothing\nhere, and any difference the run observes is then unexplained.\n\nSee [`NonPortableFeatureExpectation`] for why this is its own\nvocabulary rather than a reuse of `expectations.yaml`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/NonPortableFeatureExpectation"
+          }
+        },
+        "id": {
+          "description": "A stable identifier for this case, unique within the suite and\nnon-empty — the handle that correlates the baseline and candidate\nobservations of one migration, exactly as [`RouteContract::id`]\ndoes for a route contract.",
+          "type": "string"
+        },
+        "probes": {
+          "description": "The requests replayed through *both* sides. The same\n[`HttpProbeContract`] the Gateway suite uses — one vocabulary for\n\"send this request and expect this answer\", because a migration\ncase asks the identical question a route contract does, only of\ntwo differently-shaped stacks instead of two versions of one.\n\nMust not be empty, which is where this deliberately differs from\n[`RouteContract::probes`]. A route contract with no probes still\nasserts something real (that the route reconciles, which\n`admissionlab_gateway::reconcile` observes independently of any\ntraffic). A migration case with no probes asserts nothing at all:\nan `Ingress` and an `HTTPRoute` have no comparable status\nvocabulary, so traffic behavior is the *only* thing the two sides\ncan be compared on.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HttpProbeContract"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "baselineIngressManifests",
+        "candidateGatewayManifests",
+        "probes"
+      ]
+    },
+    "MigrationSideSpec": {
+      "description": "Where one side of a migration suite's data plane is (ROADMAP Task\n8.8).\n\n# Why a migration suite needs two of these and a Gateway suite needs\n# one\n\n[`GatewaySuiteSpec::gatewayEndpoint`](GatewaySuiteSpec::gateway_endpoint)\nis a single block because a Gateway suite applies the *same*\nmanifests to two clusters running the same implementation: one\nstrategy locates both sides' data planes. A migration suite is the\nopposite by construction — its baseline is an `Ingress` controller\nand its candidate is a Gateway API implementation — and the two\nlocate their data planes in structurally different ways.\n`recipes/ingress-nginx-legacy/recipe.yaml` says so in as many words:\nan `Ingress` controller is *one shared* `Service` in the controller's\nown namespace with no per-object substitution possible, while\n`recipes/nginx-gateway-fabric/recipe.yaml` must template\n`{gatewayNamespace}`/`{gatewayName}` because a Gateway API\nimplementation provisions one `Service` per `Gateway`. A single\nstrategy cannot be both, so there are two.\n\n# Optional in the type, required to run\n\nBoth fields on [`MigrationSuiteSpec`] are `Option` with\n`#[serde(default)]`, so every document written before Task 8.8\nexisted still parses — `docs/schema-migrations.md`'s first obligation\n(\"additions are optional\") applied literally, rather than a new\nrequired key inside an existing `admissionlab.io/v1beta1` section.\n\nA suite that omits one is nonetheless unrunnable: with no strategy\nthere is no `Service` to port-forward to and therefore no probe, and\na migration case's probes are the *only* thing its two sides can be\ncompared on ([`MigrationCaseSpec::probes`]). That is refused by\n`admissionlab_cli::pipeline`'s pre-flight validation, **before any\ncluster is created**, in exactly the place and for exactly the reason\na Gateway route contract id that cannot be reported is refused there.\nThe result is a load-time-quality error without a schema-level\nrequired field.",
+      "type": "object",
+      "properties": {
+        "gatewayEndpoint": {
+          "description": "How to find this side's data-plane `Service`. The same block, in\nthe same shape, validated by the same\n[`crate::resolve_gateway_endpoint`], that a recipe's own\n`gatewayEndpoint:` and a lab's `gateway.gatewayEndpoint:` carry —\none vocabulary for \"where does a request go in\", not three.",
+          "$ref": "#/$defs/GatewayEndpointSpec"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "gatewayEndpoint"
+      ]
+    },
+    "MigrationSuiteSpec": {
+      "description": "The Ingress-to-Gateway migration suite (ROADMAP Task 8.3): a list of\ncases, each pairing the `Ingress` manifests a team runs today against\nthe Gateway API manifests they intend to replace them with, plus the\nprobes that decide whether the two really behave the same.\n\n# Admission Lab does not convert anything\n\n**Read this before writing a case.** v1 contains no\nIngress-to-Gateway converter, and adding one is explicitly out of\nscope. Both halves of every case are written by a human or produced\nby some *other* tool (`ingress2gateway`, a vendor migration guide, a\nhand edit), and this suite's entire job is to check that the\nconversion **that user already performed** preserves behavior.\n\nThat is not a temporary limitation waiting on a converter; it is the\nonly arrangement under which the answer means anything. A suite that\ngenerated the candidate manifests itself would be comparing its own\nconverter against its own converter: every rule the converter got\nwrong would be applied identically on both sides of the comparison,\nso the run would report \"no behavior change\" precisely for the\nmistakes it was supposed to catch. The pairing is required, and it is\nrequired *explicitly*, for the same reason\n[`RouteContract`]'s Gateway identity is: a contract that reads its\nexpectation out of the artifact under test can never contradict that\nartifact.\n\n# Where this type lives, and why not in `admissionlab-gateway`\n\nROADMAP Task 8.3 lists `crates/admissionlab-gateway/src/migration.rs`\nas this type's file, and §1.2's registry *also* freezes\n[`crate::ResolvedLab::migration`] as an `Option<MigrationSuiteSpec>`.\nExactly the situation [`GatewaySuiteSpec`] already resolved, with the\nsame forced answer: `admissionlab-gateway` depends (transitively) on\nthis crate, so a `spec -> gateway` edge would be a dependency cycle.\nThe hand-written configuration surface is defined here;\n`admissionlab_gateway::migration` **re-exports these exact types**\nrather than declaring twins, and owns what a user never writes.\n\n# One type for both the raw and the resolved stage\n\nAs with [`GatewaySuiteSpec`]: [`crate::resolve_lab`] rewrites\n[`MigrationCaseSpec::baseline_ingress_manifests`] and\n[`MigrationCaseSpec::candidate_gateway_manifests`] onto the\nconfiguration file's own directory and validates everything else in\nplace, so the raw and the resolved value differ in those two fields\nand nowhere else.",
+      "type": "object",
+      "properties": {
+        "baseline": {
+          "description": "Where the **legacy** side's data plane is: the one shared\n`Service` an `Ingress` controller serves every `Ingress` on the\ncluster through.\n\nSee [`MigrationSideSpec`] for why this is per side, why it is\n`Option` in the type but required in practice, and where the\nrequirement is enforced.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MigrationSideSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "candidate": {
+          "description": "Where the **Gateway** side's data plane is: the `Service` the\nimplementation provisions for the case's own `Gateway`, usually\nselected by Gateway API's `gateway.networking.k8s.io/gateway-name`\nlabel with `\"{gatewayName}\"` substituted.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/MigrationSideSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "cases": {
+          "description": "The migration cases. Must not be empty, and every\n[`MigrationCaseSpec::id`] must be unique within the suite — both\nvalidated by [`crate::resolve_lab`]. A `migration:` section\ndeclaring no cases is the same quiet no-op an empty\n[`GatewaySuiteSpec::manifests`] would be: it would install\nnothing, probe nothing, and report success.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/MigrationCaseSpec"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "cases"
+      ]
+    },
+    "NonPortableFeatureExpectation": {
+      "description": "One `Ingress` feature the author knows has no faithful Gateway API\nequivalent, and the human reason it is accepted.\n\nThe realistic migration is not lossless. `ingress-nginx`'s\nannotations reach well past what Gateway API v1 models —\n`nginx.ingress.kubernetes.io/configuration-snippet` has no portable\ncounterpart at all; `auth-url`, `server-snippet`, and the\n`canary-*` family have partial ones with different semantics. A team\nmigrating declares those here, once, with a sentence about what they\ndecided to do instead, and Task 8.5 marks the corresponding observed\ndifference as expected rather than reporting it as a surprise.\n\n# Two required fields, both human\n\n`feature` must be non-empty and unique within its case; `reason` must\nbe non-empty. The same rule, for the same reason,\n`admissionlab_policy::ExpectedChange` applies to its own `id`/`reason`\npair: the name is the only handle anything downstream has back to\nthis entry, duplicates would make that handle ambiguous, and an entry\nthat suppresses a behavioral difference with no written\njustification is indistinguishable from someone quietly silencing a\nreal regression. Neither field is decoration, and neither is\ndefaulted.\n\n# Why this is not `expectations.yaml`\n\nA migration expectation and a regression expectation look similar for\nabout one sentence and then diverge in all three ways that matter:\n\n- **Different vocabulary.** `admissionlab_policy::ExpectedChange`\n  selects on a `SemanticChangeKind` (`container_added`,\n  `newly_denied`, ...) — the closed set of *admission* differences\n  `admissionlab-diff` computes. `feature` here names an **input**\n  feature of the stack being migrated away from (an annotation, a\n  snippet, an auth mode), which is not in that set and could not\n  sensibly be added to it: one is a fact about a diff, the other a\n  fact about an `Ingress`.\n- **Different lifecycle.** A regression expectation is transient —\n  `admissionlab-policy` reports one that stops matching as a *stale\n  expectation*, so it gets deleted on the next upgrade. A\n  non-portability statement is *permanent* for as long as the\n  migration exists: `configuration-snippet` does not become portable\n  later, and reporting it as stale every run would train reviewers to\n  ignore staleness reports.\n- **Different lifetime in the file.** Migration cases are deleted\n  wholesale the day the migration lands; an `expectations.yaml`\n  outlives every individual upgrade it was written for. Sharing one\n  file would mean deleting a migration would either strand or delete\n  entries that had nothing to do with it.\n\nSo this is a separate type, in a separate section, and\n[`V1Beta1Lab::expectations_file`] is untouched by it. Neither\nmechanism can grade the other's subject matter, which is exactly the\nproperty that keeps \"this difference is accepted\" answerable in one\nplace per question rather than two places per run.",
+      "type": "object",
+      "properties": {
+        "feature": {
+          "description": "The non-portable feature, named as the source stack names it —\nfor example `nginx.ingress.kubernetes.io/configuration-snippet`.\nA free-form `String` rather than an enumeration: the set of\nannotations an Ingress controller understands is that\ncontroller's, not this project's, and Global Constraint 6 keeps\nvendor vocabulary out of the classification engine. Must be\nnon-empty and unique within its case.",
+          "type": "string"
+        },
+        "reason": {
+          "description": "Why this is accepted: what the feature did, and what the\nmigration does instead. Must be non-empty — see this type's \"Two\nrequired fields, both human\".",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "feature",
+        "reason"
+      ]
+    },
+    "PolicyOverrideSpec": {
+      "description": "One targeted exception to the blanket [`PolicySpec::fail_on`] policy.\n\n`fixtures`, `subject`, and `path` narrow which regressions this\noverride applies to; omitting one leaves that dimension unrestricted.\n`path` names a location *within* the compared object (for example a\nJSON-pointer-like field path), not a filesystem path, so it is never\nresolved against the configuration file's directory.\n\n`kind` and `severity` are `String`s that this crate does not\nvalidate, for the reason [`PolicySpec::fail_on`] gives;\n`admissionlab_policy::validate_policy_spec` checks both names, checks\nthat `fixtures` is a compilable glob, and rejects an\nempty-but-present `fixtures`/`subject`/`path` (a restriction nothing\ncould ever satisfy).",
+      "type": "object",
+      "properties": {
+        "fixtures": {
+          "description": "Restrict this override to fixtures matching this pattern.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "kind": {
+          "description": "The regression category this override applies to (matches a\n[`PolicySpec::fail_on`] entry).",
+          "type": "string"
+        },
+        "path": {
+          "description": "Restrict this override to a specific field path within the\ncompared object.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "severity": {
+          "description": "The severity to report this regression as when the override\napplies, instead of failing the run outright.",
+          "type": "string"
+        },
+        "subject": {
+          "description": "Restrict this override to a specific admission subject (webhook,\ncontroller, or similar).",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "severity"
+      ]
+    },
+    "PolicySpec": {
+      "description": "The regression policy: which categories of behavioral difference fail\nthe run, targeted overrides, and latency-regression thresholds.\n\nEvery field defaults independently, so a user who wants the tool's\ndefaults everywhere may omit `policy` from their configuration\nentirely (see [`V1Beta1Lab::policy`]).",
+      "type": "object",
+      "properties": {
+        "failOn": {
+          "description": "Regression categories that fail the run when observed, named by\ntheir semantic-change wire name (`container_removed`,\n`newly_denied`, ...). A [`BTreeSet`] rather than a `Vec` so a\nduplicated entry collapses silently and the serialized/schema\nrepresentation has a deterministic order.\n\nA `String` rather than a typed enum, and unvalidated by this\ncrate: the set of meaningful names belongs to\n`admissionlab-diff`, which §1.1 places *above* this crate, so\nchecking a name here would mean either an inverted dependency or\na second copy of the list that could drift from the first.\n`admissionlab_policy::validate_policy_spec` performs that check\ninstead, and the orchestrator calls it right after\n[`crate::resolve_lab`] — before any cluster is created — so an\nunknown name still fails at load time rather than silently\nmatching nothing.",
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "latency": {
+          "description": "Thresholds below which a latency increase is not itself treated as\na regression.",
+          "$ref": "#/$defs/LatencyPolicy"
+        },
+        "overrides": {
+          "description": "Targeted exceptions to the blanket `fail_on` policy.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/PolicyOverrideSpec"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "ReadinessCheckSpec": {
+      "description": "One condition a [`ComponentSpec`] must satisfy before it counts as\ninstalled.\n\nThe user-facing YAML form of [`crate::ReadinessCheck`], which is what\n[`crate::resolve_lab`] converts this into and what\n`admissionlab_installer::readiness` actually probes. The variant set\nand the wire spelling of every field match `admissionlab_recipes`'s\nown recipe-file readiness section exactly, so the two surfaces cannot\ndrift into two different vocabularies for one closed set of checks.\n\nInternally tagged on `type`, with each variant's payload a named\nstruct rather than inline fields — the same representation\n[`InstallMethodSpec`] uses, and for the same two reasons: it is the\nonly enum shape `serde_norway` can express as a plain YAML mapping,\nand putting each payload in its own `rename_all = \"camelCase\"` struct\nis what gives multi-word fields (`apiVersion`, `conditionType`) their\ncamelCase spelling in the parser *and* in the generated JSON Schema,\nwithout depending on `rename_all_fields` cascading through `schemars`\nas well as `serde`.",
+      "oneOf": [
+        {
+          "description": "A `Deployment`'s `Available` condition must be `True`.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The object's namespace.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "deploymentAvailable"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        },
+        {
+          "description": "A `DaemonSet` must have every desired pod scheduled and ready.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The object's namespace.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "daemonSetReady"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        },
+        {
+          "description": "A `Job` must have completed successfully.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The object's namespace.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "jobComplete"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "namespace",
+            "name"
+          ]
+        },
+        {
+          "description": "A `ValidatingWebhookConfiguration`/`MutatingWebhookConfiguration`\nwith this name must exist.",
+          "type": "object",
+          "properties": {
+            "name": {
+              "description": "The object's name.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "webhookConfigurationPresent"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "name"
+          ]
+        },
+        {
+          "description": "A custom resource's named condition must equal a given status.",
+          "type": "object",
+          "properties": {
+            "apiVersion": {
+              "description": "The custom resource's `apiVersion`, for example `kyverno.io/v1`.",
+              "type": "string"
+            },
+            "conditionType": {
+              "description": "The condition's `type`, for example `Ready`.",
+              "type": "string"
+            },
+            "kind": {
+              "description": "The custom resource's `kind`, for example `ClusterPolicy`.",
+              "type": "string"
+            },
+            "name": {
+              "description": "The custom resource's name.",
+              "type": "string"
+            },
+            "namespace": {
+              "description": "The custom resource's namespace. Omitted for a cluster-scoped\nresource.",
+              "type": [
+                "string",
+                "null"
+              ],
+              "default": null
+            },
+            "status": {
+              "description": "The condition's required `status`, typically `\"True\"`.",
+              "type": "string"
+            },
+            "type": {
+              "type": "string",
+              "const": "customResourceCondition"
+            }
+          },
+          "additionalProperties": false,
+          "required": [
+            "type",
+            "apiVersion",
+            "kind",
+            "name",
+            "conditionType",
+            "status"
+          ]
+        }
+      ]
+    },
+    "RouteContract": {
+      "description": "One route's reconciliation and traffic contract: which `HTTPRoute`,\nattached to which `Gateway`, and what requests through it are\nexpected to do.\n\n# Gateway identity is always explicit\n\n`gateway_namespace`/`gateway_name` are required fields with no\ndefault and no inference (ROADMAP Task 6.1 Step 2). Admission Lab\nnever guesses the target `Gateway` from \"the first `Gateway` in the\nmanifest directory\", from the route's own `parentRefs`, or from a\nsingle-Gateway fixture happening to be unambiguous. Two reasons, both\nload-bearing: a fixture that installs two Gateways (the realistic\nmigration case Phase 7 exists for) has no defensible \"first\"; and a\ncontract that reads its target out of the fixture it is testing can\nnever detect the fixture pointing at the wrong Gateway, because it\nwould follow the fixture there. The contract states the expectation;\nthe cluster supplies the observation.",
+      "type": "object",
+      "properties": {
+        "gatewayName": {
+          "description": "The name of the `Gateway` this route attaches to. Explicit and\nrequired — see this type's documentation.",
+          "type": "string"
+        },
+        "gatewayNamespace": {
+          "description": "The namespace of the `Gateway` this route attaches to. Explicit\nand required — see this type's documentation.",
+          "type": "string"
+        },
+        "id": {
+          "description": "A stable identifier for this contract, unique within the suite.\nUsed to correlate the same contract's baseline and candidate\nresults (see `GatewayCaseComparison` in §1.2's registry), so it\nplays the role [`ComponentSpec::name`] plays for components and\nmust not be empty.",
+          "type": "string"
+        },
+        "listenerName": {
+          "description": "Which of the `Gateway`'s listeners this contract is about, by the\nlistener's `name` — Gateway API's `parentRef.sectionName`.\n\n`None` means \"whichever listener the route attached to\", which is\nunambiguous only while the route reports exactly one parent\nstatus entry for this Gateway. `admissionlab_gateway::conditions`\nreports an ambiguous match as ambiguous rather than picking one\n(Global Constraint 15), so a multi-listener Gateway needs this\nfield set.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null
+        },
+        "probes": {
+          "description": "The HTTP probes to send through this route once it reconciles.\nMay be empty: a contract that only asserts the route reconciles\n(its `Accepted`/`ResolvedRefs` conditions) is a meaningful,\nself-contained test, unlike an empty `manifests` list which\ninstalls nothing at all.",
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HttpProbeContract"
+          }
+        },
+        "routeName": {
+          "description": "The name of the `HTTPRoute` under contract.",
+          "type": "string"
+        },
+        "routeNamespace": {
+          "description": "The namespace of the `HTTPRoute` under contract.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "gatewayNamespace",
+        "gatewayName",
+        "routeNamespace",
+        "routeName"
+      ]
+    }
+  }
+}

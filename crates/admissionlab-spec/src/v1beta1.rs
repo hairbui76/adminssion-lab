@@ -1,5 +1,7 @@
-//! The current `admissionlab.io/v1beta1` lab document: the Public Beta
-//! configuration contract ROADMAP Task 7.1 freezes.
+//! The **frozen** `admissionlab.io/v1beta1` lab document: the Public Beta
+//! configuration contract ROADMAP Task 7.1 froze, still read (and still
+//! the source of every type the stable [`crate::v1`] shares) after Task
+//! 9.1 promoted the current version past it.
 //!
 //! # What "frozen" commits this project to
 //!
@@ -34,18 +36,24 @@
 //! spelled identically in both versions and is defined once, in
 //! [`crate::model`].
 //!
-//! # This is the version the rest of the workspace sees
+//! # These types are still the ones the rest of the workspace sees
 //!
 //! [`crate::ResolvedLab`] is version-independent by construction: every
-//! supported document is migrated to *this* model before
+//! supported document is migrated forward to [`crate::v1::V1Lab`] before
 //! [`crate::resolve_lab`] runs, so there is exactly one resolver and one
 //! resolved shape, and no crate above this one ever names an
-//! `apiVersion`. That is also why the three types here are re-exported
-//! from [`crate::model`] and from the crate root under their historical
-//! bare names ([`crate::PolicySpec`], [`crate::GatewaySuiteSpec`], ...):
-//! "the current version's spelling" is what those names have always
-//! meant, and promoting the version did not change which type the
-//! resolved model carries.
+//! `apiVersion`.
+//!
+//! The stable version renamed nothing, so [`crate::v1`] re-exports every
+//! type below rather than declaring copies of them — which is why they
+//! are *also* still re-exported from [`crate::model`] and from the crate
+//! root under their historical bare names ([`crate::PolicySpec`],
+//! [`crate::GatewaySuiteSpec`], ...). "The current version's spelling" is
+//! what those names have always meant, and neither promotion changed
+//! which type the resolved model carries. The day a `v2` disagrees about
+//! one of them, that type is copied into `v2` and these names follow the
+//! new current version, exactly as they followed [`crate::v1alpha1`] to
+//! here.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;

@@ -17,8 +17,8 @@
 //!   digits, `null` for an unfinished run, string map keys in identifier
 //!   order, and a full round-trip through `serde` that also proves
 //!   identifier validation survives deserialization.
-//! - **The checked-in artifacts.** `schemas/run-manifest-v1beta1.json`
-//!   and `testdata/golden/run-manifest-beta.json` are regenerated and
+//! - **The checked-in artifacts.** `schemas/run-manifest-v1.json`
+//!   and `testdata/golden/run-manifest-v1.json` are regenerated and
 //!   compared byte-for-byte, with an `#[ignore]`d regenerator alongside
 //!   each — the pattern `admissionlab-spec`'s `tests/schema.rs`
 //!   established, so the generator and the checker can never drift from
@@ -38,7 +38,7 @@ use admissionlab_core::run_manifest::{
     ComponentProvenance, EffectiveNormalization, EnvironmentProvenance, GatewayProvenance,
     HostProvenance, NormalizationRuleRecord, RunManifest, RunStage, RunStatus, SCHEMA_VERSION,
     ToolProvenance, canonical_sha256, normalization_sha256, policy_sha256,
-    run_manifest_v1beta1_json_schema, sha256_hex, split_node_image_reference,
+    run_manifest_v1_json_schema, sha256_hex, split_node_image_reference,
 };
 use admissionlab_core::{DoctorReport, FixtureId, RunId, ToolName, ToolStatus};
 
@@ -605,10 +605,10 @@ fn deserializing_rejects_unknown_fields() {
 // ---------------------------------------------------------------------
 
 /// Renders the schema in the exact byte-for-byte form checked in at
-/// `schemas/run-manifest-v1beta1.json`. Shared by the checker and the
+/// `schemas/run-manifest-v1.json`. Shared by the checker and the
 /// regenerator so the two can never disagree with each other.
 fn render_schema() -> String {
-    let schema = run_manifest_v1beta1_json_schema();
+    let schema = run_manifest_v1_json_schema();
     let mut text =
         serde_json::to_string_pretty(&schema).expect("a schemars::Schema always serializes");
     text.push('\n');
@@ -617,7 +617,7 @@ fn render_schema() -> String {
 
 #[test]
 fn schema_matches_checked_in_file() {
-    let path = workspace_file("schemas/run-manifest-v1beta1.json");
+    let path = workspace_file("schemas/run-manifest-v1.json");
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "checked-in schema missing at {path:?} ({error}); generate it with \
@@ -627,7 +627,7 @@ fn schema_matches_checked_in_file() {
     assert_eq!(
         render_schema(),
         expected,
-        "generated schema no longer matches schemas/run-manifest-v1beta1.json; regenerate it \
+        "generated schema no longer matches schemas/run-manifest-v1.json; regenerate it \
          with `cargo test -p admissionlab-core --test run_manifest -- --ignored regenerate_schema_file`"
     );
 }
@@ -638,10 +638,10 @@ fn schema_generation_is_deterministic_across_runs() {
 }
 
 #[test]
-#[ignore = "run explicitly to (re)write schemas/run-manifest-v1beta1.json after a deliberate model change"]
+#[ignore = "run explicitly to (re)write schemas/run-manifest-v1.json after a deliberate model change"]
 fn regenerate_schema_file() {
     std::fs::write(
-        workspace_file("schemas/run-manifest-v1beta1.json"),
+        workspace_file("schemas/run-manifest-v1.json"),
         render_schema(),
     )
     .expect("write schema file");
@@ -652,7 +652,7 @@ fn regenerate_schema_file() {
 /// shape, so it must always be exactly what this crate currently writes.
 #[test]
 fn golden_manifest_matches_checked_in_file() {
-    let path = workspace_file("testdata/golden/run-manifest-beta.json");
+    let path = workspace_file("testdata/golden/run-manifest-v1.json");
     let expected = std::fs::read_to_string(&path).unwrap_or_else(|error| {
         panic!(
             "checked-in golden manifest missing at {path:?} ({error}); generate it with \
@@ -668,10 +668,10 @@ fn golden_manifest_matches_checked_in_file() {
 }
 
 #[test]
-#[ignore = "run explicitly to (re)write testdata/golden/run-manifest-beta.json after a deliberate model change"]
+#[ignore = "run explicitly to (re)write testdata/golden/run-manifest-v1.json after a deliberate model change"]
 fn regenerate_golden_manifest() {
     std::fs::write(
-        workspace_file("testdata/golden/run-manifest-beta.json"),
+        workspace_file("testdata/golden/run-manifest-v1.json"),
         render_manifest(&realistic_manifest()),
     )
     .expect("write golden manifest");

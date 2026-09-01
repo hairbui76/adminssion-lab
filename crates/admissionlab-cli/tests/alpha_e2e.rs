@@ -146,8 +146,8 @@ const LEGIBLE_ENV_VALUE: &str = "eu-west-1";
 /// the two.
 #[test]
 fn the_example_configuration_resolves_and_discovers_its_fixtures() {
-    // `load_any_supported_lab`, not `load_lab`: as of Task 7.7 the
-    // examples are `admissionlab.io/v1beta1` documents, and this is the
+    // `load_any_supported_lab`, not `load_lab`: as of Task 9.1 the
+    // examples are `admissionlab.io/v1` documents, and this is the
     // loader the binary itself uses -- the one that accepts every
     // supported version and migrates to the current model before
     // resolving.

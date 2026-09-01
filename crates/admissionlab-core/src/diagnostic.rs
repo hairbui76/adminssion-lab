@@ -40,7 +40,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1beta1` result
+// ROADMAP Task 7.2 (frozen `admissionlab.io/result/v1` result
 // schema): a `Diagnostic` reaches that document both at run level and
 // inside every captured `AdmissionOutcome`, so the generated schema has
 // to describe it. Derive only -- no field, name, or semantic change.

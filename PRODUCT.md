@@ -323,7 +323,7 @@ The configuration format must be declarative, deterministic, and versioned.
 Illustrative shape:
 
 ```yaml
-apiVersion: admissionlab.io/v1beta1
+apiVersion: admissionlab.io/v1
 kind: Lab
 
 baseline:

@@ -2,17 +2,21 @@
 //! configuration contract: every hand-written type whose wire spelling is
 //! identical in every `apiVersion` this crate reads.
 //!
-//! # The version split (ROADMAP Task 7.1)
+//! # The version split (ROADMAP Tasks 7.1 and 9.1)
 //!
-//! There are two supported document versions, and three modules:
+//! There are three supported document versions, and four modules:
 //!
 //! - [`crate::v1alpha1`] owns the **frozen** Public Alpha root
 //!   ([`crate::v1alpha1::LabSpec`], aliased [`crate::V1Alpha1Lab`]) plus
 //!   the three types whose wire spelling v1beta1 deliberately changed.
-//! - [`crate::v1beta1`] owns the current root ([`crate::V1Beta1Lab`]) and
-//!   that same set of three types in their frozen Beta spelling.
-//! - **This module** owns everything else: the types both versions
-//!   deserialize *identically*, from [`EnvironmentSpec`] and
+//! - [`crate::v1beta1`] owns the **frozen** Public Beta root
+//!   ([`crate::V1Beta1Lab`]) and that same set of three types in their
+//!   Beta spelling — plus the types added after the Alpha freeze.
+//! - [`crate::v1`] owns the current, stable root ([`crate::V1Lab`]) and
+//!   nothing else: the stable freeze renamed nothing, so it re-exports
+//!   every one of [`crate::v1beta1`]'s types rather than copying them.
+//! - **This module** owns everything else: the types every version
+//!   deserializes *identically*, from [`EnvironmentSpec`] and
 //!   [`ComponentSpec`] down to
 //!   [`HttpProbeContract`]. A type belongs here exactly while every
 //!   supported version spells it the same way; the moment a new version
@@ -33,8 +37,8 @@
 //! re-exported from this module (and from the crate root) under their
 //! historical bare names, so `admissionlab_spec::PolicySpec` and
 //! `admissionlab_spec::model::EnvironmentSpec` keep resolving exactly as
-//! they always have — to the *current* (Beta) spelling, which is what
-//! [`crate::ResolvedLab`] carries.
+//! they always have — to the current spelling, which `v1beta1` declares,
+//! `v1` shares unchanged, and [`crate::ResolvedLab`] carries.
 //!
 //! # Properties every type here still has
 //!
@@ -47,9 +51,10 @@
 //!   implicit or explicit `rename_all = "camelCase"` so users write
 //!   `apiVersion`/`expectationsFile`/`failOn`, matching typical YAML/JSON
 //!   convention, while Rust code reads idiomatic `snake_case`.
-//!   [`crate::v1alpha1_json_schema`] and [`crate::v1beta1_json_schema`]
-//!   generate their schemas from these same derives, so a schema can
-//!   never drift from the camelCase spelling users actually type.
+//!   [`crate::v1_json_schema`], [`crate::v1beta1_json_schema`] and
+//!   [`crate::v1alpha1_json_schema`] generate their schemas from these
+//!   same derives, so a schema can never drift from the camelCase
+//!   spelling users actually type.
 //!
 //! This module defines the *raw* shape only: values exactly as written in
 //! the file, with relative paths unresolved and no cross-field validation
@@ -91,8 +96,8 @@ pub const KIND: &str = "Lab";
 /// disagreement about which kinds exist at all.
 ///
 /// **A fixture matrix is a separate document with its own version.**
-/// ROADMAP Task 7.1 promotes the *lab* document to
-/// `admissionlab.io/v1beta1`; it does not promote the `FixtureMatrix`
+/// ROADMAP Tasks 7.1 and 9.1 promote the *lab* document, most recently to
+/// `admissionlab.io/v1`; neither promotes the `FixtureMatrix`
 /// document, which is `admissionlab-fixtures`' contract to version (as
 /// the `Expectations` document is `admissionlab-policy`'s). Both still
 /// declare `admissionlab.io/v1alpha1`, and a v1beta1 lab file selects
