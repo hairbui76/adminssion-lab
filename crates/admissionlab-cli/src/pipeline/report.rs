@@ -54,14 +54,19 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
-use admissionlab_core::{Diagnostic, InstalledLab, PreparedLab, RunId, SideInstall, StageTimings};
+use admissionlab_cluster::KIND_LOGS_WARNING;
+use admissionlab_core::{
+    ClusterManager, Diagnostic, DiagnosticsRequest, FailureDiagnostics, InstalledLab, PreparedLab,
+    RunId, Side, SideInstall, StageTimings,
+};
 use admissionlab_policy::PolicyResult;
 use admissionlab_report::{
     ComponentReport, EnvironmentReport, EnvironmentSummary, FixtureComparison, LabResult,
     MigrationCaseComparison, RedactionRules, ReportError, RunSummary, SCHEMA_VERSION,
-    TerminalOptions, escape_markdown, redact_result, render_terminal, write_github_summary,
-    write_html_report, write_json_report,
+    TerminalOptions, escape_markdown, redact_failure_diagnostics, redact_result, render_terminal,
+    write_github_summary, write_html_report, write_json_report,
 };
+use admissionlab_spec::{InstallMethod, ReadinessCheck, ResolvedLab};
 use serde::Serialize;
 
 use crate::pipeline::compare::Comparison;
@@ -272,6 +277,158 @@ pub struct FailureArtifact {
     /// diagnostics, and the diagnostics on whatever fixtures were
     /// captured before the failing one.
     pub diagnostics: Vec<Diagnostic>,
+    /// What each side's cluster looked like at the moment of failure
+    /// (ROADMAP Task 9.5), **already redacted** — see
+    /// [`collect_cluster_failures`], which is the only function that
+    /// builds these and the only place that redaction happens.
+    ///
+    /// Empty for a failure that happened before any cluster existed, and
+    /// for a stage whose failure a cluster snapshot cannot explain. An
+    /// empty list is written as an empty array rather than omitted: the
+    /// difference between "no diagnostics were collected" and "the
+    /// diagnostics were empty" is one a reader should not have to guess
+    /// at.
+    pub clusters: Vec<ClusterFailureReport>,
+}
+
+/// One side's failure bundle, as `diagnostics.json` carries it.
+///
+/// The side and the cluster name are carried alongside the bundle rather
+/// than inside it because [`FailureDiagnostics`] is deliberately about a
+/// cluster's *contents*, not its identity — and a reader of a two-cluster
+/// run's artifact needs to know which of the two they are looking at
+/// before anything in it means much.
+#[derive(Debug, Clone, Serialize)]
+pub struct ClusterFailureReport {
+    /// Which side this cluster stood in for.
+    pub side: &'static str,
+    /// The cluster's name, as `kind` knows it.
+    pub cluster: String,
+    /// The redacted bundle. See [`collect_cluster_failures`].
+    pub diagnostics: FailureDiagnostics,
+}
+
+/// Collects, and **redacts**, both sides' failure bundles for a run that
+/// died with its clusters still up (ROADMAP Task 9.5).
+///
+/// One call per side, sequentially rather than concurrently: this runs
+/// on a path that has already failed, both calls are bounded internally
+/// (see `admissionlab_cluster::diagnostics`), and a failure path is the
+/// last place to add concurrency whose only benefit is finishing a
+/// diagnostic ten seconds sooner.
+///
+/// # What each bundle is, and what it is not
+///
+/// - **Summaries, not objects.** Nothing here can carry a Pod's `spec`,
+///   an annotation, or a Secret's `data`: the types have no field for
+///   them (`admissionlab_core::RedactedObjectSummary`).
+/// - **Redacted here, once.** The one free-text field an event message
+///   is runs through `admissionlab_report::redact_failure_diagnostics`
+///   before it is returned, so no caller can embed an unredacted bundle
+///   by forgetting to — the same "redact at the chokepoint, not in each
+///   renderer" contract [`write_reports`] follows for a `LabResult`.
+/// - **Raw logs by path only.** `kind export logs` writes into this
+///   run's own workspace and only its *path* is recorded; see
+///   [`KIND_LOGS_WARNING`], which the no-verdict summary prints
+///   verbatim wherever that path appears.
+///
+/// `namespaces` is what [`component_namespaces`] derived from the
+/// resolved lab; an empty list means every namespace.
+pub async fn collect_cluster_failures<C: ClusterManager + ?Sized>(
+    manager: &C,
+    prepared: &PreparedLab,
+    namespaces: Vec<String>,
+) -> Vec<ClusterFailureReport> {
+    let mut collected = Vec::new();
+    for handle in [&prepared.baseline, &prepared.candidate] {
+        let request = DiagnosticsRequest {
+            namespaces: namespaces.clone(),
+            logs_destination: Some(kind_logs_destination(prepared, handle.spec.side)),
+        };
+        let diagnostics = manager.failure_diagnostics(handle, &request).await;
+        if diagnostics.is_empty() {
+            continue;
+        }
+        collected.push(ClusterFailureReport {
+            side: handle.spec.side.as_str(),
+            cluster: handle.spec.name.clone(),
+            // Global Constraint 14's chokepoint for this document.
+            diagnostics: redact_failure_diagnostics(&diagnostics),
+        });
+    }
+    collected
+}
+
+/// Where one side's raw `kind` logs are exported to: inside the run's
+/// own `logs` directory, beside the other raw evidence whose protection
+/// is filesystem permissions rather than redaction (`docs/security.md`).
+///
+/// Never `--report-dir`: that is a directory the user pointed at for
+/// *artifacts to share*, and unredacted cluster logs are the one thing
+/// this project produces that must not land there by default.
+fn kind_logs_destination(prepared: &PreparedLab, side: Side) -> PathBuf {
+    prepared
+        .paths
+        .logs()
+        .join(format!("{}-kind-logs", side.as_str()))
+}
+
+/// The namespaces a failure bundle should look in: every namespace this
+/// run's own components touch — **both sides'** — plus `kube-system`.
+///
+/// Both sides, from one function, because the two clusters are asked the
+/// same question and a lab whose candidate installs into a namespace the
+/// baseline does not (a component renamed between the two versions being
+/// compared, which is a thing this tool exists to test) would otherwise
+/// have half its evidence collected from the side that matters most.
+/// Collecting a namespace that does not exist on one side costs one
+/// empty list.
+///
+/// Derived from the resolved configuration rather than discovered from
+/// the cluster, because it has to work when the cluster is the thing
+/// that is broken. Both sources are read — a component's install
+/// namespace (where its workloads land) and each readiness check's own
+/// namespace (which a recipe may point elsewhere) — since a component
+/// whose Deployment is watched in one namespace and installed into
+/// another would otherwise have half its evidence collected.
+///
+/// Returns an empty list when the configuration names no namespace at
+/// all, which `DiagnosticsRequest::namespaces` reads as "every
+/// namespace" — the right answer when nothing is known about the layout.
+#[must_use]
+pub fn component_namespaces(lab: &ResolvedLab) -> Vec<String> {
+    let mut namespaces: Vec<String> = Vec::new();
+    for component in lab
+        .baseline
+        .components
+        .iter()
+        .chain(&lab.candidate.components)
+    {
+        match &component.install {
+            InstallMethod::Helm(helm) => namespaces.push(helm.namespace.clone()),
+            // A manifests install names no namespace of its own: the
+            // manifests carry their own `metadata.namespace`, which this
+            // side of the code deliberately does not parse (that is
+            // `admissionlab_installer::manifests`' job). The readiness
+            // checks below are what cover such a component.
+            InstallMethod::Manifests(_) => {}
+        }
+        for check in &component.readiness {
+            match check {
+                ReadinessCheck::DeploymentAvailable { namespace, .. }
+                | ReadinessCheck::DaemonSetReady { namespace, .. }
+                | ReadinessCheck::JobComplete { namespace, .. } => {
+                    namespaces.push(namespace.clone());
+                }
+                ReadinessCheck::CustomResourceCondition { namespace, .. } => {
+                    namespaces.extend(namespace.clone());
+                }
+                // Cluster-scoped: nothing to add.
+                ReadinessCheck::WebhookConfigurationPresent { .. } => {}
+            }
+        }
+    }
+    admissionlab_cluster::relevant_namespaces(&namespaces)
 }
 
 /// How many characters of the failure text the no-verdict summary
@@ -310,6 +467,7 @@ pub fn render_no_verdict_summary(
     stage: &str,
     failure: &str,
     diagnostics: usize,
+    clusters: &[ClusterFailureReport],
 ) -> String {
     use std::fmt::Write as _;
 
@@ -348,6 +506,33 @@ pub fn render_no_verdict_summary(
          before it. Uploaded with this run when the failure happened after the run workspace \
          existed."
     );
+    // ROADMAP Task 9.5 Step 4: say that the cluster evidence exists, and
+    // where. Nothing about a cluster's contents is rendered here -- the
+    // summary is read in a pull request by someone who has not asked for
+    // a cluster dump -- but a bundle nobody knows was collected may as
+    // well not have been.
+    for cluster in clusters {
+        let _ = writeln!(
+            out,
+            "- `{DIAGNOSTICS_JSON}` → `clusters` → `{side}` — the {side} cluster \
+             ({cluster_name}) at the moment of failure: {nodes} node, {pods} pod and {events} \
+             event summaries, {webhooks} webhook configuration(s). Redacted.",
+            side = escape_markdown(cluster.side),
+            cluster_name = escape_markdown(&cluster.cluster),
+            nodes = cluster.diagnostics.nodes.len(),
+            pods = cluster.diagnostics.pods.len() + cluster.diagnostics.workloads.len(),
+            events = cluster.diagnostics.events.len(),
+            webhooks = cluster.diagnostics.webhook_configurations.len(),
+        );
+        if let Some(path) = &cluster.diagnostics.kind_logs_path {
+            let _ = writeln!(
+                out,
+                "- `{path}` — this cluster's raw `kind` logs, **on the machine that ran the lab, \
+                 not in this summary and not in any artifact**. {KIND_LOGS_WARNING}",
+                path = escape_markdown(&path.display().to_string()),
+            );
+        }
+    }
     let _ = writeln!(
         out,
         "- No `{RESULT_JSON}` and no `{REPORT_HTML}`: both carry a policy verdict, and this run \
@@ -390,6 +575,7 @@ pub async fn write_no_verdict_summary(
     stage: &str,
     failure: &str,
     diagnostics: usize,
+    clusters: &[ClusterFailureReport],
 ) -> io::Result<()> {
     if let Some(parent) = path
         .parent()
@@ -397,7 +583,7 @@ pub async fn write_no_verdict_summary(
     {
         tokio::fs::create_dir_all(parent).await?;
     }
-    let text = render_no_verdict_summary(run_id, stage, failure, diagnostics);
+    let text = render_no_verdict_summary(run_id, stage, failure, diagnostics, clusters);
     tokio::fs::write(path, text.as_bytes()).await
 }
 

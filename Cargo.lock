@@ -65,10 +65,14 @@ version = "0.1.0"
 dependencies = [
  "admissionlab-core",
  "async-trait",
+ "k8s-openapi",
+ "kube",
  "serde",
+ "serde_json",
  "serde_norway",
  "thiserror",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

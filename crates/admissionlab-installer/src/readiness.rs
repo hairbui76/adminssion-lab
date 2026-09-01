@@ -196,7 +196,7 @@
 
 use std::time::{Duration, Instant};
 
-use admissionlab_core::ClusterHandle;
+use admissionlab_core::{ClusterHandle, MAX_DIAGNOSTIC_OBJECTS, RedactedObjectSummary};
 use admissionlab_spec::ReadinessCheck;
 use async_trait::async_trait;
 use k8s_openapi::api::admissionregistration::v1::{
@@ -204,6 +204,11 @@ use k8s_openapi::api::admissionregistration::v1::{
 };
 use k8s_openapi::api::apps::v1::{DaemonSet, Deployment};
 use k8s_openapi::api::batch::v1::Job;
+// `Pod`: `KubeReadinessProbe::failing_pods` (Task 9.5) lists a
+// component's namespace after a readiness timeout, to name the pods
+// that are stuck and the kubelet reason they are stuck on.
+use k8s_openapi::api::core::v1::Pod;
+use kube::api::ListParams;
 use kube::config::{KubeConfigOptions, Kubeconfig};
 use kube::core::{ApiResource, DynamicObject, GroupVersion};
 use kube::{Api, Client, Config};
@@ -239,6 +244,43 @@ pub trait ReadinessProbe: Send + Sync {
         check: &ReadinessCheck,
         deadline: Instant,
     ) -> Result<ReadinessEvidence, InstallError>;
+
+    /// Summarizes the pods in `namespace` that do not look healthy,
+    /// after a check has already failed to become satisfied (ROADMAP
+    /// Task 9.5 Step 3).
+    ///
+    /// This is the question a user asks the moment an install times out
+    /// — *which pod is stuck, and on what?* — and the answer
+    /// (`ImagePullBackOff`, `CrashLoopBackOff`,
+    /// `CreateContainerConfigError`) is one list call away from a probe
+    /// that already has a client for this cluster. Without it, an
+    /// exit-4 failure says only that a Deployment never became
+    /// available, and the user reruns a twenty-minute lab to learn what
+    /// the cluster already knew.
+    ///
+    /// Called **only on the failure path**, never during polling: it
+    /// costs an API call, and a run that succeeds has nothing to
+    /// explain.
+    ///
+    /// Returns [`admissionlab_core::RedactedObjectSummary`] values,
+    /// which cannot carry a pod's `spec` (and so cannot carry its
+    /// environment, its command line, or a mounted Secret's name) — see
+    /// that type's own "Redacted by construction".
+    ///
+    /// **Defaulted to the empty list**, for the same reason
+    /// [`admissionlab_core::ClusterManager::failure_diagnostics`] is: a
+    /// test double has no cluster to list pods from, and an empty answer
+    /// here is honest rather than fabricated. It is `Vec`, not `Result`,
+    /// because a failure to collect *supplementary* evidence must never
+    /// replace the failure being explained.
+    async fn failing_pods(
+        &self,
+        cluster: &ClusterHandle,
+        namespace: &str,
+    ) -> Vec<RedactedObjectSummary> {
+        let _ = (cluster, namespace);
+        Vec::new()
+    }
 }
 
 /// What [`ReadinessProbe::wait`] found: whether `check` became
@@ -740,6 +782,37 @@ impl ReadinessProbe for KubeReadinessProbe {
             }
         })?;
         Ok(poll_readiness(check, deadline, &BackoffPolicy::default(), &target).await)
+    }
+
+    /// Lists `namespace`'s pods through the same isolated-kubeconfig
+    /// chokepoint every other call in this module uses ([`client_for`]),
+    /// keeps the ones that do not look healthy, and summarizes them.
+    ///
+    /// Every failure here is swallowed into an empty list rather than
+    /// surfaced: this runs after an install has *already* failed, and
+    /// "the pods could not be listed either" is not a fact worth
+    /// replacing the actual failure with. The bundle the CLI collects
+    /// separately (`ClusterManager::failure_diagnostics`) records its own
+    /// unavailability notes for the reader who needs them.
+    async fn failing_pods(
+        &self,
+        cluster: &ClusterHandle,
+        namespace: &str,
+    ) -> Vec<RedactedObjectSummary> {
+        let Ok(client) = client_for(cluster).await else {
+            return Vec::new();
+        };
+        let api: Api<Pod> = Api::namespaced(client, namespace);
+        let Ok(pods) = api.list(&ListParams::default()).await else {
+            return Vec::new();
+        };
+        pods.items
+            .iter()
+            .filter_map(|pod| serde_json::to_value(pod).ok())
+            .map(|pod| RedactedObjectSummary::from_api_object(&pod, "Pod"))
+            .filter(|pod| !pod.looks_healthy())
+            .take(MAX_DIAGNOSTIC_OBJECTS)
+            .collect()
     }
 }
 

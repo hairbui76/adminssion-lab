@@ -19,7 +19,10 @@ pub use cache::{
     CACHE_DIR_ENV, CacheError, CacheLookup, CacheMiss, CachePaths, ContentKey, default_cache_root,
 };
 pub use cluster::{
-    ClusterDiagnostics, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, RollbackOutcome,
+    ClusterDiagnostics, ClusterError, ClusterHandle, ClusterManager, ClusterSpec, ConditionSummary,
+    ContainerStatusSummary, DiagnosticsRequest, FailureDiagnostics, MAX_DIAGNOSTIC_EVENTS,
+    MAX_DIAGNOSTIC_OBJECTS, MAX_SUMMARY_TEXT_CHARS, RedactedEvent, RedactedObjectSummary,
+    RollbackOutcome,
 };
 pub use diagnostic::{Diagnostic, DiagnosticLevel, RedactedValue, SensitiveBytes};
 pub use error::IdParseError;

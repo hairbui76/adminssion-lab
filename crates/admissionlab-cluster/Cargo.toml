@@ -21,9 +21,37 @@ admissionlab-core = { workspace = true }
 # only on the trait definition: `async_trait`'s desugaring must match on
 # both sides for the impl to typecheck.
 async-trait = { workspace = true }
+# `diagnostics.rs` (Task 9.5) reads a failing cluster's own view of
+# itself -- Nodes, Pods, Events, and both webhook-configuration kinds --
+# through the same generated types and the same client stack
+# `admissionlab-installer`'s readiness probes already use, from that
+# cluster's own isolated kubeconfig (never the operator's ambient one;
+# see `diagnostics::KubeObjectSource::for_cluster`). Both are pinned
+# centrally in the root `Cargo.toml` -- see its comments for why the
+# `v1_36` feature choice lives there rather than here, and why keeping
+# every consumer on one workspace entry is what prevents `k8s-openapi`'s
+# "exactly one version feature" build-script panic. This is a *second*
+# consumer of an already-resolved pair, not a new dependency in the
+# graph.
+k8s-openapi = { workspace = true }
+kube = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+# `diagnostics.rs`'s collection seam carries already-fetched Kubernetes
+# objects as `serde_json::Value` rather than typed `k8s-openapi` structs
+# -- see that module's "The offline seam" section for why the boundary is
+# JSON (a test double is a JSON literal, and this crate's public API does
+# not grow a `k8s-openapi` version in its signatures). The mapping from
+# those values to the summary types is `admissionlab-core`'s, not this
+# crate's.
+serde_json = { workspace = true }
 serde_norway = { workspace = true }
 thiserror = { workspace = true }
+# `diagnostics.rs` records why a probe could not be completed at `debug`
+# level (a cluster-existence check that itself failed), so a `RUST_LOG`-
+# enabled run can see it without that non-answer having to become a note
+# in every user-facing bundle. Already a workspace dependency used by
+# `admissionlab-core`/`admissionlab-cli`; no new supply-chain surface.
+tracing = { workspace = true }
 # `fs` only: `lifecycle.rs` creates the per-side audit-log bind-mount
 # host directory via `tokio::fs::create_dir_all` and `kubeconfig.rs` reads
 # back the kubeconfig file `kind` wrote via `tokio::fs::read`/`metadata`.
@@ -31,7 +59,12 @@ thiserror = { workspace = true }
 # runtime, so `rt` is a dev-only need (see `[dev-dependencies]` below) —
 # the same v2-resolver split `admissionlab-core`'s own `Cargo.toml`
 # documents for its `tokio` entry.
-tokio = { workspace = true, features = ["fs"] }
+# `time` alongside `fs` since Task 9.5: `diagnostics.rs` bounds every
+# Kubernetes list call with `tokio::time::timeout` in production code
+# (not only in tests), for the reason that module documents -- it runs
+# against a cluster that is already unhealthy, where an unbounded call is
+# a hang rather than a slow answer.
+tokio = { workspace = true, features = ["fs", "time"] }
 
 [dev-dependencies]
 # `tests/lifecycle_unit.rs` drives `ClusterManager`'s async methods

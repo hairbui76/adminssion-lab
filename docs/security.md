@@ -348,13 +348,41 @@ place so there is no loose-permission window. That enforcement is Unix-only.
 Do not attach a raw evidence bundle to a public issue without reading it first.
 The rendered reports are the artifacts intended for sharing.
 
-### The failure-path `diagnostics.json` is not run through redaction
+### The failure-path `diagnostics.json` is partly redacted, and says which part
 
 When a run fails at or after installation, it writes a `diagnostics.json` naming
-the failed stage and the diagnostics collected so far. That artifact is
-serialized directly. Diagnostic context values explicitly marked sensitive carry
-no payload at all and are therefore safe, but the redaction pass described above
-is not applied to this file. Treat it as evidence, not as a report.
+the failed stage, the diagnostics collected so far, and — for a failure that
+happened while the clusters were still up — a `clusters` array holding each
+side's failure bundle. The two halves are protected differently, so the
+distinction is stated rather than blurred:
+
+- The **`diagnostics` array** is serialized directly. Diagnostic context values
+  explicitly marked sensitive carry no payload at all and are therefore safe,
+  but the report redaction pass is *not* applied to them.
+- The **`clusters` array** is redacted twice over. Its summary types cannot
+  hold an object's `spec`, its annotations, or a Secret's `data` — there is no
+  field any of those could land in, which is a stronger guarantee than a rule
+  that has to recognize them. The one free-text field it does carry, an event's
+  `message`, additionally goes through the same header/private-key rules the
+  reports use.
+
+Treat the file as a whole as evidence, not as a report.
+
+### Raw `kind` logs are exported for failures, and are never redacted
+
+When a run fails with its clusters still up, Admission Lab runs
+`kind export logs` into that run's own workspace
+(`<run>/logs/<side>-kind-logs/`) and records **only the path** in
+`diagnostics.json`. No byte of that export reaches `diagnostics.json`, the job
+summary, or any report.
+
+That export is every node's kubelet journal and the full output of every
+container that ran, including third-party components: **a chart that echoes its
+values on startup, a webhook that logs the request it rejected, or an operator
+that prints a token on an auth failure all end up in there verbatim.** It is
+protected by filesystem permissions inside the run workspace, exactly like the
+raw evidence bundles above. Read it before attaching it to an issue, and never
+upload the directory wholesale.
 
 ### CLI arguments are never redacted
 

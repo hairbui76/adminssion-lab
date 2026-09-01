@@ -49,7 +49,9 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 use std::time::{Duration, SystemTime};
 
-use admissionlab_core::{ClusterHandle, CommandContext, Diagnostic, ProcessError};
+use admissionlab_core::{
+    ClusterHandle, CommandContext, Diagnostic, FailureDiagnostics, ProcessError,
+};
 use admissionlab_spec::{ReadinessCheck, ResolvedComponent};
 use async_trait::async_trait;
 use thiserror::Error;
@@ -334,10 +336,23 @@ pub enum InstallError {
     /// install` already returned). `evidence` is whatever was last
     /// observed, carried through unmodified — never fabricated (Global
     /// Constraint 15).
+    ///
+    /// `diagnostics` is what the cluster itself said about the failure
+    /// at that moment (ROADMAP Task 9.5 Step 3): the last observed
+    /// object's conditions, and the pods in the check's namespace that
+    /// do not look healthy, with the kubelet reason each is stuck on.
+    /// It is collected once, here, on the way out — never during
+    /// polling — and it is *summaries*, not objects, so it cannot carry
+    /// a pod's `spec` (see
+    /// [`admissionlab_core::RedactedObjectSummary`]). The rendered
+    /// message quotes the most actionable few
+    /// ([`admissionlab_core::FailureDiagnostics::failure_hint`]) so that
+    /// the terminal line, `diagnostics.json`'s `failure`, and the job
+    /// summary all name the stuck pod, not just the timed-out check.
     #[error(
         "component {component:?} did not become ready in time: {:?} was never satisfied \
-         (waited {:?})",
-        .evidence.check, .evidence.elapsed
+         (waited {:?}){}",
+        .evidence.check, .evidence.elapsed, readiness_failure_suffix(.diagnostics)
     )]
     ComponentNotReady {
         /// The component that did not become ready.
@@ -345,5 +360,25 @@ pub enum InstallError {
         /// The readiness evidence for whichever check failed to become
         /// satisfied.
         evidence: Box<ReadinessEvidence>,
+        /// What the cluster looked like when the wait gave up. Empty
+        /// (never fabricated) when nothing could be collected.
+        diagnostics: Box<FailureDiagnostics>,
     },
+}
+
+/// Renders [`InstallError::ComponentNotReady`]'s bundle as the trailing
+/// clause of that error's message, or as nothing at all when there is
+/// nothing to say.
+///
+/// A free function rather than an inline expression in the `#[error]`
+/// attribute because it has a decision in it — an empty bundle must
+/// produce *no* clause, not an empty pair of brackets that reads as
+/// missing evidence.
+fn readiness_failure_suffix(diagnostics: &FailureDiagnostics) -> String {
+    let hint = diagnostics.failure_hint();
+    if hint.is_empty() {
+        String::new()
+    } else {
+        format!("; {hint}")
+    }
 }

@@ -730,8 +730,21 @@ clusters, plus `run.json` in the run workspace with `status: failed` and
 `stage: installation`. There is deliberately **no** `result.json`: the run never
 compared both sides, so it has no verdict to state.
 
-**What to do.** Read `diagnostics.json` first — it names the component and the
-side. Then re-run with `--keep-clusters` and look at the workload directly:
+**What to do.** Read `diagnostics.json` first. It names the component and the
+side, and — since the clusters were still up when it was written — carries a
+`clusters` array with each side's failure bundle: node and pod summaries with
+the kubelet reason each stuck container is waiting on, the recent events, and
+the webhook configurations that existed. The failure message quotes the most
+actionable few of those inline, so `ImagePullBackOff` usually appears in the
+first line of output rather than only in the artifact.
+
+Each bundle also names a `kindLogsPath`: raw `kind export logs` output, left in
+the run workspace and never embedded anywhere, because third-party components
+may have logged secrets into it
+([`docs/security.md`](security.md#raw-kind-logs-are-exported-for-failures-and-are-never-redacted)).
+
+If the bundle does not settle it, re-run with `--keep-clusters` and look at the
+workload directly:
 
 ```bash
 admissionlab test --keep-clusters admissionlab.yaml

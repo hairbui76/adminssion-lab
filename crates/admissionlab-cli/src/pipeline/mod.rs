@@ -987,7 +987,16 @@ async fn no_verdict(
     failure: &str,
     disposition: RunDisposition,
 ) -> RunDisposition {
-    write_no_verdict_summary(request.github_summary, console, run_id, stage, failure, 0).await;
+    write_no_verdict_summary(
+        request.github_summary,
+        console,
+        run_id,
+        stage,
+        failure,
+        0,
+        &[],
+    )
+    .await;
     disposition
 }
 
@@ -1005,11 +1014,14 @@ async fn write_no_verdict_summary(
     stage: &str,
     failure: &str,
     diagnostics: usize,
+    clusters: &[report::ClusterFailureReport],
 ) {
     let Some(path) = path else {
         return;
     };
-    match report::write_no_verdict_summary(path, run_id, stage, failure, diagnostics).await {
+    match report::write_no_verdict_summary(path, run_id, stage, failure, diagnostics, clusters)
+        .await
+    {
         Ok(()) => console.say(&format!("wrote {}.", path.display())),
         Err(error) => console.problem(&format!(
             "could not write this run's job summary to {}: {error}",
@@ -1859,12 +1871,25 @@ async fn install_both_stacks<B: LabBackend, C: ClusterManager>(
         Err(failure) => {
             console.problem(&format!("{failure}"));
             record_stage_failure(outputs.manifest, RunStage::Installation, console).await;
-            write_failure(
+            // ROADMAP Task 9.5: both clusters are still up at this point
+            // -- `install_stacks` rolls nothing back -- so this is
+            // exactly where the cluster can still be asked what went
+            // wrong. Collected before cleanup, and before the exit
+            // disposition is decided, so a bundle can never be the
+            // reason a run reports a different outcome.
+            let clusters = report::collect_cluster_failures(
+                &*backend.cluster_manager(),
+                prepared,
+                report::component_namespaces(&inputs.lab),
+            )
+            .await;
+            write_failure_with_clusters(
                 &*outputs,
                 prepared,
                 "install",
                 &failure.to_string(),
                 Vec::new(),
+                clusters,
                 console,
             )
             .await;
@@ -2014,6 +2039,10 @@ async fn compare_and_report(
                 "reporting",
                 &error.to_string(),
                 0,
+                // A rendering failure says nothing about either cluster,
+                // and both are about to be torn down: a bundle here
+                // would be evidence for a question nobody asked.
+                &[],
             )
             .await;
             return crate::exit::disposition_for_report_error(&error);
@@ -2134,12 +2163,44 @@ async fn write_failure(
     diagnostics: Vec<Diagnostic>,
     console: &mut Console<'_>,
 ) {
+    write_failure_with_clusters(
+        outputs,
+        prepared,
+        stage,
+        failure,
+        diagnostics,
+        Vec::new(),
+        console,
+    )
+    .await;
+}
+
+/// [`write_failure`], plus what each side's cluster looked like at the
+/// moment it failed (ROADMAP Task 9.5).
+///
+/// A separate entry point rather than a sixth parameter on
+/// [`write_failure`] because only the stages that fail *with clusters
+/// still running* have a bundle to attach, and a failure before any
+/// cluster exists must not be made to look as though its bundle came
+/// back empty. `clusters` is already redacted —
+/// [`report::collect_cluster_failures`] is the only thing that builds
+/// one, and it redacts before it returns.
+async fn write_failure_with_clusters(
+    outputs: &Outputs<'_>,
+    prepared: &PreparedLab,
+    stage: &'static str,
+    failure: &str,
+    diagnostics: Vec<Diagnostic>,
+    clusters: Vec<report::ClusterFailureReport>,
+    console: &mut Console<'_>,
+) {
     let collected = diagnostics.len();
     let artifact = report::FailureArtifact {
         run_id: prepared.run_id.as_str().to_owned(),
         stage,
         failure: failure.to_owned(),
         diagnostics,
+        clusters,
     };
     match report::write_failure_artifact(&outputs.report_dir, &artifact).await {
         Ok(path) => console.say(&format!("wrote {}.", path.display())),
@@ -2154,6 +2215,7 @@ async fn write_failure(
         stage,
         failure,
         collected,
+        &artifact.clusters,
     )
     .await;
 }

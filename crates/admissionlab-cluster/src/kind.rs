@@ -319,6 +319,44 @@ pub(crate) fn load_image_argv(image: &str, cluster_name: &str) -> Vec<OsString> 
 }
 
 /// Builds the exact argv (excluding the program name) for
+/// `kind export logs <dir> --name <cluster>` (ROADMAP Task 9.5): the
+/// backend's own raw cluster logs, written into a directory inside the
+/// run workspace.
+///
+/// The destination is the subcommand's **positional** argument, passed
+/// as one argv element built from the `Path` itself (never formatted
+/// into a string), so a directory containing a space, a quote, or a `$`
+/// reaches `kind` literally — Global Constraint 12, the same discipline
+/// [`create_argv`]'s `--config`/`--kubeconfig` paths follow.
+///
+/// Deliberately no `--kubeconfig` flag, for the same verified reason
+/// [`get_clusters_argv`] records: `kind export logs --help` accepts no
+/// such flag. It reads the node containers through Docker directly and
+/// touches no kubeconfig at all, so there is neither a race to fix nor a
+/// flag to give it.
+pub(crate) fn export_logs_argv(name: &str, destination: &Path) -> Vec<OsString> {
+    vec![
+        "export".into(),
+        "logs".into(),
+        path_to_os_string(destination),
+        "--name".into(),
+        name.into(),
+    ]
+}
+
+/// Bounds one `kind export logs` invocation.
+///
+/// The work is local — `kind` `docker exec`s a tar of each node's
+/// journal and container logs out to the host — but it is proportional
+/// to how much a broken cluster has logged, which is exactly the case
+/// this runs in. 120 seconds is generous for a single-node `kind`
+/// cluster (a few seconds measured) while still bounding a failure path
+/// that a user is already waiting on: an export that has not finished by
+/// then is abandoned and reported as a note, never left to hang (Global
+/// Constraint 13).
+pub(crate) const EXPORT_LOGS_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Builds the exact argv (excluding the program name) for
 /// `kind get clusters`, used by `diagnostics` to check whether a cluster
 /// by this name still exists.
 ///

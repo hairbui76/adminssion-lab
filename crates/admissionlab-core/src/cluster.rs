@@ -60,6 +60,7 @@ use std::path::PathBuf;
 use std::process::ExitStatus;
 
 use async_trait::async_trait;
+use serde::Serialize;
 use thiserror::Error;
 
 use crate::artifact::{ArtifactError, RunPaths};
@@ -173,6 +174,593 @@ pub struct ClusterDiagnostics {
     /// any other detail a reader trying to understand this cluster's
     /// state would want. Empty when nothing needs calling out.
     pub notes: Vec<String>,
+}
+
+/// How many object summaries of one kind a [`FailureDiagnostics`] bundle
+/// keeps.
+///
+/// A failed run's bundle is embedded in `diagnostics.json` and read by a
+/// human; a cluster with a broken component can easily hold hundreds of
+/// pods, and the fiftieth one adds nothing the first fifty did not
+/// already say. Whoever fills the bundle is expected to put the
+/// *unhealthy* objects first (see [`FailureDiagnostics`]), so the cap
+/// falls on the least interesting entries, and a
+/// [`FailureDiagnostics::notes`] entry always says how many were
+/// dropped — a truncated list never silently reads as a complete one
+/// (Global Constraint 15).
+pub const MAX_DIAGNOSTIC_OBJECTS: usize = 50;
+
+/// How many events a [`FailureDiagnostics`] bundle keeps. See
+/// [`MAX_DIAGNOSTIC_OBJECTS`]; events are noisier still (a
+/// `CrashLoopBackOff` alone emits one every few seconds).
+pub const MAX_DIAGNOSTIC_EVENTS: usize = 50;
+
+/// How many characters of one free-text string a summary keeps.
+///
+/// Every string in a summary is either a short Kubernetes enum-like
+/// token (`"ImagePullBackOff"`, `"True"`) or controller-authored prose
+/// ([`RedactedEvent::message`]). The latter is unbounded at the source,
+/// so it is bounded here, at construction, for the same reason
+/// `admissionlab_core::output_tail` bounds command output: an artifact
+/// a single pathological value can blow up is not bounded at all.
+pub const MAX_SUMMARY_TEXT_CHARS: usize = 400;
+
+/// One `status.conditions[]` entry, reduced to the four fields that say
+/// what a controller decided and when.
+///
+/// Deliberately **no `message` field**: a condition's `message` is
+/// unbounded, controller-authored prose that can quote arbitrary object
+/// content (an admission webhook's rejection text quoting the object it
+/// rejected, for instance). `reason` — a short, enum-like token from a
+/// fixed per-controller vocabulary (`"MinimumReplicasUnavailable"`) —
+/// carries the actionable half without that risk. See
+/// [`RedactedObjectSummary`] for the redaction-by-construction argument
+/// this omission is part of.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConditionSummary {
+    /// The condition's `type` (for example `"Ready"`, `"Available"`).
+    pub condition_type: String,
+    /// Its `status`, verbatim: `"True"`, `"False"`, or `"Unknown"`.
+    pub status: String,
+    /// Its `reason`, when the controller set one.
+    pub reason: Option<String>,
+    /// Its `lastTransitionTime`, as the RFC 3339 string the API server
+    /// reported. Kept as text rather than parsed: this is evidence to
+    /// display, and a parse that could fail would be one more way for a
+    /// best-effort snapshot to lose information it already had.
+    pub last_transition: Option<String>,
+}
+
+/// One container's status inside a Pod summary: enough to name *why* a
+/// pod is not running, and nothing more.
+///
+/// `reason` is where `ImagePullBackOff`, `CrashLoopBackOff`,
+/// `CreateContainerConfigError` and friends surface — the single most
+/// actionable field in an install-timeout bundle. The matching
+/// `message` (which quotes the image reference, a registry URL, and
+/// occasionally a credential-bearing pull-secret name) is deliberately
+/// not carried; see [`RedactedObjectSummary`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContainerStatusSummary {
+    /// The container's name.
+    pub name: String,
+    /// Whether the kubelet currently considers it ready.
+    pub ready: bool,
+    /// How many times it has restarted.
+    pub restarts: i64,
+    /// Which of the three container states it is in: `"running"`,
+    /// `"waiting"`, `"terminated"`, or `"unknown"` when the status
+    /// carried none of them.
+    pub state: String,
+    /// The `reason` on that state, when it has one (`"ImagePullBackOff"`,
+    /// `"CrashLoopBackOff"`, `"Error"`, …).
+    pub reason: Option<String>,
+    /// The exit code of a terminated container, when it reported one.
+    pub exit_code: Option<i64>,
+}
+
+/// One Kubernetes object, reduced to identity plus status.
+///
+/// # Redacted by construction
+///
+/// This type is the whole redaction argument for [`FailureDiagnostics`]:
+/// it **cannot hold arbitrary object content**, because it has nowhere
+/// to put any. Every field is a `String`, `bool`, `i64`, or a `Vec` of
+/// the two small status types above; there is no `serde_json::Value`,
+/// no map, and no free-text field other than the enum-like `reason`s and
+/// `status`es Kubernetes controllers write. A `spec` (with its
+/// `env`/`envFrom`/`volumes`/`command`), an `annotation`, a Secret's
+/// `data`, and a `managedFields` entry have no representation here at
+/// all, so no collector — present or future — can leak one through this
+/// type by forgetting a rule. That is a stronger guarantee than running
+/// a whole object through a redaction pass, which is only ever as good
+/// as its list of known-sensitive shapes.
+///
+/// Constructing one from a raw API object is
+/// `admissionlab_cluster::diagnostics`'s job (this crate stays free of
+/// any Kubernetes client — Global Constraint 6), which is why the
+/// fields are plain and public rather than hidden behind a parser here.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactedObjectSummary {
+    /// The object's kind (`"Pod"`, `"Node"`,
+    /// `"ValidatingWebhookConfiguration"`). Supplied by the collector
+    /// when a list item's own `kind` is empty, as it is for most typed
+    /// list responses.
+    pub kind: String,
+    /// The object's `metadata.name`.
+    pub name: String,
+    /// Its `metadata.namespace`, or `None` for a cluster-scoped object.
+    pub namespace: Option<String>,
+    /// Its `status.phase` where it has one (`"Pending"`, `"Running"`,
+    /// `"Failed"`), `None` otherwise. Never invented for a kind that has
+    /// no phase.
+    pub phase: Option<String>,
+    /// Its `status.conditions`, in the order the API server reported
+    /// them.
+    pub conditions: Vec<ConditionSummary>,
+    /// Its containers' statuses (init containers included), for a Pod.
+    /// Empty for every other kind.
+    pub containers: Vec<ContainerStatusSummary>,
+    /// Its `metadata.creationTimestamp`, as reported.
+    pub created_at: Option<String>,
+}
+
+/// One `Event`, reduced to what it says happened.
+///
+/// # `message` is the one free-text field, and it is not self-redacting
+///
+/// Unlike [`RedactedObjectSummary`], this type does carry controller
+/// prose: an event's `message` *is* the evidence (`Failed to pull image
+/// "…": …`), and dropping it would leave the bundle unable to explain
+/// the very failures it exists to explain. It is bounded
+/// ([`MAX_SUMMARY_TEXT_CHARS`]) and control characters are stripped at
+/// construction, but bounding is not redaction: a third-party
+/// controller can put anything in a message, including a token it
+/// should not have logged.
+///
+/// So the contract is: **a bundle must go through
+/// `admissionlab_report::redact_failure_diagnostics` before it is
+/// embedded in any artifact a human reads.** That pass applies Global
+/// Constraint 14's string rules (headers, PEM private keys) to this
+/// field, exactly as it already does to every diagnostic message in a
+/// report. The type documents the requirement; the CLI's failure-artifact
+/// path is where it is honored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RedactedEvent {
+    /// The event's namespace.
+    pub namespace: Option<String>,
+    /// `"Normal"` or `"Warning"`, as reported.
+    pub event_type: Option<String>,
+    /// The event's short `reason` token (`"Failed"`, `"BackOff"`,
+    /// `"FailedScheduling"`).
+    pub reason: Option<String>,
+    /// The event's `message` — free text; see this type's documentation.
+    pub message: String,
+    /// `"<kind>/<name>"` for the object the event is about, assembled
+    /// from `involvedObject` rather than carrying the whole reference
+    /// (which also holds a resource version and a field path nobody
+    /// reading a failure bundle needs).
+    pub involved_object: Option<String>,
+    /// How many times this event has fired, when the API server
+    /// aggregated a count.
+    pub count: Option<i64>,
+    /// When it first fired, as reported.
+    pub first_seen: Option<String>,
+    /// When it last fired, as reported.
+    pub last_seen: Option<String>,
+}
+
+/// What a cluster looked like at the moment something failed on it:
+/// ROADMAP Task 9.5's bundle.
+///
+/// # Why this is not [`ClusterDiagnostics`]
+///
+/// Task 9.5 froze this shape under the name `ClusterDiagnostics`, but
+/// that name was already taken *in this module* by Controller Ruling
+/// R22's own frozen type — the "is the cluster still there, are its two
+/// files present" snapshot [`ClusterManager::diagnostics`] returns, which
+/// several implementations and tests already construct by name. Rather
+/// than redefine one frozen type or introduce a second type with the
+/// same name in a second crate (`admissionlab_core::ClusterDiagnostics`
+/// and `admissionlab_cluster::ClusterDiagnostics` would be a genuinely
+/// confusing pair to have in one `use` list), the five frozen fields
+/// live here verbatim under a name that says what they are for. The two
+/// types are complements, not rivals: [`ClusterManager::diagnostics`]
+/// answers "does this cluster still exist", this one answers "what was
+/// wrong inside it".
+///
+/// # Ordering and truncation
+///
+/// A collector fills `pods` and `events` **unhealthy-first** and caps
+/// them at [`MAX_DIAGNOSTIC_OBJECTS`]/[`MAX_DIAGNOSTIC_EVENTS`], adding a
+/// [`Self::notes`] entry saying how many were dropped. Nothing here is
+/// ever fabricated: a list that could not be fetched is empty *and*
+/// carries a note saying why (Global Constraint 15), which is what lets
+/// a reader tell "no pods were failing" apart from "pods could not be
+/// listed".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FailureDiagnostics {
+    /// Every node, summarized. Small and always worth having: a
+    /// `NotReady` node explains a whole cluster's worth of pending pods.
+    pub nodes: Vec<RedactedObjectSummary>,
+    /// Pods in the requested namespaces, unhealthy ones first.
+    pub pods: Vec<RedactedObjectSummary>,
+    /// The workload objects a readiness check was actually waiting on
+    /// (a `Deployment`, `DaemonSet`, `Job`, or custom resource), summarized
+    /// from the last observation the probe made before it gave up.
+    ///
+    /// Not part of Task 9.5's frozen five fields, and added for the
+    /// reason Step 3 names: on a readiness timeout the *last observed
+    /// conditions* are the evidence, and the installer already holds
+    /// them (`ReadinessEvidence::last_observed`) without a single extra
+    /// API call. Folding them into `pods` would be a lie about what kind
+    /// of object they are; a separate field says exactly what it is.
+    pub workloads: Vec<RedactedObjectSummary>,
+    /// Events in the requested namespaces, `Warning`s first.
+    pub events: Vec<RedactedEvent>,
+    /// Every validating and mutating webhook configuration, summarized —
+    /// the objects whose presence (or absence, or `failurePolicy`) most
+    /// often explains why a cluster stopped accepting writes.
+    pub webhook_configurations: Vec<RedactedObjectSummary>,
+    /// Where `kind export logs` wrote this cluster's raw logs, when they
+    /// were exported.
+    ///
+    /// **A path, never content.** Raw kind logs are the unfiltered
+    /// stdout/stderr of every container in the cluster, including
+    /// third-party components that may log secrets. They stay on the
+    /// operator's own disk, inside the run workspace, and nothing ever
+    /// embeds them in a report — see
+    /// `admissionlab_cluster::diagnostics`'s own warning, `docs/security.md`,
+    /// and the no-verdict job summary, all of which say so where a
+    /// reader will see it.
+    pub kind_logs_path: Option<PathBuf>,
+    /// Human-readable notes about anything that could not be collected,
+    /// or was truncated. Empty when the bundle is complete.
+    pub notes: Vec<String>,
+}
+
+impl FailureDiagnostics {
+    /// Whether this bundle carries no evidence at all (not even a note).
+    ///
+    /// Used by callers that only attach a bundle when there is something
+    /// in it: an empty `cluster` key in `diagnostics.json` tells a reader
+    /// nothing that its absence does not.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+            && self.pods.is_empty()
+            && self.workloads.is_empty()
+            && self.events.is_empty()
+            && self.webhook_configurations.is_empty()
+            && self.kind_logs_path.is_none()
+            && self.notes.is_empty()
+    }
+
+    /// Appends a note. See [`Self::notes`].
+    pub fn note(&mut self, note: impl Into<String>) {
+        self.notes.push(note.into());
+    }
+
+    /// A one-line, already-bounded summary of *why* things look broken,
+    /// for an error message that has to stand on its own.
+    ///
+    /// This exists because the most valuable half of a failure bundle —
+    /// "this pod is in `ImagePullBackOff`" — is worth nothing if the
+    /// only place it appears is a JSON artifact the reader has not
+    /// thought to open. An install timeout's rendered error is printed
+    /// to the terminal, written into `diagnostics.json`'s `failure`, and
+    /// quoted in the job summary, so the hint travels everywhere the
+    /// failure does (PRODUCT.md §33: enough on first failure that a user
+    /// need not rerun to learn what happened).
+    ///
+    /// Empty when there is nothing to say — never a filler phrase that
+    /// would read as evidence. At most [`Self::MAX_HINT_ITEMS`] items,
+    /// each already bounded by construction
+    /// ([`MAX_SUMMARY_TEXT_CHARS`]), so this cannot be the string that
+    /// blows up an error message.
+    #[must_use]
+    pub fn failure_hint(&self) -> String {
+        let mut parts = Vec::new();
+        for workload in &self.workloads {
+            let failing: Vec<String> = workload
+                .conditions
+                .iter()
+                .filter(|condition| condition.status != "True")
+                .map(|condition| match &condition.reason {
+                    Some(reason) => format!(
+                        "{}={} ({reason})",
+                        condition.condition_type, condition.status
+                    ),
+                    None => format!("{}={}", condition.condition_type, condition.status),
+                })
+                .collect();
+            if !failing.is_empty() {
+                parts.push(format!(
+                    "{} {} conditions: {}",
+                    workload.kind,
+                    workload.name,
+                    failing.join(", ")
+                ));
+            }
+        }
+        for pod in &self.pods {
+            let reasons: Vec<String> = pod
+                .containers
+                .iter()
+                .filter(|container| !container.ready)
+                .filter_map(|container| {
+                    container
+                        .reason
+                        .as_ref()
+                        .map(|reason| format!("{}: {reason}", container.name))
+                })
+                .collect();
+            if reasons.is_empty() {
+                continue;
+            }
+            parts.push(format!("pod {} {}", pod.name, reasons.join(", ")));
+        }
+        let shown: Vec<String> = parts.iter().take(Self::MAX_HINT_ITEMS).cloned().collect();
+        if shown.is_empty() {
+            return String::new();
+        }
+        let remaining = parts.len().saturating_sub(shown.len());
+        let suffix = if remaining == 0 {
+            String::new()
+        } else {
+            format!(" (+{remaining} more)")
+        };
+        format!("{}{suffix}", shown.join("; "))
+    }
+
+    /// How many items [`Self::failure_hint`] names before it says how
+    /// many more there are. Three is what fits on a terminal line
+    /// without the message becoming the report.
+    pub const MAX_HINT_ITEMS: usize = 3;
+}
+
+/// Building the summaries above from raw Kubernetes API JSON.
+///
+/// # Why the parser lives here, in a client-free crate
+///
+/// This crate depends on no Kubernetes client and must not (Global
+/// Constraint 6) — but *parsing already-fetched JSON* is not talking to
+/// a cluster, and two callers need the identical mapping: the cluster
+/// backend, which lists Pods/Events/Nodes to build a whole bundle, and
+/// the installer, whose readiness probe already holds the last object it
+/// observed (`ReadinessEvidence::last_observed`, a
+/// `serde_json::Value`) when a component times out. Those two crates
+/// cannot share code through each other — `admissionlab-installer`
+/// deliberately does not depend on `admissionlab-cluster` (see its
+/// `Cargo.toml`) — so a parser in either one would have to be written
+/// twice, and two copies of a redaction-relevant mapping is exactly the
+/// competing-synonym drift this workspace forbids. One copy, here,
+/// beside the types it builds.
+///
+/// Everything below reads *named paths only*: it never iterates an
+/// object's keys, so a field nobody named cannot reach a summary. That
+/// is the mechanical half of [`RedactedObjectSummary`]'s
+/// redacted-by-construction claim.
+impl RedactedObjectSummary {
+    /// Summarizes one Kubernetes object.
+    ///
+    /// `default_kind` is used when the object carries no `kind` of its
+    /// own, which is the normal case for an item inside a typed `List`
+    /// response (the API server sets `kind` on the list, not on each
+    /// item).
+    #[must_use]
+    pub fn from_api_object(object: &serde_json::Value, default_kind: &str) -> Self {
+        let metadata = &object["metadata"];
+        let status = &object["status"];
+        Self {
+            kind: summary_text(object["kind"].as_str())
+                .filter(|kind| !kind.is_empty())
+                .unwrap_or_else(|| default_kind.to_owned()),
+            name: summary_text(metadata["name"].as_str()).unwrap_or_default(),
+            namespace: summary_text(metadata["namespace"].as_str()),
+            phase: summary_text(status["phase"].as_str()),
+            conditions: status["conditions"]
+                .as_array()
+                .map(|conditions| conditions.iter().map(ConditionSummary::from_api).collect())
+                .unwrap_or_default(),
+            containers: container_statuses(status),
+            created_at: summary_text(metadata["creationTimestamp"].as_str()),
+        }
+    }
+
+    /// Whether this object looks healthy, used to order a bundle's pods
+    /// unhealthy-first before truncation (see [`FailureDiagnostics`]).
+    ///
+    /// Conservative in the direction that matters: anything this
+    /// function cannot positively call healthy sorts as unhealthy, so a
+    /// shape it does not understand is kept rather than dropped.
+    #[must_use]
+    pub fn looks_healthy(&self) -> bool {
+        let phase_ok = matches!(self.phase.as_deref(), Some("Running" | "Succeeded") | None);
+        let containers_ok = self
+            .containers
+            .iter()
+            .all(|container| container.ready || container.state == "terminated");
+        let conditions_ok = self.conditions.iter().all(|condition| {
+            // Only the conditions whose *healthy* value is known are
+            // judged; anything else (a custom resource's own condition
+            // vocabulary) is left alone rather than guessed at.
+            match condition.condition_type.as_str() {
+                "Ready" | "Available" | "ContainersReady" | "PodScheduled" | "Initialized" => {
+                    condition.status == "True"
+                }
+                "MemoryPressure" | "DiskPressure" | "PIDPressure" | "NetworkUnavailable" => {
+                    condition.status == "False"
+                }
+                _ => true,
+            }
+        });
+        phase_ok && containers_ok && conditions_ok
+    }
+}
+
+impl ConditionSummary {
+    /// Summarizes one `status.conditions[]` entry. See this type's
+    /// documentation for why `message` is not among the fields read.
+    #[must_use]
+    fn from_api(condition: &serde_json::Value) -> Self {
+        Self {
+            condition_type: summary_text(condition["type"].as_str()).unwrap_or_default(),
+            status: summary_text(condition["status"].as_str()).unwrap_or_default(),
+            reason: summary_text(condition["reason"].as_str()),
+            last_transition: summary_text(condition["lastTransitionTime"].as_str()),
+        }
+    }
+}
+
+impl RedactedEvent {
+    /// Summarizes one `Event`.
+    ///
+    /// Handles both event shapes the API server produces: the classic
+    /// `firstTimestamp`/`lastTimestamp` pair and the `eventTime` a
+    /// `events.k8s.io` event carries instead, so a bundle never reports
+    /// "unknown when" for an event that did say when.
+    #[must_use]
+    pub fn from_api_object(event: &serde_json::Value) -> Self {
+        let involved = &event["involvedObject"];
+        let involved_object = match (
+            summary_text(involved["kind"].as_str()),
+            summary_text(involved["name"].as_str()),
+        ) {
+            (Some(kind), Some(name)) => Some(format!("{kind}/{name}")),
+            (Some(kind), None) => Some(kind),
+            (None, Some(name)) => Some(name),
+            (None, None) => None,
+        };
+        let event_time = summary_text(event["eventTime"].as_str());
+        Self {
+            namespace: summary_text(event["metadata"]["namespace"].as_str()),
+            event_type: summary_text(event["type"].as_str()),
+            reason: summary_text(event["reason"].as_str()),
+            message: summary_text(event["message"].as_str()).unwrap_or_default(),
+            involved_object,
+            count: event["count"].as_i64(),
+            first_seen: summary_text(event["firstTimestamp"].as_str())
+                .or_else(|| event_time.clone()),
+            last_seen: summary_text(event["lastTimestamp"].as_str()).or(event_time),
+        }
+    }
+
+    /// Whether this event is one a reader of a failure bundle wants
+    /// first: anything the API server did not label `Normal`.
+    #[must_use]
+    pub fn is_warning(&self) -> bool {
+        self.event_type.as_deref() != Some("Normal")
+    }
+}
+
+/// Both container status lists on a Pod status, init containers first
+/// (they run first, and an init container stuck on `ImagePullBackOff` is
+/// why the app containers have no status at all yet).
+fn container_statuses(status: &serde_json::Value) -> Vec<ContainerStatusSummary> {
+    ["initContainerStatuses", "containerStatuses"]
+        .iter()
+        .filter_map(|key| status[*key].as_array())
+        .flatten()
+        .map(ContainerStatusSummary::from_api)
+        .collect()
+}
+
+impl ContainerStatusSummary {
+    /// Summarizes one `containerStatuses[]` entry, reading only the
+    /// `reason`/`exitCode` out of whichever state block is present. See
+    /// this type's documentation for why the state's `message` is not
+    /// read.
+    #[must_use]
+    fn from_api(container: &serde_json::Value) -> Self {
+        let state = &container["state"];
+        let (state_name, reason, exit_code) = if state["waiting"].is_object() {
+            (
+                "waiting",
+                summary_text(state["waiting"]["reason"].as_str()),
+                None,
+            )
+        } else if state["terminated"].is_object() {
+            (
+                "terminated",
+                summary_text(state["terminated"]["reason"].as_str()),
+                state["terminated"]["exitCode"].as_i64(),
+            )
+        } else if state["running"].is_object() {
+            ("running", None, None)
+        } else {
+            ("unknown", None, None)
+        };
+        Self {
+            name: summary_text(container["name"].as_str()).unwrap_or_default(),
+            ready: container["ready"].as_bool().unwrap_or(false),
+            restarts: container["restartCount"].as_i64().unwrap_or(0),
+            state: state_name.to_owned(),
+            reason,
+            exit_code,
+        }
+    }
+}
+
+/// One string on its way into a summary: control characters replaced,
+/// whitespace trimmed, length capped at [`MAX_SUMMARY_TEXT_CHARS`], and
+/// an empty result reported as `None` rather than as `Some("")`.
+///
+/// Control characters are stripped because these strings are rendered
+/// into a terminal report and a Markdown job summary: an ANSI escape
+/// sequence in a controller's message would otherwise repaint a user's
+/// terminal. Truncation counts [`char`]s, never bytes, so a multi-byte
+/// character is never split (the same rule `admissionlab_report`'s own
+/// truncation follows).
+///
+/// This is **bounding, not redaction** — see [`RedactedEvent`].
+fn summary_text(value: Option<&str>) -> Option<String> {
+    let raw = value?;
+    let cleaned: String = raw
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut bounded: String = trimmed.chars().take(MAX_SUMMARY_TEXT_CHARS).collect();
+    if trimmed.chars().nth(MAX_SUMMARY_TEXT_CHARS).is_some() {
+        bounded.push('…');
+    }
+    Some(bounded)
+}
+
+/// What a caller wants collected into a [`FailureDiagnostics`].
+///
+/// Kept as a struct rather than two parameters so that a later task
+/// which needs a third input (a time window, a label selector) adds a
+/// field here instead of changing [`ClusterManager::failure_diagnostics`]'s
+/// signature and every implementation of it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DiagnosticsRequest {
+    /// Which namespaces to collect Pods and Events from — in practice
+    /// the namespaces the run's own components install into, plus
+    /// `kube-system`. **Empty means every namespace**, which is the
+    /// right default for a failure nobody has localized yet.
+    pub namespaces: Vec<String>,
+    /// Where to export the backend's own raw cluster logs (for `kind`,
+    /// `kind export logs <dir>`), or `None` to skip that export
+    /// entirely. The directory is created by the implementation; it must
+    /// be inside the run's own workspace, since what lands there is
+    /// unredacted (see [`FailureDiagnostics::kind_logs_path`]).
+    pub logs_destination: Option<PathBuf>,
 }
 
 /// What happened when a [`ClusterManager`] implementation attempted a
@@ -403,4 +991,31 @@ pub trait ClusterManager: Send + Sync {
     /// described by `handle`. Never fails; see the module documentation's
     /// "`diagnostics` never fails" section.
     async fn diagnostics(&self, handle: &ClusterHandle) -> ClusterDiagnostics;
+
+    /// Collects the *failure* bundle for `handle` — what was actually
+    /// wrong inside the cluster (ROADMAP Task 9.5), as opposed to
+    /// [`Self::diagnostics`]'s "is this cluster still there".
+    ///
+    /// Never fails, for exactly the reasons [`Self::diagnostics`] never
+    /// does: this only ever runs on a path that is already failing, and
+    /// a bundle that could not be collected must never replace the
+    /// failure it was describing. Anything that could not be gathered
+    /// becomes a [`FailureDiagnostics::notes`] entry beside an empty
+    /// list — never a guess (Global Constraint 15).
+    ///
+    /// **Defaulted deliberately.** Collecting this needs a Kubernetes
+    /// client and a backend-specific log export, neither of which every
+    /// [`ClusterManager`] implementation has (a test double has no
+    /// cluster at all). The default is the honest empty answer, so an
+    /// implementation opts in by having something real to say rather
+    /// than being forced to stub a method out. `admissionlab-cluster`'s
+    /// `KindClusterManager` is the one implementation that overrides it.
+    async fn failure_diagnostics(
+        &self,
+        handle: &ClusterHandle,
+        request: &DiagnosticsRequest,
+    ) -> FailureDiagnostics {
+        let _ = (handle, request);
+        FailureDiagnostics::default()
+    }
 }

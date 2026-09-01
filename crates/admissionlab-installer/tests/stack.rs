@@ -466,9 +466,25 @@ async fn install_stack_treats_an_unsatisfied_readiness_deadline_as_a_stack_failu
         Err(InstallError::ComponentNotReady {
             component,
             evidence,
+            diagnostics,
         }) => {
             assert_eq!(component, "c1");
             assert!(!evidence.satisfied);
+            // Task 9.5 Step 3: nothing was ever observed and the check
+            // is cluster-scoped, so the bundle is honestly empty --
+            // and says why, twice, rather than leaving a reader to
+            // wonder whether collection was even attempted.
+            assert!(
+                diagnostics.workloads.is_empty() && diagnostics.pods.is_empty(),
+                "a fake that observed nothing must not produce summaries: {diagnostics:?}"
+            );
+            assert_eq!(
+                diagnostics.notes.len(),
+                2,
+                "expected one note for the unobserved object and one for the absent \
+                 namespace: {:?}",
+                diagnostics.notes
+            );
         }
         other => panic!("expected Err(ComponentNotReady), got {other:?}"),
     }

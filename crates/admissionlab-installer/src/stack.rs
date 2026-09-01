@@ -179,11 +179,11 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use admissionlab_core::{ClusterHandle, Side};
-use admissionlab_spec::{InstallMethod, ResolvedComponent};
+use admissionlab_core::{ClusterHandle, FailureDiagnostics, RedactedObjectSummary, Side};
+use admissionlab_spec::{InstallMethod, ReadinessCheck, ResolvedComponent};
 use async_trait::async_trait;
 
-use crate::readiness::ReadinessProbe;
+use crate::readiness::{ReadinessEvidence, ReadinessProbe};
 use crate::{ComponentInstaller, InstallError, InstallRecord};
 
 /// A [`ComponentInstaller`] that installs no component itself: it holds
@@ -292,9 +292,15 @@ pub async fn install_stack(
                     source: Box::new(source),
                 })?;
             if !evidence.satisfied {
+                // Collected once, on the way out, from evidence the
+                // probe already holds plus one list call -- see
+                // `readiness_failure_diagnostics`.
+                let diagnostics =
+                    readiness_failure_diagnostics(cluster, check, &evidence, readiness).await;
                 return Err(InstallError::ComponentNotReady {
                     component: component.name.clone(),
                     evidence: Box::new(evidence),
+                    diagnostics: Box::new(diagnostics),
                 });
             }
         }
@@ -306,4 +312,102 @@ pub async fn install_stack(
         side: cluster.spec.side,
         components: records,
     })
+}
+
+/// Builds the failure bundle an unsatisfied readiness check leaves
+/// behind (ROADMAP Task 9.5 Step 3).
+///
+/// Two sources, both cheap, deliberately in this order:
+///
+/// 1. **What the probe already saw.** `evidence.last_observed` is the
+///    object the check was waiting on, as of the last successful poll —
+///    already fetched, already redacted by the probe's own pass, and
+///    summarized here into conditions (`Available=False
+///    (MinimumReplicasUnavailable)`). Zero extra API calls, and it is
+///    the only place the *waited-on* object's own state survives.
+/// 2. **Which pods are stuck.** One list call, only for a check that
+///    names a namespace (see below), through
+///    [`ReadinessProbe::failing_pods`]. This is where
+///    `ImagePullBackOff`/`CrashLoopBackOff` comes from — the answer to
+///    the question every install timeout raises.
+///
+/// [`ReadinessCheck::WebhookConfigurationPresent`] is cluster-scoped and
+/// names no namespace, so no pod list is attempted for it: a guessed
+/// namespace would be a fabricated one (Global Constraint 15), and the
+/// whole-cluster view is the CLI's separate
+/// [`admissionlab_core::ClusterManager::failure_diagnostics`] bundle's
+/// job rather than this one's.
+///
+/// Never fails, and never delays the failure it describes by more than
+/// the single bounded list call inside `failing_pods`.
+async fn readiness_failure_diagnostics(
+    cluster: &ClusterHandle,
+    check: &ReadinessCheck,
+    evidence: &ReadinessEvidence,
+    readiness: &dyn ReadinessProbe,
+) -> FailureDiagnostics {
+    let mut diagnostics = FailureDiagnostics::default();
+
+    if let Some(observed) = &evidence.last_observed {
+        diagnostics
+            .workloads
+            .push(RedactedObjectSummary::from_api_object(
+                observed,
+                check_kind(check),
+            ));
+    } else {
+        diagnostics.note(format!(
+            "no object was ever observed for {check:?}: it did not exist while the wait was              in progress"
+        ));
+    }
+
+    match check_namespace(check) {
+        Some(namespace) => {
+            let pods = readiness.failing_pods(cluster, namespace).await;
+            if pods.is_empty() {
+                diagnostics.note(format!(
+                    "no unhealthy pods were found in namespace {namespace:?}: whatever is                      unfinished is not a pod that has started and failed"
+                ));
+            }
+            diagnostics.pods = pods;
+        }
+        None => diagnostics.note(format!(
+            "{check:?} names no namespace, so no pod states were collected for it"
+        )),
+    }
+
+    diagnostics
+}
+
+/// The kind of object `check` waits on, used only to label a summary
+/// built from an observation that (being a list-free single `get`)
+/// usually does carry its own `kind` anyway.
+///
+/// [`ReadinessCheck::WebhookConfigurationPresent`] resolves to either a
+/// validating or a mutating configuration — the check itself does not
+/// say which (see `readiness::resolve_target`) — so the label stays the
+/// honest, unqualified `"WebhookConfiguration"` rather than guessing one
+/// of the two.
+const fn check_kind(check: &ReadinessCheck) -> &'static str {
+    match check {
+        ReadinessCheck::DeploymentAvailable { .. } => "Deployment",
+        ReadinessCheck::DaemonSetReady { .. } => "DaemonSet",
+        ReadinessCheck::JobComplete { .. } => "Job",
+        ReadinessCheck::WebhookConfigurationPresent { .. } => "WebhookConfiguration",
+        ReadinessCheck::CustomResourceCondition { .. } => "CustomResource",
+    }
+}
+
+/// The namespace `check` looks in, or `None` for a check that names
+/// none. Exhaustive, with no wildcard arm, so a sixth
+/// [`ReadinessCheck`] variant is a compile error here rather than
+/// silently collecting no pods.
+fn check_namespace(check: &ReadinessCheck) -> Option<&str> {
+    match check {
+        ReadinessCheck::DeploymentAvailable { namespace, .. }
+        | ReadinessCheck::DaemonSetReady { namespace, .. }
+        | ReadinessCheck::JobComplete { namespace, .. } => Some(namespace.as_str()),
+        ReadinessCheck::CustomResourceCondition { namespace, .. } => namespace.as_deref(),
+        ReadinessCheck::WebhookConfigurationPresent { .. } => None,
+    }
 }

@@ -123,7 +123,9 @@ use admissionlab_admission::{
     AdmissionDecision, AdmissionOutcome, AdmissionTrace, WebhookInvocation,
 };
 use admissionlab_core::{
-    ComponentTiming, Diagnostic, InstallStage, RedactedValue, SideInstallTiming, StageTimings,
+    ComponentTiming, ConditionSummary, ContainerStatusSummary, Diagnostic, FailureDiagnostics,
+    InstallStage, RedactedEvent, RedactedObjectSummary, RedactedValue, SideInstallTiming,
+    StageTimings,
 };
 use admissionlab_diff::{DivergenceEvidence, SemanticChange};
 use admissionlab_gateway::{
@@ -1174,3 +1176,131 @@ fn redact_private_keys(text: &str) -> String {
     out
 }
 
+// =========================================================================
+// ROADMAP Task 9.5: the cluster failure bundle.
+//
+// Added as its own entry point rather than as a branch of
+// `redact_result`, because a `FailureDiagnostics` never travels inside a
+// `LabResult`: a run that failed before it could compare anything has no
+// `LabResult` at all (see `admissionlab-cli`'s `pipeline::report`), and
+// the bundle is embedded in that run's `diagnostics.json` instead. Same
+// rules, same helpers, different document.
+// =========================================================================
+
+/// Returns a copy of `diagnostics` with this module's **string** rules
+/// applied to every string it carries.
+///
+/// # Why this exists at all, given the type is redacted by construction
+///
+/// [`FailureDiagnostics`] cannot hold an object's `spec`, a Secret's
+/// `data`, or a container's environment — its summary types have no
+/// field those could land in (see
+/// [`admissionlab_core::RedactedObjectSummary`]'s own "Redacted by
+/// construction"). What it *can* hold is controller prose:
+/// [`admissionlab_core::RedactedEvent::message`] is free text a
+/// third-party component wrote, and a component that logs an
+/// `Authorization:` header or pastes a PEM private key into an event
+/// message is exactly what rules 2 and 3 exist for. Construction
+/// bounds that string; only this pass redacts it.
+///
+/// # Which rules apply, and why the rest do not
+///
+/// Rules 2 (sensitive headers) and 3's PEM half (private keys) apply,
+/// via the same [`redact_string`] every diagnostic message in a report
+/// already goes through — so a header redacted in a diagnostic and one
+/// redacted here are redacted identically, by one implementation.
+///
+/// Rules 1 (Secret `data`), 3's pointer half, and 4 (`EnvVar` values)
+/// have nothing to bind to and are therefore not plumbed in: each is
+/// defined over an embedded `serde_json::Value` payload, and this type
+/// holds no JSON at all. That is a statement about this type's shape,
+/// not an exemption — which is why it is stated here rather than left
+/// for a reader to infer from a missing `rules` parameter.
+///
+/// Every string is passed through uniformly, not only `message`, for the
+/// reason [`redact_environment`] gives for doing the same with component
+/// names: a rule that fired on one vendor-derived string but not another
+/// would leave the redacted document contradicting itself.
+///
+/// Rebuilt field by field rather than cloned, so a future field on any of
+/// these types is a compile error here instead of a silent
+/// pass-through.
+#[must_use]
+pub fn redact_failure_diagnostics(diagnostics: &FailureDiagnostics) -> FailureDiagnostics {
+    FailureDiagnostics {
+        nodes: diagnostics
+            .nodes
+            .iter()
+            .map(redact_object_summary)
+            .collect(),
+        pods: diagnostics.pods.iter().map(redact_object_summary).collect(),
+        workloads: diagnostics
+            .workloads
+            .iter()
+            .map(redact_object_summary)
+            .collect(),
+        events: diagnostics.events.iter().map(redact_event).collect(),
+        webhook_configurations: diagnostics
+            .webhook_configurations
+            .iter()
+            .map(redact_object_summary)
+            .collect(),
+        // A path, not content: the raw logs it points at are never
+        // embedded anywhere (see `FailureDiagnostics::kind_logs_path`),
+        // and a run workspace path holds no secret this pass could find.
+        kind_logs_path: diagnostics.kind_logs_path.clone(),
+        notes: diagnostics
+            .notes
+            .iter()
+            .map(|note| redact_string(note))
+            .collect(),
+    }
+}
+
+/// [`redact_failure_diagnostics`] for one object summary.
+fn redact_object_summary(summary: &RedactedObjectSummary) -> RedactedObjectSummary {
+    RedactedObjectSummary {
+        kind: redact_string(&summary.kind),
+        name: redact_string(&summary.name),
+        namespace: summary.namespace.as_deref().map(redact_string),
+        phase: summary.phase.as_deref().map(redact_string),
+        conditions: summary
+            .conditions
+            .iter()
+            .map(|condition| ConditionSummary {
+                condition_type: redact_string(&condition.condition_type),
+                status: redact_string(&condition.status),
+                reason: condition.reason.as_deref().map(redact_string),
+                last_transition: condition.last_transition.as_deref().map(redact_string),
+            })
+            .collect(),
+        containers: summary
+            .containers
+            .iter()
+            .map(|container| ContainerStatusSummary {
+                name: redact_string(&container.name),
+                ready: container.ready,
+                restarts: container.restarts,
+                state: redact_string(&container.state),
+                reason: container.reason.as_deref().map(redact_string),
+                exit_code: container.exit_code,
+            })
+            .collect(),
+        created_at: summary.created_at.as_deref().map(redact_string),
+    }
+}
+
+/// [`redact_failure_diagnostics`] for one event. `message` is the field
+/// this whole pass exists for; see that function's documentation.
+fn redact_event(event: &RedactedEvent) -> RedactedEvent {
+    RedactedEvent {
+        namespace: event.namespace.as_deref().map(redact_string),
+        event_type: event.event_type.as_deref().map(redact_string),
+        reason: event.reason.as_deref().map(redact_string),
+        message: redact_string(&event.message),
+        involved_object: event.involved_object.as_deref().map(redact_string),
+        count: event.count,
+        first_seen: event.first_seen.as_deref().map(redact_string),
+        last_seen: event.last_seen.as_deref().map(redact_string),
+    }
+}

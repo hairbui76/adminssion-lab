@@ -108,12 +108,14 @@ use std::sync::Arc;
 
 use admissionlab_core::{
     ArtifactStore, ClusterDiagnostics, ClusterError, ClusterHandle, ClusterManager, ClusterSpec,
-    CommandSpec, ProcessError, ProcessRunner, RollbackOutcome, RunPaths,
+    CommandSpec, DiagnosticsRequest, FailureDiagnostics, ProcessError, ProcessRunner,
+    RollbackOutcome, RunPaths,
 };
 use async_trait::async_trait;
 
 use crate::audit::render_audit_policy;
 use crate::config::{KindClusterConfigInput, render_kind_config};
+use crate::diagnostics::{self, KubeObjectSource};
 use crate::kind;
 use crate::kubeconfig;
 use crate::version::{load_matrix, resolve_node_image as resolve_node_image_against_matrix};
@@ -309,6 +311,67 @@ impl KindClusterManager {
         ClusterError::CreateFailedWithRollback {
             source: Box::new(source),
             rollback,
+        }
+    }
+
+    /// Runs `kind export logs <destination> --name <cluster>`, writing
+    /// this cluster's raw logs into `destination` (ROADMAP Task 9.5
+    /// Step 1) — or returning a human-readable reason it could not.
+    ///
+    /// Like every other probe on this failure path, this never
+    /// propagates an error: [`ClusterManager::failure_diagnostics`] turns
+    /// whatever comes back here into a `kind_logs_path` or a note.
+    ///
+    /// `spill_dir` is the destination's own parent (the run's `logs`
+    /// directory when the caller followed
+    /// [`DiagnosticsRequest::logs_destination`]'s contract): an export
+    /// of a badly broken cluster prints one line per node per artifact
+    /// and can outgrow
+    /// [`admissionlab_core::MAX_RETAINED_OUTPUT_BYTES`], and unlike
+    /// `run_delete` this call *does* have a directory to spill into.
+    async fn run_export_logs(
+        &self,
+        name: &str,
+        destination: &std::path::Path,
+    ) -> Result<(), String> {
+        diagnostics::validate_logs_destination(destination)?;
+        // `kind` creates the directory itself, but creating it here
+        // first means a permission problem is reported as this project's
+        // own I/O error (naming the path) rather than as `kind` prose.
+        tokio::fs::create_dir_all(destination)
+            .await
+            .map_err(|error| {
+                format!(
+                    "could not create the log export directory {}: {error}",
+                    destination.display()
+                )
+            })?;
+        let spec = CommandSpec {
+            program: kind::KIND_PROGRAM.into(),
+            args: kind::export_logs_argv(name, destination),
+            cwd: None,
+            env: BTreeMap::new(),
+            sensitive_env_keys: BTreeSet::new(),
+            timeout: kind::EXPORT_LOGS_TIMEOUT,
+            spill_dir: destination.parent().map(std::path::Path::to_path_buf),
+        };
+        let context = spec.context();
+        let result = self
+            .runner
+            .run(spec)
+            .await
+            .map_err(|error| format!("could not export kind logs: {error}"))?;
+        if result.status.success() {
+            Ok(())
+        } else {
+            Err(format!(
+                // A bounded tail (Task 9.4 Step 3), for the same reason
+                // `list_clusters` bounds its own: this string becomes a
+                // note in an artifact a human reads.
+                "`{context}` exited with {}: {}",
+                result.status,
+                admissionlab_core::output_tail(&result.stderr).trim(),
+            ))
         }
     }
 
@@ -527,6 +590,72 @@ impl ClusterManager for KindClusterManager {
             audit_log_present,
             notes,
         }
+    }
+
+    /// Collects the Task 9.5 failure bundle for `handle`: the cluster's
+    /// own view of itself (nodes, pods, events, webhook configurations)
+    /// through the Kubernetes API, plus `kind export logs` when the
+    /// caller asked for it and there is still a cluster to export from.
+    ///
+    /// Three ordered steps, each one degrading to a note rather than
+    /// failing the call (see [`ClusterManager::failure_diagnostics`]):
+    ///
+    /// 1. **Does the cluster still exist?** Asked first, and cheaply
+    ///    (`kind get clusters` inspects local Docker state), because the
+    ///    answer decides whether the two expensive steps are worth
+    ///    attempting at all — and because "the cluster is already gone"
+    ///    is itself the explanation for an empty bundle, which a reader
+    ///    must not have to infer from silence.
+    /// 2. **Summaries**, through this cluster's own kubeconfig.
+    /// 3. **Raw logs**, exported last: it is the slowest step, and a
+    ///    bundle whose summaries landed is useful even if the export
+    ///    times out.
+    async fn failure_diagnostics(
+        &self,
+        handle: &ClusterHandle,
+        request: &DiagnosticsRequest,
+    ) -> FailureDiagnostics {
+        let name = handle.spec.name.as_str();
+        // `None` is "could not tell", which is deliberately *not*
+        // treated as "gone": a probe that could not run says nothing
+        // about whether the cluster is there, and giving up on that
+        // basis would throw away a bundle that was collectable.
+        let exists = match self.list_clusters().await {
+            Ok(names) => Some(names.iter().any(|existing| existing == name)),
+            Err(reason) => {
+                tracing::debug!(cluster = name, %reason, "could not confirm cluster existence");
+                None
+            }
+        };
+
+        if exists == Some(false) {
+            let mut gone = FailureDiagnostics::default();
+            gone.note(format!(
+                "kind reports no cluster named {name:?}: it was already gone when these \
+                 diagnostics were collected, so there is nothing to report about its contents"
+            ));
+            return gone;
+        }
+
+        let mut bundle = match KubeObjectSource::for_cluster(handle).await {
+            Ok(source) => diagnostics::collect(&source, request).await,
+            Err(reason) => {
+                let mut unreachable = FailureDiagnostics::default();
+                unreachable.note(format!(
+                    "could not reach cluster {name:?} to collect diagnostics: {reason}"
+                ));
+                unreachable
+            }
+        };
+
+        if let Some(destination) = request.logs_destination.as_deref() {
+            match self.run_export_logs(name, destination).await {
+                Ok(()) => bundle.kind_logs_path = Some(destination.to_path_buf()),
+                Err(reason) => bundle.note(reason),
+            }
+        }
+
+        bundle
     }
 }
 

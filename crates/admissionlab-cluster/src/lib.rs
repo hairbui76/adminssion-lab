@@ -15,6 +15,13 @@
 //! - [`kind`] holds pure facts about talking to the `kind` CLI: argv,
 //!   timeouts, and the cluster-naming rules ([`cluster_name`],
 //!   [`validate_cluster_name`]).
+//! - [`diagnostics`] collects the failure bundle a run leaves behind
+//!   when a cluster (or something installed onto it) does not come up
+//!   (ROADMAP Task 9.5): redacted-by-construction Node/Pod/Event/webhook
+//!   summaries through the Kubernetes API ([`diagnostics::collect`],
+//!   behind the offline [`ClusterObjectSource`] seam), plus
+//!   `kind export logs` referenced **by path only** — see that module's
+//!   "Raw logs never leave the machine".
 //! - [`lifecycle`] implements
 //!   [`admissionlab_core::ClusterManager`] against `kind`
 //!   ([`KindClusterManager`]): creating and deleting isolated clusters
@@ -42,6 +49,7 @@
 
 pub mod audit;
 pub mod config;
+pub mod diagnostics;
 pub mod kind;
 mod kubeconfig;
 pub mod lifecycle;
@@ -49,6 +57,9 @@ pub mod version;
 
 pub use audit::render_audit_policy;
 pub use config::{ClusterConfigError, KindClusterConfigInput, render_kind_config};
+pub use diagnostics::{
+    ClusterObjectSource, KIND_LOGS_WARNING, KubeObjectSource, relevant_namespaces,
+};
 pub use kind::{cluster_name, validate_cluster_name};
 pub use lifecycle::KindClusterManager;
 pub use version::{
