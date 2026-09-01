@@ -1,0 +1,481 @@
+# Post-v1 maintenance loop (ROADMAP Task 10.5, steps 2 and 3).
+#
+# Two questions this repository has to keep asking after v1.0.0, both of
+# which have an answer that changes without anybody committing anything:
+#
+#   1. Has the Kubernetes support window moved? Global Constraint 10
+#      says Admission Lab supports the latest three upstream-supported
+#      minors, and upstream retires one on its own schedule.
+#   2. Has a certified recipe's upstream shipped a newer chart?
+#
+# Both are answered by a script that already exists or is added
+# alongside this file, both are answered weekly, and NEITHER answer is
+# applied by this workflow. What it produces is a pull request and an
+# issue -- a review gate with a human on the other side of it.
+#
+# # Why nothing here merges itself
+#
+# This is the load-bearing property of the whole file, and it is not
+# caution for its own sake. `compatibility/kubernetes.yaml`'s own header
+# states the rule: "adding or dropping a supported minor is a
+# deliberate, reviewed change to this checked-in file... human review is
+# required before dropping a supported version in a stable release line"
+# (PRODUCT.md §32). And `compatibility/recipes.yaml`'s header sets the
+# standard for a certified row: "every row below has actually been
+# installed and verified by a test in this repository". A workflow that
+# merged either change on the strength of an API response would be
+# asserting, on this project's behalf, something no test had run.
+#
+# So: `scripts/update-kubernetes-matrix.sh` writes a proposal it refuses
+# to apply, `scripts/check-recipe-updates.sh` writes a report it refuses
+# to act on, and this workflow turns each into something a person reads.
+# There is no `--auto-merge` anywhere in this file and there is not
+# meant to be one.
+#
+# # Why a PR for one and an issue for the other
+#
+# Asymmetric on purpose, because the two changes have different shapes.
+#
+# A Kubernetes support-window change HAS a mechanical diff:
+# `update-kubernetes-matrix.sh` prints the exact `releases:` block that
+# would replace the checked-in one, digests included. Putting that in a
+# branch gives a reviewer the thing they actually want to look at. What
+# it does NOT give them is the prose above that block, which explains
+# why each entry is what it is and which no generator can write -- so
+# the pull request says outright that it is a starting point and not a
+# mergeable change.
+#
+# A recipe pin bump has no such diff. Moving `kyverno` from 3.9.0 to
+# 3.10.0 means editing the recipe's pin, APPENDING a new
+# `compatibility/recipes.yaml` entry (that file's header: "append a new
+# entry; do not edit an old one in place"), possibly re-deriving the
+# paired Gateway API bundle from the new release's own `go.mod`, and
+# then certifying the result on every Kubernetes version the row claims.
+# A branch containing a one-line version bump would look far more
+# finished than it is. An issue listing what moved is the honest
+# artifact, and ROADMAP Task 10.5 step 3 allows either.
+#
+# # A third clock, and why it is not in this file
+#
+# `docs/dependencies.md` § Update cadence already names two: a monthly
+# Cargo sweep, and the advisory check that fires on every CI run. This
+# workflow is a third, and deliberately separate from both. The Cargo
+# sweep is about the crates Admission Lab is BUILT from; this is about
+# the versions Admission Lab INSTALLS and the Kubernetes versions it
+# provisions. They move on different upstreams' schedules, they are
+# reviewed by looking at different things, and folding them into one
+# pull request would make the reviewer of a Kyverno chart bump read a
+# `Cargo.lock` diff.
+#
+# # GITHUB_TOKEN and CI on the pull request
+#
+# Worth knowing before wondering why the checks are missing: GitHub does
+# not run workflows on a pull request opened by `GITHUB_TOKEN`. The
+# support-window PR this file opens will therefore have NO recipe
+# certification run attached to it until a human pushes a commit to the
+# branch or closes and reopens it. The PR body says so rather than
+# leaving a reviewer to conclude the checks passed. Using a personal
+# access token or an app token instead would fix that and is deliberately
+# not done here: it would mean this repository holding a credential that
+# can write to it from a scheduled job, which is a larger decision than
+# this task, and the review gate is a human either way.
+#
+# # actionlint
+#
+# `actionlint` is not available in this environment, so this file was
+# validated by parsing it as YAML (`python3 -c "import yaml,sys;
+# yaml.safe_load(...)"`) and by checking every `run:` body with
+# `bash -n`. That catches malformed YAML and shell syntax errors; it
+# does not catch an invalid GitHub Actions expression, which only a real
+# run can.
+
+name: Maintenance
+
+on:
+  schedule:
+    # 06:37 UTC on Mondays. Off the hour for the reason
+    # `.github/workflows/nightly.yml` documents (GitHub queues every
+    # scheduled workflow across all of GitHub at the top of the hour),
+    # and after `recipe-matrix.yml`'s 04:23 Monday Tier 3 so a
+    # certification run and a proposal about what to certify next do not
+    # contend for runners.
+    #
+    # Weekly rather than daily because both answers move on upstream's
+    # release cadence, which is measured in weeks at its fastest. A
+    # daily run would open the same pull request seven times for the
+    # same news.
+    - cron: "37 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build the reports and print them; open nothing"
+        required: false
+        default: false
+        type: boolean
+
+# Read-only by default. The two jobs that write raise their own
+# permissions, and each raises only what it uses -- the support-window
+# job never touches issues, the recipe job never pushes a branch.
+permissions:
+  contents: read
+
+concurrency:
+  # One maintenance run at a time, and never cancelled: two concurrent
+  # runs would race to push the same branch, and a cancelled one can
+  # leave a branch pushed with no pull request opened for it.
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  kubernetes-support-window:
+    name: Propose a Kubernetes support-window change
+    runs-on: ubuntu-latest
+    # No cluster, no cargo: this job runs one script that makes three
+    # HTTP requests, and then talks to the GitHub API.
+    timeout-minutes: 15
+    permissions:
+      # `contents: write` to push the proposal branch, `pull-requests:
+      # write` to open the pull request for it. Nothing else: this job
+      # has no reason to write an issue, a package, or a deployment.
+      contents: write
+      pull-requests: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # A fixed branch name, so a second run updates one proposal
+      # instead of opening a second one. See the "an open proposal
+      # already exists" branch below for what protects a reviewer's own
+      # commits on it.
+      BRANCH: maintenance/kubernetes-support-window
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Ask upstream whether the support window moved
+        id: propose
+        # The script's exit codes are the whole interface here
+        # (`scripts/update-kubernetes-matrix.sh`, "Exit codes"):
+        #
+        #   0   upstream matches the checked-in file -- no-op, and the
+        #       overwhelmingly common outcome.
+        #   10  a proposal was written and printed. This is a SUCCESSFUL
+        #       outcome, not a failure, which is exactly why the script
+        #       uses 10 rather than 1.
+        #   2/3/4 and anything else: bad arguments, offline, or upstream
+        #       answered something unusable. Every one of those means
+        #       this job did not learn the answer it exists to learn,
+        #       and it fails loudly rather than reporting "no change" --
+        #       which is the one wrong answer available here, because it
+        #       is indistinguishable from the good news.
+        #
+        # `set +e` around the call for the same reason: `set -euo
+        # pipefail` would turn exit 10 into a failed step.
+        run: |
+          set -euo pipefail
+          proposal="${RUNNER_TEMP}/kubernetes.proposed.yaml"
+          stdout="${RUNNER_TEMP}/proposal.stdout"
+          stderr="${RUNNER_TEMP}/proposal.stderr"
+          set +e
+          ./scripts/update-kubernetes-matrix.sh --output "${proposal}" \
+            >"${stdout}" 2>"${stderr}"
+          status=$?
+          set -e
+          cat "${stdout}"
+          cat "${stderr}" >&2
+          case "${status}" in
+            0)
+              echo "proposal=none" >>"${GITHUB_OUTPUT}"
+              echo "compatibility/kubernetes.yaml matches upstream; nothing to propose"
+              {
+                echo "## Kubernetes support window"
+                echo
+                echo "No change: \`compatibility/kubernetes.yaml\` matches upstream."
+              } >>"${GITHUB_STEP_SUMMARY}"
+              ;;
+            10)
+              echo "proposal=available" >>"${GITHUB_OUTPUT}"
+              echo "proposal_file=${proposal}" >>"${GITHUB_OUTPUT}"
+              echo "diff_file=${stdout}" >>"${GITHUB_OUTPUT}"
+              echo "notes_file=${stderr}" >>"${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "::error title=Support-window check failed::update-kubernetes-matrix.sh exited ${status}; the Kubernetes support window was NOT checked this week. See the log above for the host it could not reach or the answer it could not use."
+              exit "${status}"
+              ;;
+          esac
+
+      - name: Is a proposal already open for review?
+        id: existing
+        if: steps.propose.outputs.proposal == 'available'
+        # A human who takes this proposal over owns the branch from that
+        # moment: they rewrite the prose the generator cannot write, and
+        # they push it here. Force-pushing a fresh machine proposal over
+        # that would delete their work, so an open pull request means
+        # this job touches nothing at all and says where the review is.
+        #
+        # When no pull request is open, the branch is machine-owned --
+        # stale material from a closed proposal -- and is rebuilt from
+        # scratch.
+        run: |
+          set -euo pipefail
+          url="$(gh pr list --head "${BRANCH}" --state open --json url --jq '.[0].url // ""')"
+          if [ -n "${url}" ]; then
+            echo "open=${url}" >>"${GITHUB_OUTPUT}"
+          else
+            echo "open=" >>"${GITHUB_OUTPUT}"
+          fi
+
+      - name: Defer to the proposal already under review
+        if: steps.propose.outputs.proposal == 'available' && steps.existing.outputs.open != ''
+        run: |
+          set -euo pipefail
+          echo "::notice title=Support-window proposal already open::${{ steps.existing.outputs.open }}"
+          {
+            echo "## Kubernetes support window"
+            echo
+            echo "Upstream has moved, and a proposal is already open for review:"
+            echo "${{ steps.existing.outputs.open }}"
+            echo
+            echo "This run left the branch alone so that a reviewer's own commits on it survive."
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Open the proposal as a pull request
+        if: steps.propose.outputs.proposal == 'available' && steps.existing.outputs.open == '' && !inputs.dry_run
+        # Two things happen here and they are deliberately separate in
+        # the reader's mind: the BRANCH carries the machine-generated
+        # `releases:` block, and the BODY carries everything a machine
+        # cannot put in a diff -- the script's own reviewer notes,
+        # including its "this DROPS a supported Kubernetes version"
+        # warning, and the work the reviewer still has to do.
+        #
+        # The file edit replaces everything from `releases:` onward and
+        # keeps the header above it verbatim. That header is where the
+        # per-entry reasoning lives, and it is now describing the OLD
+        # window -- which is the first thing the checklist below asks the
+        # reviewer to fix, and the reason this branch must not be merged
+        # as it stands.
+        run: |
+          set -euo pipefail
+          proposal='${{ steps.propose.outputs.proposal_file }}'
+          diff_file='${{ steps.propose.outputs.diff_file }}'
+          notes_file='${{ steps.propose.outputs.notes_file }}'
+
+          awk '/^releases:/{exit} {print}' compatibility/kubernetes.yaml \
+            >"${RUNNER_TEMP}/kubernetes.header"
+          cat "${RUNNER_TEMP}/kubernetes.header" "${proposal}" \
+            >"${RUNNER_TEMP}/kubernetes.merged"
+          mv "${RUNNER_TEMP}/kubernetes.merged" compatibility/kubernetes.yaml
+
+          if git diff --quiet -- compatibility/kubernetes.yaml; then
+            echo "::error title=Empty proposal::the script reported a proposal but applying it changed nothing; this is a bug in either the script or this workflow"
+            exit 1
+          fi
+
+          body="${RUNNER_TEMP}/pr-body.md"
+          {
+            echo "## A machine-generated proposal, not a mergeable change"
+            echo
+            echo "\`scripts/update-kubernetes-matrix.sh\` found that upstream's Kubernetes"
+            echo "support window no longer matches \`compatibility/kubernetes.yaml\`. The branch"
+            echo "carries the \`releases:\` block that script proposes, with the node-image"
+            echo "digests taken from the pinned \`kind\` release's own notes."
+            echo
+            echo "**Do not merge this as it stands.** The prose above \`releases:\` in that file"
+            echo "explains why each entry is what it is, and this branch has not touched it --"
+            echo "no generator can write it. Global Constraint 10 and PRODUCT.md §32 make"
+            echo "moving this window a deliberate, reviewed edit; this pull request is the"
+            echo "review, not the edit."
+            echo
+            echo "### Reviewer notes from the script"
+            echo
+            echo '```text'
+            cat "${notes_file}"
+            echo '```'
+            echo
+            echo "### The proposed diff"
+            echo
+            echo '```diff'
+            cat "${diff_file}"
+            echo '```'
+            echo
+            echo "### Before this can merge"
+            echo
+            echo "- [ ] Rewrite the header comments in \`compatibility/kubernetes.yaml\` so they describe the new window, not the old one."
+            echo "- [ ] Check every reviewer note above. A note saying a minor **would become \`supported: false\`** is a DROPPED supported version: a breaking change for anyone whose \`admissionlab.yaml\` still names it, and a minor release at the earliest (\`docs/versioning.md\`)."
+            echo "- [ ] Re-check \`compatibility/recipes.yaml\`: every certified row names a patch version that must still exist in this matrix as \`supported: true\`, and a new minor certifies nothing until a recipe row and a certification run say so."
+            echo "- [ ] Run the certification matrix on this branch at \`weeklyRelease\` (\`Actions -> Recipe certification matrix -> Run workflow\`)."
+            echo "- [ ] Record the change in \`CHANGELOG.md\`."
+            echo
+            echo "### Why no checks are attached"
+            echo
+            echo "GitHub does not run workflows on a pull request opened by \`GITHUB_TOKEN\`."
+            echo "There is no certification run on this branch yet, and the absence of red is"
+            echo "not evidence of green. Push a commit as yourself, or dispatch the"
+            echo "certification matrix against this branch."
+            echo
+            echo "---"
+            echo
+            echo "Opened by [\`.github/workflows/maintenance.yml\`](../blob/main/.github/workflows/maintenance.yml)"
+            echo "(run [\`${GITHUB_RUN_ID}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}))."
+          } >"${body}"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -B "${BRANCH}"
+          git add compatibility/kubernetes.yaml
+          git commit -m "chore(compatibility): proposed Kubernetes support window (machine-generated)"
+          # Force, and safe to force: this step only runs when no pull
+          # request is open for the branch, so anything already there is
+          # a superseded proposal nobody is reviewing.
+          git push --force origin "${BRANCH}"
+
+          gh pr create \
+            --base "${GITHUB_REF_NAME}" \
+            --head "${BRANCH}" \
+            --title "chore(compatibility): Kubernetes support window has moved upstream" \
+            --body-file "${body}"
+
+          {
+            echo "## Kubernetes support window"
+            echo
+            echo "Upstream has moved. A proposal is open for review:"
+            gh pr list --head "${BRANCH}" --state open --json url --jq '.[0].url'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Dry run -- print the proposal and open nothing
+        if: steps.propose.outputs.proposal == 'available' && inputs.dry_run
+        run: |
+          set -euo pipefail
+          echo "dry run: a proposal exists and no pull request was opened"
+          {
+            echo "## Kubernetes support window (dry run)"
+            echo
+            echo '```diff'
+            cat '${{ steps.propose.outputs.diff_file }}'
+            echo '```'
+            echo
+            echo '```text'
+            cat '${{ steps.propose.outputs.notes_file }}'
+            echo '```'
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+  recipe-updates:
+    name: Report certified recipe pins that are behind upstream
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      # `issues: write` and nothing more. This job opens no branch and
+      # no pull request, for the reason this file's header gives: a
+      # recipe pin bump has no mechanical diff that would be correct.
+      issues: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ISSUE_TITLE: "Certified recipe pins are behind upstream"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7.0.1
+
+      - name: Ask each recipe's upstream what the newest release is
+        id: check
+        # Same exit-code discipline as the support-window job above
+        # (`scripts/check-recipe-updates.sh`, "Exit codes"): 0 is "every
+        # pin this run could check is current", 10 is "at least one is
+        # behind" and is a success, and everything else means the
+        # question was not answered and must not be reported as good
+        # news.
+        #
+        # Exit 3 -- nothing upstream answered at all -- fails this job
+        # deliberately. A single unreachable registry does NOT fail it:
+        # the script reports that row as `unknown`, by name, with the
+        # `helm show chart` command a human can run, and the other
+        # recipes' answers are still worth having.
+        run: |
+          set -euo pipefail
+          report="${RUNNER_TEMP}/recipe-updates.md"
+          set +e
+          ./scripts/check-recipe-updates.sh --format markdown --output "${report}"
+          status=$?
+          set -e
+          cat "${report}" >>"${GITHUB_STEP_SUMMARY}"
+          case "${status}" in
+            0)
+              echo "updates=none" >>"${GITHUB_OUTPUT}"
+              ;;
+            10)
+              echo "updates=available" >>"${GITHUB_OUTPUT}"
+              echo "report_file=${report}" >>"${GITHUB_OUTPUT}"
+              ;;
+            *)
+              echo "::error title=Recipe update check failed::check-recipe-updates.sh exited ${status}; the certified recipe pins were NOT checked this week."
+              exit "${status}"
+              ;;
+          esac
+
+      - name: Close the loop when a previously-reported pin has been bumped
+        if: steps.check.outputs.updates == 'none'
+        # An issue that outlives the news it carried is worse than no
+        # issue: it trains people to ignore the next one. When every pin
+        # is current again, the standing issue is closed with a comment
+        # saying which run found that, rather than left open for someone
+        # to rediscover.
+        run: |
+          set -euo pipefail
+          number="$(gh issue list --state open --search "${ISSUE_TITLE} in:title" \
+            --json number,title --jq "[.[] | select(.title == env.ISSUE_TITLE)][0].number // \"\"")"
+          if [ -n "${number}" ]; then
+            gh issue comment "${number}" --body \
+              "Every certified pin is current again as of run ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}. Closing; the weekly check reopens this if an upstream moves again."
+            gh issue close "${number}"
+          fi
+          echo "every certified pin this run could check is current"
+
+      - name: Open or refresh the update issue
+        if: steps.check.outputs.updates == 'available' && !inputs.dry_run
+        # One standing issue, refreshed in place, rather than a new one
+        # every Monday. The body is replaced rather than appended to so
+        # that what the issue says is what upstream looks like NOW; the
+        # run link at the bottom dates it.
+        run: |
+          set -euo pipefail
+          body="${RUNNER_TEMP}/issue-body.md"
+          {
+            echo "Upstream has published a newer release for at least one certified recipe pin."
+            echo
+            cat '${{ steps.check.outputs.report_file }}'
+            echo
+            echo "## What this issue is not"
+            echo
+            echo "It is **not** a certification, and merging a version bump because this issue"
+            echo "exists would turn a certification into a rumor."
+            echo "\`compatibility/recipes.yaml\` certifies a row only once that exact pin has"
+            echo "been installed and verified by this repository's own recipe suite on every"
+            echo "Kubernetes version the row claims."
+            echo
+            echo "## Certifying a new pin"
+            echo
+            echo "1. Bump the pin in \`recipes/<name>/recipe.yaml\` (and the recipe's own README provenance)."
+            echo "2. If the recipe pairs a vendored Gateway API bundle, re-derive that bundle's version from the NEW release's own \`go.mod\` -- never bump it independently. Both \`gateway-api-crds\` components say so in their headers."
+            echo "3. **Append** a new entry to \`compatibility/recipes.yaml\`; never edit an existing one in place. Re-state \`documentedRange\` from the vendor's own words for the new version, at the vendor's own granularity."
+            echo "4. Run the recipe certification matrix at \`weeklyRelease\` (\`Actions -> Recipe certification matrix -> Run workflow\`) and record the result in the pull request. A row is certified by that run, not by this issue."
+            echo "5. A recipe pin bump lands in a patch release; a NEW certified recipe or a new certified Kubernetes row is a minor. See \`docs/versioning.md\`."
+            echo
+            echo "---"
+            echo
+            echo "Refreshed weekly by [\`.github/workflows/maintenance.yml\`](../blob/main/.github/workflows/maintenance.yml)"
+            echo "(run [\`${GITHUB_RUN_ID}\`](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}))."
+          } >"${body}"
+
+          number="$(gh issue list --state open --search "${ISSUE_TITLE} in:title" \
+            --json number,title --jq "[.[] | select(.title == env.ISSUE_TITLE)][0].number // \"\"")"
+          if [ -n "${number}" ]; then
+            gh issue edit "${number}" --body-file "${body}"
+            echo "refreshed issue #${number}"
+          else
+            gh issue create --title "${ISSUE_TITLE}" --body-file "${body}"
+          fi
+
+      - name: Dry run -- print the report and open nothing
+        if: steps.check.outputs.updates == 'available' && inputs.dry_run
+        run: |
+          set -euo pipefail
+          echo "dry run: an update is available and no issue was opened"
+          cat '${{ steps.check.outputs.report_file }}'

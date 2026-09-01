@@ -30,6 +30,7 @@ what may have changed since the previous one.
 - [The CLI surface](#the-cli-surface)
 - [Exit codes](#exit-codes)
 - [What patch, minor, and major mean here](#what-patch-minor-and-major-mean-here)
+- [Cutting a release](#cutting-a-release)
 - [What is deliberately not promised](#what-is-deliberately-not-promised)
 - [Deprecation policy](#deprecation-policy)
 - [Supported release lines](#supported-release-lines)
@@ -173,7 +174,7 @@ rather than against a library API.
 
 | Bump | What it may contain | What it may never contain |
 | --- | --- | --- |
-| **Patch** (`v1.2.3` → `v1.2.4`) | Bug fixes, dependency updates, documentation, performance work, and **corrections to a classification that was wrong**. Also: a new certified row in `compatibility/recipes.yaml`, or a recipe pin bump. | Any new field, flag, command, or wire string. Any change to what a correct run reports. |
+| **Patch** (`v1.2.3` → `v1.2.4`) | Bug fixes, dependency updates, documentation, performance work, and **corrections to a classification that was wrong**. Also: a recipe pin bump for an already-certified recipe, with the certification run that proves it — [below](#the-patch-release-rule). | Any new field, flag, command, or wire string. Any change to what a correct run reports. |
 | **Minor** (`v1.2.x` → `v1.3.0`) | New optional configuration fields, new optional CLI flags, new semantic-change kinds with new wire literals, new optional result/manifest fields, new recipes, a changed Kubernetes support window (see below). | A rename, a removal, a meaning change, or an exit-code reassignment. |
 | **Major** (`v1.x` → `v2.0.0`) | Everything a minor cannot do — and it must arrive with a new schema identifier, a migration note, and a reader that keeps accepting `v1`. | Silence. A major release that does not say what it broke is a failed release. |
 
@@ -198,6 +199,177 @@ obvious reading is the wrong one:
   retired minors stay checked into `compatibility/kubernetes.yaml` precisely so
   that distinction survives. See
   [`docs/compatibility.md`](compatibility.md#the-three-minors-rule-and-its-one-exception).
+
+## Cutting a release
+
+The section above says what a version *number* promises. This one says what a
+*release* is allowed to be, who cuts it, and what they run — the rules the
+post-v1 maintenance loop
+([`.github/workflows/maintenance.yml`](../.github/workflows/maintenance.yml))
+feeds proposals into.
+
+Nothing here loosens the table above. It answers the question the table does
+not: given a pile of merged commits, which number comes next, and what evidence
+has to exist before the tag is pushed.
+
+### The patch-release rule
+
+**A patch release carries security and reliability fixes, and nothing else.**
+
+`v1.2.3` → `v1.2.4` may contain:
+
+- **Security fixes.** Advisories against a dependency, and vulnerabilities in
+  Admission Lab itself. The handling is [`SECURITY.md`](../SECURITY.md) and
+  [`docs/dependencies.md` § Emergency security updates](dependencies.md#emergency-security-updates);
+  this is the release that ships the result.
+- **Reliability fixes.** A flake, a hang, a leaked cluster, a race, a wrong
+  verdict. Anything the nightly reliability suite exists to find.
+- **Correctness fixes that restore the documented behavior** — including a
+  semantic change classified as the wrong *kind*, which is a bug rather than a
+  policy decision (the table above draws that line).
+- **Dependency updates, documentation, and performance work** that change no
+  observable output.
+- **A recipe pin bump for a recipe that is already certified**, under the
+  evidence rule below.
+
+A patch release may **not** contain:
+
+- **Any change to a versioned surface.** No new configuration field, no new
+  result or manifest field, no new CLI command or flag, no new semantic-change
+  wire literal, no exit code — not even additive ones. Additive is what a
+  *minor* is for. A user upgrading a patch must not have to read anything.
+- **A default severity change**, or any other change to what a correct run
+  reports. The table above already calls a regrade a minor; a patch is the
+  release where that rule is most tempting to break and most damaging to break,
+  because a patch is what people apply without reading.
+- **A Kubernetes support-window move.** That is a minor, always.
+- **A new recipe**, or a first certification of an existing recipe against a
+  Kubernetes minor it was not certified against before.
+
+**Certified pins may bump in a patch, but only with re-certification
+evidence.** This is the one clause where a patch touches
+`compatibility/recipes.yaml`, and it is narrow on purpose:
+
+1. The recipe is already certified, and the bump moves its pinned chart version
+   within the same set of Kubernetes versions its rows already claim.
+2. The recipe certification matrix has actually run on the new pin — Tier 3
+   (`weeklyRelease`), which is every certified row — and the release PR names
+   that run. A green run is the evidence; the version existing upstream is not.
+   `compatibility/recipes.yaml`'s own header sets this standard: "every row
+   below has actually been installed and verified by a test in this
+   repository."
+3. The new entry is **appended**. That file's append-don't-mutate rule holds in
+   a patch exactly as it does anywhere else, so the release that bumped a pin
+   stays readable a year later.
+4. If the recipe pairs a vendored Gateway API bundle, that bundle's version is
+   **re-derived from the new release's own `go.mod`**, never bumped
+   independently — both `gateway-api-crds` components say so in their headers.
+   A re-derivation that lands on a different bundle is still a patch; a bundle
+   bumped on its own is not a change this project makes at all.
+
+The weekly issue that
+[`.github/workflows/maintenance.yml`](../.github/workflows/maintenance.yml)
+opens when an upstream ships a new chart is a *prompt* for that work, never a
+substitute for it. **A version existing upstream certifies nothing.**
+
+### The minor-release rule
+
+**A minor release carries backward-compatible additions, under the frozen `v1`
+rules.**
+
+`v1.2.x` → `v1.3.0` may contain everything a patch may, plus:
+
+- **Additive schema fields** — optional configuration, result, and manifest
+  fields, under clause 1 of [the stable-schema rule](#the-three-document-schemas):
+  an old reader ignores them and keeps working. The `apiVersion` /
+  `schemaVersion` identifiers do **not** move; they are versioned
+  independently of the release and stay at `v1`.
+- **New optional CLI flags and new commands.** Never a rename, never a removal,
+  never a changed default that changes a verdict.
+- **New semantic-change kinds**, with new wire literals — and the changelog
+  entry the table above requires, because a previously silent difference now
+  appears in reports.
+- **A default severity change**, named in the changelog.
+- **New certified recipes, and new certified Kubernetes rows for existing
+  recipes** — a recipe certified where it was not certified before. Each row
+  carries the tier that runs it and is proven by a real run, exactly like every
+  row already there.
+- **A Kubernetes support-window move.** Adding `1.38` and retiring `1.35` is a
+  minor. The retired minor stays checked in as `supported: false` so a request
+  for it is refused with *"no longer supported"* rather than *"never heard of
+  it"*, and the changelog names both halves.
+- **A deprecation announcement**, under [the deprecation
+  policy](#deprecation-policy).
+
+A minor release may **not** contain a rename, a removal, a meaning change, or
+an exit-code reassignment. Those are `v2`, with a new schema identifier and a
+migration note.
+
+Two clarifications of the certified-matrix rows, because the boundary between
+patch and minor runs straight through that file:
+
+| Change to `compatibility/recipes.yaml` | Release |
+| --- | --- |
+| A newer chart pin for a recipe already certified on those Kubernetes versions | **Patch**, with the certification run named |
+| A recipe certified against a Kubernetes version it was not certified against before | **Minor** |
+| A new recipe | **Minor** |
+| A row's `tier` changed (schedule only, no new claim) | **Patch** |
+| A row dropped because its upstream is archived or its schedule stopped earning its cost | **Minor**, named in the changelog; not a deprecation |
+
+### Who cuts a release
+
+**The operator.** Admission Lab is a community-maintained project with no
+release engineer and no automated publish: a release is a human decision by
+someone with push access to a protected tag and the ability to publish a draft
+GitHub Release.
+
+Two consequences worth stating, because both are places automation stops on
+purpose:
+
+- **Nothing is published until a person publishes it.**
+  [`.github/workflows/release.yml`](../.github/workflows/release.yml) attaches
+  every artifact to a **draft** release. Nothing it produces is public until a
+  maintainer reviews the assets and clicks publish.
+- **Nothing merges itself.** The maintenance loop opens pull requests and
+  issues; it has no auto-merge, and a Kubernetes support-window proposal it
+  writes is explicitly a starting point rather than a mergeable change —
+  the prose in `compatibility/kubernetes.yaml` that explains each entry is
+  something only a person writes.
+
+### The mechanical steps
+
+1. **Decide the number** by the rules above, and make sure `CHANGELOG.md` says
+   what changed — including which Kubernetes minors are supported and which
+   recipe versions are certified, if either moved.
+2. **Run the release checklist.**
+   [`docs/release-checklist.md`](release-checklist.md) is the gate: its
+   prerequisite gates, its rows, and the sign-offs only an operator can give.
+3. **Rehearse the packaging locally.** `./scripts/verify-release.sh` runs the
+   buildable half of the release workflow on one host with no tag — same
+   `--locked` build, same tarball layout, same pinned SBOM generator, same
+   checksum file, same smoke test.
+4. **Bump the version** in the workspace manifests and `Cargo.lock`, and commit
+   it as its own commit.
+5. **Tag it.** A signed, protected `vX.Y.Z` tag on `main`. Pushing that tag is
+   the only thing that starts the release workflow; nothing in it can run
+   outside a tag push.
+6. **Watch the workflow.** It builds the four supported targets, smoke-tests
+   each packaged archive on the runner that produced it, generates the SPDX
+   SBOM, checksums all five artifacts, signs `SHA256SUMS` with a keyless
+   Sigstore certificate, and attaches the set to a draft release.
+7. **Verify the published artifacts as a downloader would**, from
+   [`docs/install.md`](install.md): check `SHA256SUMS`, verify the signature
+   with `cosign verify-blob` against the workflow identity, unpack, and run
+   `admissionlab --version`. Verifying the thing you published, rather than the
+   binary in your workspace, is the point of the step.
+8. **Run one smoke lab from the published binary** — not the workspace one —
+   and confirm the GitHub Action install path resolves the new version.
+9. **Publish the draft**, and announce only what the release metadata actually
+   certifies.
+
+The nightly reliability suite and the recipe certification matrix keep running
+on `main` throughout, on their own schedules and with no release coupling —
+that is what makes "the latest `v1.x`" a defensible answer to a bug report.
 
 ## What is deliberately not promised
 
@@ -284,3 +456,9 @@ and what response to expect — is [`SECURITY.md`](../SECURITY.md).
 - [`CHANGELOG.md`](../CHANGELOG.md) — what each release actually changed.
 - [`SECURITY.md`](../SECURITY.md) — the security reporting channel and the
   supported release lines for security fixes.
+- [`docs/release-checklist.md`](release-checklist.md) — the gate every release
+  passes, and the sign-offs only an operator can give.
+- [`docs/install.md`](install.md) — the downloader's side of a release:
+  checksum, signature, unpack, PATH.
+- [`docs/dependencies.md`](dependencies.md) — the monthly dependency sweep and
+  the advisory-driven path, which is where most patch releases start.

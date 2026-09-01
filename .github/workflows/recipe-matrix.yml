@@ -69,6 +69,26 @@
 # a certification workflow that quietly deleted someone else's jobs would
 # be the harder change to review.
 #
+# # Certification keeps running after v1.0.0 (ROADMAP Task 10.5 step 1)
+#
+# Confirmed rather than changed, and the confirmation is the point:
+# nothing in this workflow is coupled to the release. The `push` filter
+# below names `main` — the branch v1.0.0 was cut from and the branch
+# fixes keep landing on — and the other four ways in (`pull_request`, a
+# weekly `schedule`, `workflow_dispatch`, `workflow_call` from
+# `.github/workflows/nightly.yml`) carry no ref, tag, or version
+# condition at all. A scheduled run always runs on the default branch,
+# so Tier 3 continues to certify `main` weekly with no edit here.
+#
+# What DOES move after v1 is the content of the matrix: a Kubernetes
+# minor reaching EOL, or a certified chart shipping a new version. Both
+# are edits to `compatibility/*.yaml`, which this workflow generates
+# from rather than hardcodes, and both arrive as a reviewed pull request
+# or issue opened by `.github/workflows/maintenance.yml`. A new chart
+# version is never certified because it exists; it is certified when
+# this workflow has installed it on every Kubernetes version the row
+# claims.
+#
 # # actionlint
 #
 # `actionlint` is not available in this environment, so this file was

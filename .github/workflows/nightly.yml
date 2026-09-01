@@ -197,12 +197,36 @@ name: Nightly reliability
 # budget that reports weekly finds a flake up to seven days after the
 # commit that introduced it, which is exactly when the bisect is
 # hardest. Nightly runner time is the cheaper of the two costs.
+#
+# # This suite keeps running after v1.0.0 (ROADMAP Task 10.5 step 1)
+#
+# Confirmed rather than changed, and worth writing down because the
+# confirmation is the deliverable: nothing in this workflow was ever
+# coupled to the release. The triggers below are a daily `schedule` and
+# `workflow_dispatch`, and a scheduled workflow always runs on the
+# repository's DEFAULT branch — so `main` after v1.0.0 is exactly what
+# `main` was during the release candidate, with no branch filter to
+# retarget and no `if:` anywhere in this file testing a ref, a tag, or a
+# version. `recipe-certification` inherits the same property: it is a
+# `workflow_call` into `.github/workflows/recipe-matrix.yml`, whose own
+# triggers are `push` to `main`, a weekly `schedule` and
+# `workflow_dispatch`.
+#
+# The pins this suite runs against DO move after v1 — a Kubernetes minor
+# reaching EOL, a certified chart shipping a new version — and neither
+# is a change to this file. Both arrive as a reviewed pull request or
+# issue from `.github/workflows/maintenance.yml`, which is where the
+# post-v1 loop lives; this file is the part that must simply keep
+# running, and does.
 
 on:
   schedule:
     # 03:17 UTC. Off the hour deliberately: GitHub queues scheduled
     # workflows across all of GitHub at once, and the top of the hour is
     # the most contended slot there is.
+    #
+    # Daily and unconditional: no start date, no end date, and no
+    # release gate (Task 10.5 step 1).
     - cron: "17 3 * * *"
   workflow_dispatch:
 
