@@ -120,7 +120,7 @@ pub use model::{
 };
 pub use redact::{
     DEFAULT_ENV_NAME_PATTERNS, REDACTED, REDACTED_PRIVATE_KEY, RedactionRules,
-    SENSITIVE_HEADER_NAMES, redact_result,
+    SENSITIVE_FIELD_NAMES, SENSITIVE_HEADER_NAMES, redact_result,
 };
 pub use schema::result_v1_json_schema;
 pub use terminal::{TerminalOptions, render_terminal};

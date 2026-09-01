@@ -22,14 +22,22 @@
 //!    operation -- so a Secret nested inside a `List`'s `items`, or
 //!    inside a patch that adds one, is caught the same way a top-level
 //!    one is.
-//! 2. **Sensitive headers.** In *every* string the result carries --
-//!    diagnostic messages, rejection messages, API-server warnings,
-//!    divergence explanations -- an `Authorization:`, `Cookie:`,
-//!    `Set-Cookie:`, `Proxy-Authorization:`, `X-Auth-Token:`, or
-//!    `X-Api-Key:` header has its value replaced through end of line.
-//!    The same names are also matched as *object keys*: a captured
-//!    header map is structure, not text, and the string walker alone
-//!    would never see `{"authorization": "Bearer ..."}` as a header.
+//! 2. **Sensitive headers and credential fields.** In *every* string the
+//!    result carries -- diagnostic messages, rejection messages,
+//!    API-server warnings, divergence explanations -- an
+//!    `Authorization:`, `Cookie:`, `Set-Cookie:`, `Proxy-Authorization:`,
+//!    `X-Auth-Token:`, or `X-Api-Key:` header
+//!    ([`SENSITIVE_HEADER_NAMES`]) has its value replaced through end of
+//!    line, and so does a `client-key-data:`, `token:`, `id-token:`,
+//!    `refresh-token:`, `access-token:`, or `password:` line
+//!    ([`SENSITIVE_FIELD_NAMES`]) -- the shape a kubeconfig, a
+//!    `client.authentication.k8s.io` credential, or a quoted YAML
+//!    fragment has when it reaches a report through someone's log line.
+//!    Every name in both lists is also matched as an *object key*: a
+//!    captured header map, and a kubeconfig parsed into a payload, are
+//!    structure rather than text, and the string walker alone would never
+//!    see `{"authorization": "Bearer ..."}` or
+//!    `{"client-key-data": "LS0tLS1CRUdJTi..."}` as one.
 //! 3. **Private keys and configured pointers.** A PEM block whose label
 //!    contains `PRIVATE KEY` is replaced, marker to marker, with
 //!    [`REDACTED_PRIVATE_KEY`]. Separately, each RFC 6901 pointer in
@@ -165,6 +173,15 @@ pub const REDACTED_PRIVATE_KEY: &str = "[REDACTED PRIVATE KEY]";
 /// way to *remove* one, because narrowing redaction is not a knob this
 /// tool offers.
 pub const DEFAULT_ENV_NAME_PATTERNS: &[&str] = &[
+    // `pass` subsumes the three entries after it. They are kept anyway:
+    // this list is read as documentation of what is redacted at least as
+    // often as it is executed, and "password" stated explicitly is worth
+    // more to that reader than one saved substring test. `pass` is what
+    // catches the shapes the longer words miss -- `DB_PASS`,
+    // `SMTP_PASS_FILE` -- and it is the same deliberate
+    // over-approximation the paragraph above defends: it also matches
+    // `BYPASS_CACHE`.
+    "pass",
     "password",
     "passwd",
     "pwd",
@@ -195,6 +212,44 @@ pub const SENSITIVE_HEADER_NAMES: &[&str] = &[
     "set-cookie",
     "x-auth-token",
     "x-api-key",
+];
+
+/// The non-header field names rule 2 recognizes, in the same two
+/// positions and with the same matching as [`SENSITIVE_HEADER_NAMES`].
+///
+/// These are the credential fields of a **kubeconfig** and of the
+/// `client.authentication.k8s.io` credential a `user.exec` block yields
+/// -- the material Global Constraint 5 says never enters the lab and
+/// Global Constraint 14 says never leaves it in a report. A kubeconfig
+/// reaches a report only through someone else's text (a controller
+/// quoting one into an error, an installer's captured output arriving in
+/// a diagnostic, a webhook echoing its own service account's token), so
+/// it arrives either as a YAML line or as a parsed object -- which is
+/// exactly the two positions rule 2 already matches.
+///
+/// Only the *secret* half of a kubeconfig is listed.
+/// `certificate-authority-data` and `client-certificate-data` are
+/// deliberately absent for the same reason [`redact_private_keys`] leaves
+/// a `CERTIFICATE` block alone: a certificate is public material a reader
+/// may need, and blanking it removes evidence for no benefit.
+///
+/// `token` and `password` are the two entries that over-approximate --
+/// they match a `token:` or `password:` line in any prose, not only in a
+/// kubeconfig. That is the same asymmetry [`DEFAULT_ENV_NAME_PATTERNS`]
+/// documents: the cost is one line of a message reading
+/// `token: [REDACTED]` when the value was "expired", and the benefit is
+/// that a bearer token quoted into a controller's error message does not
+/// reach a pull request. Note that `id-token` and `refresh-token` are
+/// listed separately rather than left to the `token` entry, exactly as
+/// `set-cookie` is listed separately from `cookie`: text matching
+/// requires a word boundary before the name, and `-` is not one.
+pub const SENSITIVE_FIELD_NAMES: &[&str] = &[
+    "client-key-data",
+    "token",
+    "id-token",
+    "refresh-token",
+    "access-token",
+    "password",
 ];
 
 /// What a run's redaction pass should do beyond its built-in rules.
@@ -544,7 +599,7 @@ fn redact_probe(probe: &HttpProbeResult) -> HttpProbeResult {
             .response_headers
             .iter()
             .map(|(name, value)| {
-                let redacted = if is_sensitive_header_name(name) {
+                let redacted = if is_sensitive_name(name) {
                     REDACTED.to_owned()
                 } else {
                     redact_string(value)
@@ -911,8 +966,8 @@ fn redact_object(fields: &Map<String, Value>, context: &Context<'_>) -> Map<Stri
         // object-key form (a captured header map's value) blank the same
         // way; they are two separate reasons for one replacement, so
         // they share an arm rather than being written twice.
-        let blank_entry = (is_credential_env && key == "value")
-            || (entry.is_string() && is_sensitive_header_name(key));
+        let blank_entry =
+            (is_credential_env && key == "value") || (entry.is_string() && is_sensitive_name(key));
         let value = if is_secret && (key == "data" || key == "stringData") {
             redact_secret_payload(entry)
         } else if blank_entry {
@@ -951,30 +1006,45 @@ fn matches_credential_pattern(name: &str, patterns: &[String]) -> bool {
     patterns.iter().any(|pattern| lowered.contains(pattern))
 }
 
-/// Whether `key` is one of [`SENSITIVE_HEADER_NAMES`], compared
-/// case-insensitively and for equality.
-///
-/// Equality rather than substring: a map key is a whole header name, and
-/// a substring test here would blank an unrelated field named
-/// `authorizationMode`.
-fn is_sensitive_header_name(key: &str) -> bool {
-    let lowered = key.to_ascii_lowercase();
+/// Every name rule 2 recognizes: the headers and the kubeconfig
+/// credential fields, in one iterator so the two positions the rule
+/// matches in (text and object key) can never disagree about the list.
+fn sensitive_names() -> impl Iterator<Item = &'static &'static str> {
     SENSITIVE_HEADER_NAMES
         .iter()
-        .any(|header| *header == lowered)
+        .chain(SENSITIVE_FIELD_NAMES.iter())
 }
 
-/// Applies both string rules: header values, then private-key blocks.
+/// Whether `key` is one of [`SENSITIVE_HEADER_NAMES`] or
+/// [`SENSITIVE_FIELD_NAMES`], compared case-insensitively and for
+/// equality.
 ///
-/// Order does not matter (a PEM block contains no header line and a
-/// header value contains no PEM marker), but it is fixed for
-/// determinism.
+/// Equality rather than substring: a map key is a whole name, and a
+/// substring test here would blank an unrelated field named
+/// `authorizationMode` or `tokenReviewEnabled`.
+fn is_sensitive_name(key: &str) -> bool {
+    let lowered = key.to_ascii_lowercase();
+    sensitive_names().any(|name| **name == lowered)
+}
+
+/// Applies both string rules: header/field values, then private-key
+/// blocks.
+///
+/// Order matters in exactly one case, and this is the right one:
+/// a kubeconfig's `client-key-data` is base64 DER, which carries no PEM
+/// marker, but a PEM private key pasted onto a `client-key-data:` line
+/// would be caught by either pass. Running the line rule first means such
+/// a line is blanked to end of line as a whole rather than leaving a
+/// `client-key-data: [REDACTED PRIVATE KEY]` that still says which field
+/// held it -- and a multi-line PEM block that merely *follows* an
+/// unrelated header line is still caught by the second pass, because the
+/// first stops at the newline.
 fn redact_string(text: &str) -> String {
     redact_private_keys(&redact_headers(text))
 }
 
-/// Replaces the value of every recognized header, from after the colon
-/// through end of line.
+/// Replaces the value of every recognized header or credential field,
+/// from after the colon through end of line.
 ///
 /// Matching is done on an ASCII-lowercased copy of `text`.
 /// [`str::to_ascii_lowercase`] changes only ASCII bytes, so every byte
@@ -1001,21 +1071,22 @@ fn redact_headers(text: &str) -> String {
     out
 }
 
-/// Finds the start of the earliest recognized header's value at or after
-/// `from` in an already-lowercased string.
+/// Finds the start of the earliest recognized header's or credential
+/// field's value at or after `from` in an already-lowercased string.
 ///
 /// A name matches only at a word boundary -- start of string, or
 /// preceded by something that is not an ASCII alphanumeric, `-`, or `_`.
 /// That is what stops `cookie` from matching inside `set-cookie` (which
-/// is listed on its own) and `x-authorization-mode` from being read as
-/// an `authorization` header.
+/// is listed on its own), `token` from matching inside `id-token` (also
+/// listed on its own), and `x-authorization-mode` from being read as an
+/// `authorization` header.
 fn next_header_value_start(lowered: &str, from: usize) -> Option<usize> {
     let bytes = lowered.as_bytes();
     let mut best: Option<usize> = None;
 
-    for header in SENSITIVE_HEADER_NAMES {
+    for header in sensitive_names() {
         let mut search = from;
-        while let Some(offset) = lowered[search..].find(header) {
+        while let Some(offset) = lowered[search..].find(*header) {
             let start = search + offset;
             search = start + 1;
 
@@ -1102,3 +1173,4 @@ fn redact_private_keys(text: &str) -> String {
     out.push_str(&text[cursor..]);
     out
 }
+

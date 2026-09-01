@@ -40,6 +40,71 @@
 //! duplicate "request received" event Kubernetes would otherwise emit
 //! alongside every rule's own stage, halving audit volume without
 //! losing any information (brief Step 2).
+//!
+//! # What a body-level event can and cannot contain (ROADMAP Task 9.3)
+//!
+//! `tests/audit_policy_security.rs` walks these four rules the way
+//! kube-apiserver does — first match wins — and resolves the level every
+//! interesting request would be recorded at. Four properties come out of
+//! that walk, and each is pinned by a test there rather than only stated
+//! here:
+//!
+//! 1. **No `secrets` request is recorded at all**, at any verb, because
+//!    rule 1 precedes rule 3. This is the standing unit proof behind what
+//!    the Phase 3 exit gate observed once on a real cluster.
+//! 2. **No rule anywhere is `RequestResponse`**, so no *response* body is
+//!    ever written to the log. That is what makes `serviceaccounts/token`
+//!    safe: a `TokenRequest` create is matched by rule 3 (the core group
+//!    with no resource filter matches subresources too), but a `Request`
+//!    -level event records only the submitted body — audiences and an
+//!    expiry — while the minted bearer token exists only in the response.
+//!    A single rule promoted to `RequestResponse` would turn every
+//!    `serviceaccounts/token` call in the cluster into a logged
+//!    credential.
+//! 3. **[`ADMISSION_RELEVANT_GROUPS`] is an allow-list, and that is
+//!    load-bearing.** `authentication.k8s.io` is absent from it, so a
+//!    `TokenReview` — whose *request* body is a bearer token, in plain
+//!    text, submitted by whichever component is authenticating it —
+//!    falls through to rule 4 and is recorded at `Metadata`. Adding that
+//!    group to this list to "cover more admission surface" would start
+//!    logging bearer tokens. Do not.
+//! 4. **`configmaps` bodies *are* recorded at `Request`**, and that is a
+//!    deliberate, documented stance rather than an oversight — see the
+//!    next section.
+//!
+//! # `ConfigMap` bodies are logged at `Request`, on purpose
+//!
+//! A `ConfigMap` can carry a credential; Kubernetes does not stop
+//! anyone from putting one there. Rule 3 matches the whole core group,
+//! so a fixture's `ConfigMap` body lands in the per-run audit log.
+//!
+//! Excluding them was considered and rejected, because a `ConfigMap` is
+//! an *admission-relevant workload input* here in a way a Secret is not:
+//! `examples/admission-basic/fixtures/configmap-settings.yaml` is the
+//! control fixture of the shipped example, `fixtures/` and
+//! `testdata/manifests/discovery/` use them as ordinary fixture objects,
+//! and policy engines routinely mutate them. Demoting them to `Metadata`
+//! would drop the `patch.webhook.admission.k8s.io/*` annotations for
+//! exactly those fixtures — Kubernetes attaches a patch annotation only
+//! at `Request` or higher (Global Constraint 18) — which is the evidence
+//! this tool exists to collect. The trade is: a fixture `ConfigMap`'s
+//! body is visible in the run's own audit log, and a Secret's is not.
+//!
+//! The mitigation is the one PRODUCT.md §29.3 already states and
+//! `docs/security.md` repeats: fixtures are files the operator wrote, and
+//! a credential does not belong in one. Put it in a Secret, which this
+//! policy never records.
+//!
+//! # One known boundary
+//!
+//! Rule 1 names the resource `secrets`, and a Kubernetes audit policy
+//! matches a *subresource* only through an explicit `resource/subresource`
+//! (or `*/subresource`) entry. Core Secrets have no subresources today,
+//! so there is nothing to miss; if Kubernetes ever adds one, rule 1 would
+//! not cover it and rule 3 would record it at `Request`. That boundary is
+//! asserted rather than merely noted — see
+//! `a_hypothetical_secret_subresource_is_not_covered_by_rule_one` — so
+//! the day it stops being hypothetical, a test says so.
 
 use serde::Serialize;
 
