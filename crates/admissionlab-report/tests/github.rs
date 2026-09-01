@@ -24,12 +24,19 @@ use support::canonical_result;
 
 /// The exact job summary for [`canonical_result`].
 ///
+/// Includes the Ingress-to-Gateway migration section (ROADMAP Task 8.8),
+/// which is the one section this renderer could not skip: a migration
+/// finding is not in `policy.changes` and not counted in the bucket
+/// table, so a run whose only regression is a migration one would
+/// otherwise render **FAIL** above five zeroes and two empty findings
+/// tables.
+///
 /// Covers the verdict with its exit-code meaning, the run identity line,
 /// all five bucket counts plus the total, a critical finding with its
 /// subject, kind, object path and `observed` divergence including both
 /// webhook sides, the Gateway traffic findings in the warnings section,
 /// and the artifact pointers.
-const GOLDEN: &str = r"## Admission Lab: FAIL
+const GOLDEN: &str = r#"## Admission Lab: FAIL
 
 At least one unexpected critical difference. `admissionlab test` exits 1.
 
@@ -59,6 +66,15 @@ Run beta-demo-run — result schema admissionlab.io/result/v1beta1 (frozen; addi
 | echo-route-contract | echo-route | traffic\_status\_changed | baseline HTTP 200 from echo-v1 -&gt; candidate HTTP 503 from echo-v1 |
 | echo-route-contract | echo-route | traffic\_status\_changed | baseline HTTP 204 from echo-v1 -&gt; candidate answered nothing |
 
+### Ingress-to-Gateway migration
+
+| Case | Severity | Behavior | Declared | What was observed |
+| --- | --- | --- | --- | --- |
+| legacy-echo | critical | `backend\_changed` | not declared | probe 1 (GET http://migrate.ingress.admissionlab.test/legacy/reports): the Ingress reached backend "echo-b" and the Gateway reached "echo-a" |
+| legacy-echo | info | `non\_portable\_feature` | expected | nginx.ingress.kubernetes.io/limit-rps on Ingress admissionlab-migration-demo/echo-ingress has no portable Gateway API equivalent: per-client request rate limiti… |
+
+Migration findings are counted here rather than in the bucket table above: they are a separate change vocabulary from the semantic changes a fixture carries, and they reach the verdict directly.
+
 ### Full evidence
 
 This summary lists at most 10 findings per severity and carries no webhook traces, patches, or object bodies. Everything is in the artifacts uploaded with this workflow run:
@@ -66,7 +82,7 @@ This summary lists at most 10 findings per severity and carries no webhook trace
 - `result.json` — the machine-readable result: every fixture, every graded change, and both sides' captured admission outcomes.
 - `report.html` — the standalone report page: per-fixture drill-down with the full webhook trace and every patch.
 - run manifest — what this run actually ran (tool versions, images, and configuration digests), for reproducing it.
-";
+"#;
 
 #[test]
 fn the_canonical_summary_matches_the_golden() {
@@ -151,9 +167,11 @@ fn a_pipe_in_a_webhook_name_cannot_break_the_table() {
         "the pipe must survive as literal text; summary was:\n{rendered}"
     );
     assert!(
-        widths.iter().all(|width| *width == 2 || *width == 4),
+        widths
+            .iter()
+            .all(|width| *width == 2 || *width == 4 || *width == 5),
         "every row must keep its declared cell count (2 for the bucket table, 4 for a finding \
-         table); widths were {widths:?} in:\n{rendered}"
+         table, 5 for a migration row); widths were {widths:?} in:\n{rendered}"
     );
 }
 

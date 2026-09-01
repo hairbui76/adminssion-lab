@@ -107,7 +107,7 @@ use admissionlab_policy::{ClassifiedChange, PolicyDisposition, Severity};
 
 use crate::error::ReportError;
 use crate::json::write_atomic;
-use crate::model::{FixtureComparison, LabResult, RunSummary};
+use crate::model::{FixtureComparison, GradedMigrationChange, LabResult, RunSummary};
 
 /// How many findings each of the two tables lists before it stops and
 /// says how many it did not.
@@ -189,6 +189,7 @@ pub fn render_github_summary(result: &LabResult) -> String {
         "Warnings",
         "warning",
     );
+    render_migration(&mut out, result);
     render_artifacts(&mut out);
 
     out
@@ -255,6 +256,98 @@ fn truncate(text: &str) -> String {
         out.push('…');
     }
     out
+}
+
+/// Every Ingress-to-Gateway migration finding, as a compact table
+/// (ROADMAP Task 8.8).
+///
+/// Omitted entirely for a lab with no `migration:` section.
+///
+/// # Why this renderer, of all of them, could not skip the section
+///
+/// This file is the one view that deliberately shows *less* than
+/// everything, and the section it summarizes is the one that would leave
+/// a reader with nothing at all. A migration finding is not an
+/// `admissionlab_diff::SemanticChange`, so it is not in
+/// `policy.changes`, so [`render_findings`] cannot see it -- and it is
+/// not a fixture, so [`render_summary`]'s five buckets do not count it.
+/// A run whose *only* regression is a migration one therefore renders
+/// **FAIL** above a bucket table of all zeroes and two empty findings
+/// sections. Without this section, the summary a reviewer reads in a
+/// pull request would state a verdict and then silently withhold its
+/// entire justification.
+///
+/// Capped exactly as the findings tables are: at most
+/// [`MAX_LISTED_FINDINGS`] rows, each cell at most [`MAX_CELL_CHARS`]
+/// characters, with the remainder counted rather than dropped silently
+/// -- so this section's contribution to [`SUMMARY_BYTE_BUDGET`] is
+/// bounded by the same arithmetic.
+fn render_migration(out: &mut String, result: &LabResult) {
+    let Some(cases) = &result.migration else {
+        return;
+    };
+    let _ = writeln!(out, "### Ingress-to-Gateway migration\n");
+
+    let rows: Vec<(&str, &GradedMigrationChange)> = cases
+        .iter()
+        .flat_map(|case| {
+            case.changes
+                .iter()
+                .map(move |graded| (case.case_id.as_str(), graded))
+        })
+        .collect();
+    if rows.is_empty() {
+        let _ = writeln!(
+            out,
+            "{count} case(s) compared; no behavioral difference was observed.\n",
+            count = cases.len(),
+        );
+        return;
+    }
+
+    let _ = writeln!(
+        out,
+        "| Case | Severity | Behavior | Declared | What was observed |"
+    );
+    let _ = writeln!(out, "| --- | --- | --- | --- | --- |");
+    for (case_id, graded) in rows.iter().take(MAX_LISTED_FINDINGS) {
+        let _ = writeln!(
+            out,
+            "| {case} | {severity} | `{kind}` | {declared} | {detail} |",
+            case = cell(case_id),
+            severity = match graded.severity {
+                Severity::Critical => "critical",
+                Severity::Warning => "warning",
+                Severity::Info => "info",
+            },
+            kind = cell(graded.change.kind.as_str()),
+            declared = if graded.change.expected {
+                "expected"
+            } else {
+                "not declared"
+            },
+            detail = cell(&graded.change.detail),
+        );
+    }
+    out.push('\n');
+    if rows.len() > MAX_LISTED_FINDINGS {
+        let _ = writeln!(
+            out,
+            "{more} further migration finding(s) are in `result.json` and `report.html`.\n",
+            more = rows.len() - MAX_LISTED_FINDINGS,
+        );
+    }
+
+    // Stated because it is genuinely surprising in the other direction
+    // from `warn` exiting 0: a `fail` verdict whose bucket table is all
+    // zeroes is correct, and a reader has to be told why rather than
+    // left to conclude the counts are broken.
+    let _ = writeln!(
+        out,
+        "Migration findings are counted here rather than in the bucket table above: they are a \
+         separate change vocabulary from the semantic changes a fixture carries, and they reach \
+         the verdict directly.\n"
+    );
 }
 
 /// Fixtures keyed by identifier, for the divergence fallback each
